@@ -131,6 +131,24 @@ fn vopc_gfx10_compare_table() {
         (0xef, "v_cmp_tru_f16", false),
         (0xf8, "v_cmpx_u_f16", true),
         (0xff, "v_cmpx_tru_f16", true),
+        (0x89, "v_cmp_lt_i16", false),
+        (0x8e, "v_cmp_ge_i16", false),
+        (0x8f, "v_cmp_class_f16", false),
+        (0x99, "v_cmpx_lt_i16", true),
+        (0x9e, "v_cmpx_ge_i16", true),
+        (0x9f, "v_cmpx_class_f16", true),
+        (0xa0, "v_cmp_f_i64", false),
+        (0xa7, "v_cmp_t_i64", false),
+        (0xa9, "v_cmp_lt_u16", false),
+        (0xae, "v_cmp_ge_u16", false),
+        (0xb0, "v_cmpx_f_i64", true),
+        (0xb7, "v_cmpx_t_i64", true),
+        (0xb9, "v_cmpx_lt_u16", true),
+        (0xbe, "v_cmpx_ge_u16", true),
+        (0xe0, "v_cmp_f_u64", false),
+        (0xe5, "v_cmp_ne_u64", false),
+        (0xf0, "v_cmpx_f_u64", true),
+        (0xf7, "v_cmpx_t_u64", true),
     ];
     for &(op, name, x) in cases {
         let (m, d) = mnemonic(&[vopc(op, v(1), 2)]);
@@ -160,6 +178,11 @@ fn cmpx_writes_exec_only() {
         ("v_cmpx_gt_f16", vec![vopc(0xdc, v(1), 2)], vec!["(f16tof32((v1) & 0xffffu) > f16tof32((v2) & 0xffffu))"]),
         ("v_cmpx_nlt_f16", vec![vopc(0xfe, v(1), 2)], vec!["(!(f16tof32((v1) & 0xffffu) < f16tof32((v2) & 0xffffu)))"]),
         ("v_cmpx_gt_f32 vop3 abs/neg", vop3(0x14, 0, [v(1), v(2), 0], 1, 2).to_vec(), vec!["(abs(asfloat(v1)) > (-asfloat(v2)))"]),
+        ("v_cmpx_lt_i16", vec![vopc(0x99, v(1), 2)], vec!["((asint(((v1) & 0xffffu) << 16) >> 16) < (asint(((v2) & 0xffffu) << 16) >> 16))"]),
+        ("v_cmpx_ge_u16", vec![vopc(0xbe, v(1), 2)], vec!["(((v1) & 0xffffu) >= ((v2) & 0xffffu))"]),
+        ("v_cmpx_lt_i64", vec![vopc(0xb1, v(1), 4)], vec!["((asint(v2) < asint(v5)) || ((v2 == v5) && (v1 < v4)))"]),
+        ("v_cmpx_ne_u64", vec![vopc(0xf5, v(1), 4)], vec!["((v2 != v5) || (v1 != v4))"]),
+        ("v_cmpx_class_f16", vec![vopc(0x9f, v(1), 2)], vec!["tb_cmp_class16(((v1) & 0xffffu), v2)"]),
     ];
     for (label, body, expect) in cases {
         let mut b = body.clone();
@@ -178,6 +201,9 @@ fn vop3_compare_applies_source_modifiers() {
     check("v_cmp_lg_f32", &program(&b), None, &["((asfloat(v1) < asfloat(v2)) || (asfloat(v1) > asfloat(v2)))"]);
     let b = [vopc(0x85, v(1), 2), vop1(1, 0, v(3))];
     check("v_cmp_ne_i32", &program(&b), None, &["(asint(v1) != asint(v2))"]);
+    let b = vop3(0xa1, 106, [v(1), v(4), 0], 1, 0);
+    let err = translate(&shader(&program(&[b[0], b[1], vop1(1, 0, v(3))]), None)).err().unwrap_or_default();
+    assert!(err.contains("abs/neg on an integer compare"), "v_cmp_lt_i64 abs must be refused: {err}");
 }
 
 #[test]

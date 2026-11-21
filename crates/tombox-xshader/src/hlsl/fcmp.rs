@@ -42,3 +42,13 @@ pub(super) fn cond(cc: &str, x: &str, y: &str, nan: &str) -> Result<String, Stri
 pub(super) fn either(ty: &str, a: &Opnd, b: &Opnd) -> Result<String, String> {
     Ok(format!("({} || {})", nan(ty, a)?, nan(ty, b)?))
 }
+
+/// Class-test source bits after VOP3 modifiers: abs/neg act on the sign bit of src0; the
+/// class mask (src1) takes none (LLVM VOPC_Class_Profile: Src0Mod only, HasSrc1Mods = 0).
+pub(super) fn class_src(x: String, sign: u32, mods: u8) -> Result<String, String> {
+    if mods & 0x36 != 0 {
+        return Err("class compare: modifier on the class-mask operand".into());
+    }
+    let x = if mods & 1 != 0 { format!("(({x}) & {:#x}u)", sign - 1) } else { x };
+    Ok(if mods & 8 != 0 { format!("(({x}) ^ {sign:#x}u)") } else { x })
+}

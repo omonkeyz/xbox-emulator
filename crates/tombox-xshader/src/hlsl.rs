@@ -24,6 +24,7 @@ mod ds_ext;
 mod gds;
 mod mtbuf;
 mod fcmp;
+mod icmp;
 mod rootmem;
 mod mesh;
 mod amp;
@@ -85,6 +86,7 @@ const XYZW: [&str; 4] = ["x", "y", "z", "w"];
 const CUBE_HELPERS: &str = r#"uint tb_perm_byte(uint hi, uint lo, uint sel) { if (sel >= 13u) return 0xffu; if (sel == 12u) return 0u; if (sel == 11u) return (hi >> 31) * 0xffu; if (sel == 10u) return ((hi >> 15) & 1u) * 0xffu; if (sel == 9u) return (lo >> 31) * 0xffu; if (sel == 8u) return ((lo >> 15) & 1u) * 0xffu; return sel >= 4u ? ((hi >> ((sel - 4u) * 8u)) & 0xffu) : ((lo >> (sel * 8u)) & 0xffu); }
 uint tb_perm(uint hi, uint lo, uint sel) { return tb_perm_byte(hi, lo, sel & 0xffu) | (tb_perm_byte(hi, lo, (sel >> 8) & 0xffu) << 8) | (tb_perm_byte(hi, lo, (sel >> 16) & 0xffu) << 16) | (tb_perm_byte(hi, lo, sel >> 24) << 24); }
 bool tb_cmp_class(uint b, uint mask) { uint e = (b >> 23) & 0xffu; uint m = b & 0x7fffffu; bool neg = (b >> 31) != 0u; uint c; if (e == 0xffu) { c = (m != 0u) ? (((m & 0x400000u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }uint tb_bfe_i32(uint a, uint b) { uint o = b & 31u, w = (b >> 16) & 127u; if (w == 0u) return 0u; if (w + o >= 32u) return asuint(asint(a) >> o); return asuint(asint(a << (32u - w - o)) >> (32u - w)); }uint tb_mulhi_u32(uint a, uint b) { uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16; uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1; uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu); return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16); }
+bool tb_cmp_class16(uint b, uint mask) { uint e = (b >> 10) & 0x1fu; uint m = b & 0x3ffu; bool neg = ((b >> 15) & 1u) != 0u; uint c; if (e == 0x1fu) { c = (m != 0u) ? (((m & 0x200u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }
 uint tb_mulhi_i32(uint a, uint b) { uint h = tb_mulhi_u32(a, b); if (asint(a) < 0) h -= b; if (asint(b) < 0) h -= a; return h; }
 float tb_cubema(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return 2.0 * z; if (ay >= ax) return 2.0 * y; return 2.0 * x; }
 float tb_cubesc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return z < 0.0 ? -x : x; if (ay >= ax) return x; return x < 0.0 ? z : -z; }
@@ -467,6 +469,19 @@ fn hi64(o: &Opnd) -> Opnd {
         Opnd::Vgpr(n) => Opnd::Vgpr(n + 1),
         other => hi(other),
     }
+}
+
+/// 16-bit source of a compare as a `uint` holding the half in its low bits. `hi` (VOP3
+/// OPSEL, RDNA2 ISA VOP3A fields: "0 = select low half, 1 = select high half") takes bits
+/// [31:16]; the high half of a constant operand is not modelled.
+fn half16(o: &Opnd, hi: bool) -> Result<String, String> {
+    if !hi {
+        return Ok(format!("(({}) & 0xffffu)", r(o)?));
+    }
+    if matches!(o, Opnd::ConstInt(_) | Opnd::ConstF32(_) | Opnd::Literal(_)) {
+        return Err(format!("op_sel high half of constant {o:?} unsupported"));
+    }
+    Ok(format!("(({}) >> 16)", r(o)?))
 }
 
 fn d64(o: &Opnd) -> Result<String, String> {
@@ -2465,7 +2480,7 @@ impl<'a> Emitter<'a> {
         };
         if let Some(rest) = m.strip_prefix("v_cmpx_").or_else(|| m.strip_prefix("v_cmp_")) {
             let c = if rest == "class_f64" {
-                format!("tb_cmp_class64({}, {}, {})", r(&s[0])?, r(&hi64(&s[0]))?, r(&s[1])?)
+                format!("tb_cmp_class64({}, {}, {})", r(&s[0])?, fcmp::class_src(r(&hi64(&s[0]))?, 0x8000_0000, mods)?, r(&s[1])?)
             } else {
                 let cc = rest.strip_suffix("_f64").ok_or("bad f64 compare")?;
                 let (x, y) = (a(0)?, a(1)?);
@@ -2579,10 +2594,11 @@ impl<'a> Emitter<'a> {
     }
 
     fn cmp_expr(m: &str, a: &Opnd, b: &Opnd) -> Result<String, String> {
-        Self::cmp_expr_mod(m, a, b, 0)
+        Self::cmp_expr_mod(m, a, b, 0, 0)
     }
 
-    fn cmp_expr_mod(m: &str, a: &Opnd, b: &Opnd, mods: u8) -> Result<String, String> {
+    /// `opsel` bit i reads the high half of 16-bit source i (VOP3 OPSEL).
+    fn cmp_expr_mod(m: &str, a: &Opnd, b: &Opnd, mods: u8, opsel: u8) -> Result<String, String> {
         // m like "v_cmp_lt_f32" / "s_cmp_eq_i32"
         let parts: Vec<&str> = m.split('_').collect();
         let (cc, ty) = (parts[2], parts[3]);
@@ -2590,21 +2606,39 @@ impl<'a> Emitter<'a> {
             let e = if (mods >> i) & 1 != 0 { format!("abs({e})") } else { e };
             if (mods >> (3 + i)) & 1 != 0 { format!("(-{e})") } else { e }
         };
+        let hs = |i: u8| (opsel >> i) & 1 != 0;
+        if matches!(ty, "i16" | "u16") && mods != 0 {
+            return Err(format!("{m}: VOP3 abs/neg on an integer compare"));
+        }
+        let int16 = |o: &Opnd, i: u8| -> Result<String, String> {
+            if matches!(o, Opnd::ConstF32(_)) {
+                return Err(format!("{m}: inline float constant in a 16-bit integer compare"));
+            }
+            let x = half16(o, hs(i))?;
+            Ok(if ty == "i16" { format!("(asint({x} << 16) >> 16)") } else { x })
+        };
         let (x, y) = match ty {
             "f32" => (fmod(f(a)?, 0), fmod(f(b)?, 1)),
             "f16" => {
-                let h = |o: &Opnd| -> Result<String, String> {
+                let h = |o: &Opnd, i: u8| -> Result<String, String> {
                     Ok(match o {
-                        Opnd::ConstF32(_) => f(o)?,
-                        _ => format!("f16tof32(({}) & 0xffffu)", r(o)?),
+                        Opnd::ConstF32(_) if !hs(i) => f(o)?,
+                        _ => format!("f16tof32{}", half16(o, hs(i))?),
                     })
                 };
-                (fmod(h(a)?, 0), fmod(h(b)?, 1))
+                (fmod(h(a, 0)?, 0), fmod(h(b, 1)?, 1))
             }
+            "i16" | "u16" => (int16(a, 0)?, int16(b, 1)?),
             "i32" => (format!("asint({})", r(a)?), format!("asint({})", r(b)?)),
             "u32" => (r(a)?, r(b)?),
             other => return Err(format!("compare type {other} unsupported")),
         };
+        if ty == "f16" && opsel & 3 != 0 {
+            let nan = |o: &Opnd, i: u8| -> Result<String, String> {
+                if hs(i) { Ok(format!("(({} & 0x7fffu) > 0x7c00u)", half16(o, true)?)) } else { fcmp::nan("f16", o) }
+            };
+            return fcmp::cond(cc, &x, &y, &format!("({} || {})", nan(a, 0)?, nan(b, 1)?));
+        }
         let float = matches!(ty, "f32" | "f16");
         if float {
             return fcmp::cond(cc, &x, &y, &fcmp::either(ty, a, b)?);
@@ -3603,6 +3637,37 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Per-lane condition of a vector compare; `base` is the mnemonic after `v_cmp_` / `v_cmpx_`.
+    fn vcmp_cond(&mut self, ins: &Insn, base: &str) -> Result<String, String> {
+        let s = &ins.src;
+        let vop3 = ins.enc == Enc::Vop3;
+        let mods = if vop3 { ins.aux.mask } else { 0 };
+        let opsel = if vop3 { ((ins.raw[0] >> 11) & 3) as u8 } else { 0 };
+        if base == "class_f32" {
+            // Floating-point class test against a 10-bit class mask (see tb_cmp_class).
+            return Ok(format!("tb_cmp_class({}, {})", fcmp::class_src(r(&s[0])?, 0x8000_0000, mods)?, r(&s[1])?));
+        }
+        if base == "class_f16" {
+            let x = match &s[0] {
+                Opnd::ConstF32(_) if opsel & 1 == 0 => format!("tb_f2h({})", f(&s[0])?),
+                o => half16(o, opsel & 1 != 0)?,
+            };
+            return Ok(format!("tb_cmp_class16({}, {})", fcmp::class_src(x, 0x8000, mods)?, r(&s[1])?));
+        }
+        if let Some(cc) = base.strip_suffix("_i64").or_else(|| base.strip_suffix("_u64")) {
+            if mods != 0 {
+                return Err(format!("v_cmp_{base}: VOP3 abs/neg on an integer compare"));
+            }
+            let signed = base.ends_with("_i64");
+            for o in &s[..2] {
+                self.touch(o);
+                self.touch(&hi64(o));
+            }
+            return icmp::cond64(cc, signed, icmp::pair(&s[0], signed)?, icmp::pair(&s[1], signed)?);
+        }
+        Self::cmp_expr_mod(&format!("v_cmp_{base}"), &s[0], &s[1], mods, opsel)
+    }
+
     fn emit_dpp(&mut self, ins: &Insn) -> Result<(), String> {
         let code = match ins.src.first() {
             Some(Opnd::Raw(c)) => *c,
@@ -4227,24 +4292,13 @@ impl<'a> Emitter<'a> {
                 }
             };
         }
-        // Compares (VOPC, and VOP3 with a scalar mask destination).
-        let cmp_mods = if ins.enc == Enc::Vop3 { ins.aux.mask } else { 0 };
-        if let Some(base) = m.strip_prefix("v_cmpx_").filter(|_| ins.aux.sdwa.is_none()) {
-            let c = if base == "class_f32" {
-                format!("tb_cmp_class({}, {})", r(&s[0])?, r(&s[1])?)
-            } else {
-                Self::cmp_expr_mod(&format!("v_cmp_{base}"), &s[0], &s[1], cmp_mods)?
-            };
-            self.line(&format!("exec_lo = (((exec_lo & 1u) != 0u) && {c}) ? 1u : 0u;"));
-            return Ok(());
-        }
-        if m.starts_with("v_cmp_") && ins.aux.sdwa.is_none() {
-            let c = if m == "v_cmp_class_f32" {
-                // Floating-point class test against a 10-bit class mask (see tb_cmp_class).
-                format!("tb_cmp_class({}, {})", r(&s[0])?, r(&s[1])?)
-            } else {
-                Self::cmp_expr_mod(&m, &s[0], &s[1], cmp_mods)?
-            };
+        // Compares (VOPC, and VOP3 with a scalar mask destination). GFX10 V_CMPX writes EXEC only.
+        if let Some(base) = m.strip_prefix("v_cmpx_").or_else(|| m.strip_prefix("v_cmp_")).filter(|_| ins.aux.sdwa.is_none()) {
+            let c = self.vcmp_cond(ins, base)?;
+            if m.starts_with("v_cmpx_") {
+                self.line(&format!("exec_lo = (((exec_lo & 1u) != 0u) && {c}) ? 1u : 0u;"));
+                return Ok(());
+            }
             self.ws(&d, &format!("(((exec_lo & 1u) != 0u) && {c}) ? 1u : 0u"))?;
             let dh = hi(&d);
             if !matches!(dh, Opnd::Null | Opnd::ConstInt(_)) {

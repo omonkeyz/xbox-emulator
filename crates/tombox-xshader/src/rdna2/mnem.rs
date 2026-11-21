@@ -105,6 +105,28 @@ pub fn vopc(op: u32) -> Option<&'static str> {
         "v_cmpx_nlg_f64", "v_cmpx_ngt_f64", "v_cmpx_nle_f64", "v_cmpx_neq_f64", "v_cmpx_nlt_f64",
         "v_cmpx_tru_f64",
     ];
+    const I64: [&str; 8] = [
+        "v_cmp_f_i64", "v_cmp_lt_i64", "v_cmp_eq_i64", "v_cmp_le_i64", "v_cmp_gt_i64",
+        "v_cmp_ne_i64", "v_cmp_ge_i64", "v_cmp_t_i64",
+    ];
+    const I64X: [&str; 8] = [
+        "v_cmpx_f_i64", "v_cmpx_lt_i64", "v_cmpx_eq_i64", "v_cmpx_le_i64", "v_cmpx_gt_i64",
+        "v_cmpx_ne_i64", "v_cmpx_ge_i64", "v_cmpx_t_i64",
+    ];
+    const U64: [&str; 8] = [
+        "v_cmp_f_u64", "v_cmp_lt_u64", "v_cmp_eq_u64", "v_cmp_le_u64", "v_cmp_gt_u64",
+        "v_cmp_ne_u64", "v_cmp_ge_u64", "v_cmp_t_u64",
+    ];
+    const U64X: [&str; 8] = [
+        "v_cmpx_f_u64", "v_cmpx_lt_u64", "v_cmpx_eq_u64", "v_cmpx_le_u64", "v_cmpx_gt_u64",
+        "v_cmpx_ne_u64", "v_cmpx_ge_u64", "v_cmpx_t_u64",
+    ];
+    // GFX10 16-bit integer compares have no F/T forms; their slots 0 and 7 hold
+    // class_f32/class_f16 (and class_f64 in the i64 rows). LLVM VOPCInstructions.td, GFX10.
+    const I16: [&str; 6] = ["v_cmp_lt_i16", "v_cmp_eq_i16", "v_cmp_le_i16", "v_cmp_gt_i16", "v_cmp_ne_i16", "v_cmp_ge_i16"];
+    const I16X: [&str; 6] = ["v_cmpx_lt_i16", "v_cmpx_eq_i16", "v_cmpx_le_i16", "v_cmpx_gt_i16", "v_cmpx_ne_i16", "v_cmpx_ge_i16"];
+    const U16: [&str; 6] = ["v_cmp_lt_u16", "v_cmp_eq_u16", "v_cmp_le_u16", "v_cmp_gt_u16", "v_cmp_ne_u16", "v_cmp_ge_u16"];
+    const U16X: [&str; 6] = ["v_cmpx_lt_u16", "v_cmpx_eq_u16", "v_cmpx_le_u16", "v_cmpx_gt_u16", "v_cmpx_ne_u16", "v_cmpx_ge_u16"];
     Some(match op {
         0x00..=0x0f => F[op as usize],
         0x10..=0x1f => FX[(op - 0x10) as usize],
@@ -114,10 +136,20 @@ pub fn vopc(op: u32) -> Option<&'static str> {
         0xd0..=0xd7 => UX[(op - 0xd0) as usize],
         0x20..=0x2f => D[(op - 0x20) as usize],
         0x30..=0x3f => DX[(op - 0x30) as usize],
-        0x98 => "v_cmpx_class_f32",
-        0xa8 => "v_cmp_class_f64",
-        0xb8 => "v_cmpx_class_f64",
         0x88 => "v_cmp_class_f32",
+        0x89..=0x8e => I16[(op - 0x89) as usize],
+        0x8f => "v_cmp_class_f16",
+        0x98 => "v_cmpx_class_f32",
+        0x99..=0x9e => I16X[(op - 0x99) as usize],
+        0x9f => "v_cmpx_class_f16",
+        0xa0..=0xa7 => I64[(op - 0xa0) as usize],
+        0xa8 => "v_cmp_class_f64",
+        0xa9..=0xae => U16[(op - 0xa9) as usize],
+        0xb0..=0xb7 => I64X[(op - 0xb0) as usize],
+        0xb8 => "v_cmpx_class_f64",
+        0xb9..=0xbe => U16X[(op - 0xb9) as usize],
+        0xe0..=0xe7 => U64[(op - 0xe0) as usize],
+        0xf0..=0xf7 => U64X[(op - 0xf0) as usize],
         0xc8..=0xcf => H[(op - 0xc8) as usize],
         0xd8..=0xdf => HX[(op - 0xd8) as usize],
         0xe8..=0xef => H[(op - 0xe0) as usize],
