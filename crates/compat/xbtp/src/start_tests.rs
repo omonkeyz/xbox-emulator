@@ -274,3 +274,29 @@ fn dispatcher_serves_ipv6_and_ipv4_loopback_on_one_port() {
         stop(c);
     }
 }
+
+#[test]
+fn built_dispatcher_reports_its_file_version() {
+    use std::os::windows::ffi::OsStrExt;
+    let _g = NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init();
+    let dll = xone_exports::built_dll(env!("CARGO_MANIFEST_DIR"), "xbtp.dll").expect("build xbtp.dll before testing");
+    let path: Vec<_> = dll.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let module = LoadLibraryExW(path.as_ptr(), null_mut(), 0);
+        assert!(!module.is_null());
+        let addr = GetProcAddress(module, b"XbtpStartDispatcherEx\0".as_ptr());
+        assert!(!addr.is_null());
+        let start: unsafe extern "C" fn(u32, i32, *const GUID, *mut *mut c_void) -> HRESULT = core::mem::transmute(addr);
+        let mut dispatcher = null_mut();
+        assert_eq!(start(47933, 0, &IID_XBTP_DISPATCHER, &mut dispatcher), S_OK);
+        let (hr, session) = open(47933);
+        assert_eq!(hr, S_OK);
+        let (status, reply) = call(session, VERSION_OPERATION, "{}");
+        com_release(session);
+        stop(dispatcher.cast());
+        assert_eq!(status, S_OK);
+        let version = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), ".", env!("CARGO_PKG_VERSION_PATCH"), ".0");
+        assert!(reply.contains(&format!("\"Platform\":\"{version}\"")), "{reply}");
+    }
+}

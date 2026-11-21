@@ -5,6 +5,18 @@ fn main() {
     if !msvc {
         return;
     }
+    println!("cargo:rerun-if-changed=version.rc");
+    let parts = [
+        env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH"), "0",
+    ];
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("xbtp_version.h"), format!(
+        "#define XBTP_VERSION {}\n#define XBTP_VERSION_STRING \"{}\"\n",
+        parts.join(","), parts.join("."),
+    )).expect("write version header");
+    embed_resource::compile_for_cdylib("version.rc", embed_resource::NONE)
+        .manifest_required().expect("compile XBTP version resource");
     for e in xone_exports::parse(&text) {
         if e.status == "missing" {
             continue;

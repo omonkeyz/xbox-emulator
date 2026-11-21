@@ -1,0 +1,23 @@
+#include <winver.h>
+#include "xbtp_version.h"
+
+1 VERSIONINFO
+ FILEVERSION XBTP_VERSION
+ PRODUCTVERSION XBTP_VERSION
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileVersion", XBTP_VERSION_STRING
+            VALUE "ProductVersion", XBTP_VERSION_STRING
+            VALUE "FileDescription", "TomBox XBTP transport"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
