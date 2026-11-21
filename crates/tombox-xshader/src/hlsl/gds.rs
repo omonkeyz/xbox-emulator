@@ -47,7 +47,9 @@ impl Emitter<'_> {
             "ds_append" | "ds_consume" => {
                 self.uses_wave = true;
                 let n = if op == "ds_append" { format!("t{t}n") } else { format!("0u - t{t}n") };
-                self.line(&format!("uint4 t{t}b = WaveActiveBallot((exec_lo & 1u) != 0u); uint t{t}n = countbits(t{t}b.x) + countbits(t{t}b.y) + countbits(t{t}b.z) + countbits(t{t}b.w); uint t{t}l = (t{t}b.x != 0u) ? firstbitlow(t{t}b.x) : ((t{t}b.y != 0u) ? 32u + firstbitlow(t{t}b.y) : ((t{t}b.z != 0u) ? 64u + firstbitlow(t{t}b.z) : 96u + firstbitlow(t{t}b.w)));"));
+                // Count and lead within this lane's 32-lane half: a wave32 guest on a 64-lane
+                // host shares the host wave with a second guest wave (see `guest_lane`).
+                self.line(&format!("uint4 t{t}b = WaveActiveBallot((exec_lo & 1u) != 0u); uint t{t}h = WaveGetLaneIndex() >> 5; uint t{t}m = (t{t}h == 0u) ? t{t}b.x : ((t{t}h == 1u) ? t{t}b.y : ((t{t}h == 2u) ? t{t}b.z : t{t}b.w)); uint t{t}n = countbits(t{t}m); uint t{t}l = (t{t}h << 5) + firstbitlow(t{t}m);"));
                 format!("if (WaveGetLaneIndex() == t{t}l) {{ tb_gds.InterlockedAdd(t{t}a, {n}, t{t}); }}")
             }
             "ds_read_b32" => format!("t{t} = tb_gds.Load(t{t}a);"),
