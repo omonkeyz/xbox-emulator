@@ -100,7 +100,7 @@ unsafe extern "system" fn deny_false() -> i32 {
 
 // ---- patching ---------------------------------------------------------------------------------
 
-unsafe fn resolve_export(module: &[u8], func: &[u8]) -> *mut u8 {
+pub(crate) unsafe fn resolve_export(module: &[u8], func: &[u8]) -> *mut u8 {
     let mut h = GetModuleHandleA(module.as_ptr());
     if h.is_null() {
         h = LoadLibraryA(module.as_ptr());
@@ -111,7 +111,7 @@ unsafe fn resolve_export(module: &[u8], func: &[u8]) -> *mut u8 {
     GetProcAddress(h, func.as_ptr()) as *mut u8
 }
 
-unsafe fn write_jump(p: *mut u8, stub: usize) -> bool {
+pub(crate) unsafe fn write_jump(p: *mut u8, stub: usize) -> bool {
     let mut code = [0u8; 12]; // mov rax, imm64 ; jmp rax
     code[0] = 0x48;
     code[1] = 0xB8;
@@ -1023,6 +1023,9 @@ pub fn ensure() {
 
         // Process-wide one-time setup that is not network policy: the local Xbox user.
         crate::gdk_user::install();
+        if let Some(locale) = crate::cfg("locale").filter(|v| !v.is_empty()) {
+            crate::locale::install(&locale);
+        }
 
         if std::env::var_os("TOMBOX_ALLOW_NETWORK").map(|v| v == "1").unwrap_or(false) {
             let _ = TARGET.set(None);
