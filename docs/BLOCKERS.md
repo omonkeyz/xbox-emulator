@@ -680,13 +680,11 @@ elease`, the log shows one install and every interface is emulated.
 - xmem/acphal test race: gcxaudioext tests crash with 0xc0000005 when the first ApuAlloc (xmem.dll + acphal.dll) runs at the same time as MMDevice COM enumeration on another thread. Loading the DLLs alone does not crash. The suspected cause is xmem IAT patching (iat.rs write_slot sets PAGE_READWRITE) racing live modules. The gcxaudioext tests are serialized to avoid it, and the root cause is not fixed.
 
 ## RDNA2 GDS wave ops (tombox-xshader hlsl/gds.rs) - 2026-11-21, rdna2-dev
-- DONE, ds_append / ds_consume (GDS form): the lowering is now wave-uniform. It follows amdgpu_isa_rdna2.xml (AMD_GPU_MR_ISA_XML-2024_08_22), which says to add (or subtract) count_bits(exec_mask) at M0.base + offset and return the pre-operation value.
-  - How it works: one active lane per host wave does the InterlockedAdd, and WaveReadLaneAt broadcasts the result.
-  - The old lowering added 1 per lane, which gave each lane a different value.
-  - Test: tests/exec.rs exec_mem::gds::ds_gds_append_consume, with four exec masks.
-    - On WARP it checks the counter total, that inactive lanes are untouched, and that no other GDS dword changes.
-    - With TOMBOX_EXEC_HW=1 on the RTX 5060 (wave32) it also checks the per-wave return values.
-  - Limits: a wave64 source is refused, because it spans two host waves. The LDS (GDS=0) form is not lowered.
+- GDS `ds_append` and `ds_consume` add or subtract the number of active guest lanes in a wave and return the old counter to every active lane. The GDS instruction uses the physical byte address in `M0[31:16]` with a zero instruction offset.
+  - Straight-line compute shaders reconstruct the active mask for each 32 consecutive guest threads in group memory. The first active lane updates the counter and shares the old value. [AMD RDNA 2 ISA, section 12.13](https://docs.amd.com/api/khub/documents/Et~wpu9g~Ffl7d9q0QZ~Og/content#page=204)
+  - Counters in compute control flow or shaders using the 32 KiB LDS mirror request a native wave32 with Shader Model 6.6. This path assumes the host groups threads into the same waves as the guest. Graphics-stage counters also rely on native wave32 execution. [D3D12 wave size requirements](https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_6_WaveSize.html)
+  - `exec_mem::gds::ds_gds_append_consume` checks per-wave return values on WARP, including inactive lanes, a partially occupied wave, counter wraparound and the boundary of title-owned GDS.
+  - Wave64 counters and the LDS (GDS=0) counter form remain unsupported.
 - OPEN, ds_gws_init / ds_gws_sema_v / ds_gws_sema_br / ds_gws_sema_p / ds_gws_sema_release_all / ds_gws_barrier: these remain translator refusals.
   - The XML describes them as GWS resources that queue the wave until a semaphore release or a barrier count is reached, across waves and thread groups.
   - D3D12 has no cross-group blocking primitive and no forward-progress guarantee for spin waits, so a lowering could hang or would only appear to work.
