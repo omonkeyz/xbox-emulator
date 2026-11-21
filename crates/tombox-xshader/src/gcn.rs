@@ -241,8 +241,8 @@ fn swap01(abs: u32, neg: u32) -> (u32, u32) {
 fn smrd_op(op: u32) -> Result<u32, String> {
     match op {
         0x00..=0x04 | 0x08..=0x0c => Ok(op),
-        0x1d => Ok(0x24),
-        0x1e => Ok(0x20),
+        0x1d | 0x1f => Ok(0x20),
+        0x1e => Ok(0x24),
         _ => Err(format!("gfx7 SMRD opcode {op:#x} is not supported")),
     }
 }
@@ -405,13 +405,19 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             if (w >> 15) & 1 != 0 {
                 return addr64(ins).map_err(err);
             }
-            ins.words.clone()
+            match (w >> 18) & 0x7f {
+                0x70 | 0x71 => [0x71u32, 0x72].iter().flat_map(|&op| [(w & !(0x7f << 18)) | op << 18, ins.words[1]]).collect(),
+                _ => ins.words.clone(),
+            }
         }
         Enc::Mimg => {
             for (bit, name) in [(15, "R128 (128-bit resource descriptor)"), (16, "TFE (texture fail status VGPR)"), (17, "LWE (LOD warning status)")] {
                 if (w >> bit) & 1 != 0 {
                     return Err(err(format!("MIMG {name} is not translated")));
                 }
+            }
+            if (w >> 18) & 0x7f == 0x13 {
+                return Err(err("image_atomic_rsub (gfx7 MIMG 0x13) has no RDNA2 equivalent".into()));
             }
             let da = (w >> 14) & 1;
             let dim = if da != 0 { 5 } else { 1 };
