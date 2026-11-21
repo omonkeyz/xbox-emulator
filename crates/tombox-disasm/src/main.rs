@@ -231,6 +231,29 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_buffers_do_not_panic() {
+        let mut s = 0x1234_5678u32;
+        for len in 0..600 {
+            let mut b = vec![0u8; len];
+            for x in &mut b {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                *x = (s >> 8) as u8;
+            }
+            let _ = parse_syms(&b);
+        }
+    }
+
+    #[test]
+    fn every_prefix_of_a_valid_table_does_not_panic() {
+        let b = sym_file(&[(0x1000, 0x10), (0x2000, 0x20)], &["first", "second"]);
+        for n in 0..b.len() {
+            let _ = parse_syms(&b[..n]);
+        }
+    }
+
+    #[test]
     fn bad_string_lengths_keep_records_without_names() {
         // rec_end = 0x30 + 12 = 0x3c; repeated count at 0x3c; first
         // length-prefixed string at 0x40.
