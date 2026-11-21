@@ -74,22 +74,7 @@ fn module_dir(h: usize) -> Option<PathBuf> {
     PathBuf::from(String::from_utf16_lossy(&buf[..n])).parent().map(Path::to_path_buf)
 }
 
-pub fn sdk_dirs() -> Vec<PathBuf> {
-    let kits = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
-    let mut v: Vec<PathBuf> = std::fs::read_dir(&kits)
-        .map(|rd| rd.flatten().map(|e| e.path().join("x64")).filter(|p| p.join("dxcompiler.dll").is_file()).collect())
-        .unwrap_or_default();
-    v.sort_by_key(|p| sdk_version(p));
-    v.reverse();
-    v
-}
-
-fn sdk_version(p: &Path) -> Vec<u32> {
-    p.parent()
-        .and_then(|d| d.file_name())
-        .map(|n| n.to_string_lossy().split('.').map(|x| x.parse().unwrap_or(0)).collect())
-        .unwrap_or_default()
-}
+pub use compat_common::dxc::sdk_dirs;
 
 pub fn candidate_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();

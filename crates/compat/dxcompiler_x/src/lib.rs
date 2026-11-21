@@ -3,7 +3,6 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const M: &str = "dxcompiler_x";
-const BUNDLED: &str = r"D:\xbox-pc-port\emulator\third_party\dxc\v1.9.2609\bin\x64";
 const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
 
 extern "system" {
@@ -36,7 +35,7 @@ pub fn candidates() -> Vec<String> {
     if let Ok(d) = std::env::var("TOMBOX_DXC_DIR") {
         v.push(format!("{d}\\dxcompiler.dll"));
     }
-    v.push(format!("{BUNDLED}\\dxcompiler.dll"));
+    v.extend(compat_common::dxc::sdk_dirs().into_iter().map(|dir| dir.join("dxcompiler.dll").display().to_string()));
     v
 }
 
@@ -59,7 +58,7 @@ fn host_dxc(name: &[u8]) -> usize {
         }
         h = if found == 0 { 1 } else { found };
         CELL.store(h, Ordering::Release);
-        record(M, "init", &if found == 0 { "no dxcompiler.dll found next to dxcompiler_x, in TOMBOX_DXC_DIR or third_party".to_string() } else { format!("DXC {from} = {found:#x}") });
+        record(M, "init", &if found == 0 { "no dxcompiler.dll found next to dxcompiler_x, in TOMBOX_DXC_DIR or the Windows SDK".to_string() } else { format!("DXC {from} = {found:#x}") });
     }
     if h == 1 {
         return 0;
@@ -175,6 +174,23 @@ mod tests {
         let (st, blob) = unsafe { compile(cs, "cs_6_0") };
         assert_eq!(st, 0);
         assert_eq!(&blob[..4], b"DXBC");
+    }
+
+    #[test]
+    fn second_factory_creates_host_compiler_with_default_allocator() {
+        let mut compiler = core::ptr::null_mut();
+        let hr = DxcCreateInstance2(
+            core::ptr::null_mut(),
+            &CLSID_DXC_COMPILER as *const _ as *const c_void,
+            &IID_IDXC_COMPILER3 as *const _ as *const c_void,
+            &mut compiler,
+        );
+        assert_eq!(hr, 0);
+        assert!(!compiler.is_null());
+        unsafe {
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(slot(compiler, 2));
+            release(compiler);
+        }
     }
 
     #[test]
