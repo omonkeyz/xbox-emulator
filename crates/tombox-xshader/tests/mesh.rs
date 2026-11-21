@@ -103,22 +103,32 @@ fn console_ms(nv: u32, np: u32, prim: u32) -> Vec<u32> {
 }
 
 fn console_ms_b(nv: u32, np: u32, prim: u32, div_barrier: bool) -> Vec<u32> {
+    ms_prog((np << 12) | nv, prim, div_barrier, false, &[], [2, 3])
+}
+
+// Thread 0 sends GS_ALLOC_REQ with `m0`; threads 64-66 place a full-viewport triangle; every thread
+// exports `prim` and TEXCOORD = (tex[0], tex[1]) (SGPR sources read after `pre`). s3 is replaced by
+// its wave index (s3[27:24]), s2 = v_readfirstlane_b32(v5).
+fn ms_prog(m0: u32, prim: u32, div_barrier: bool, wave32: bool, pre: &[u32], tex: [u32; 2]) -> Vec<u32> {
     let mut w = vec![];
-    w.push(sop1(4, EXEC, ic(-1)));
+    w.push(sop1(if wave32 { 3 } else { 4 }, EXEC, ic(-1)));
     w.extend(vop3(0x365, 0, [ic(-1), ic(0), 0]));
-    w.extend(vop3(0x366, 0, [ic(-1), v(0), 0]));
+    if !wave32 {
+        w.extend(vop3(0x366, 0, [ic(-1), v(0), 0]));
+    }
+    w.extend_from_slice(pre);
     w.extend([sop2(0x27, 3, 3, LIT), 0x40018]);
-    w.extend(vop3(0x346, 0, [3, ic(6), v(0)]));
+    w.extend(vop3(0x346, 0, [3, ic(if wave32 { 5 } else { 6 }), v(0)]));
     w.push(vop1(2, 2, v(5)));
-    w.push(sop1(4, 10, EXEC));
+    w.push(sop1(if wave32 { 3 } else { 4 }, 10, EXEC));
     w.push(vopc(0xd2, ic(0), 0));
     w.push(sopp(8, 3 + div_barrier as u16));
-    w.extend([sop1(3, M0, LIT), (np << 12) | nv]);
+    w.extend([sop1(3, M0, LIT), m0]);
     w.push(sopp(0x10, 9));
     if div_barrier {
         w.push(sopp(0x0a, 0));
     }
-    w.push(sop1(4, EXEC, 10));
+    w.push(sop1(if wave32 { 3 } else { 4 }, EXEC, 10));
     w.push(sopp(0x0a, 0));
     w.extend([vop1(1, 2, LIT), 4.0f32.to_bits()]);
     w.extend([vopc(0xc2, LIT, 0), 65]);
@@ -127,8 +137,8 @@ fn console_ms_b(nv: u32, np: u32, prim: u32, div_barrier: bool) -> Vec<u32> {
     w.push(vop2(0x01, 3, F_NEG1, 2));
     w.push(vop1(1, 4, ic(0)));
     w.push(vop1(1, 6, F_ONE));
-    w.push(vop1(1, 7, 2));
-    w.push(vop1(1, 8, 3));
+    w.push(vop1(1, 7, tex[0]));
+    w.push(vop1(1, 8, tex[1]));
     w.extend([vop1(1, 9, LIT), prim]);
     w.extend(exp(12, 0xf, false, [1, 3, 4, 6]));
     w.extend(exp(20, 0x1, false, [9, 0, 0, 0]));
@@ -180,7 +190,9 @@ fn mesh_hlsl_entry_and_tail() {
         "[numthreads(128, 1, 1)]",
         "[outputtopology(\"triangle\")]",
         "out vertices SOut verts[128], out indices uint3 tris[128], out primitives SPrim prims[128]",
-        "v5 = gid.x * 128u + gi; s3 = (gi / 64u) << 24;",
+        "v5 = gid.x * 128u + gi;",
+        "s3 = 0x20000000u | ((gi / 64u) << 24) | (min(64u, 128u - (gi & 0xffffffc0u)) * 0x101u);",
+        "uint tb_nv = tb_mscnt & 0x3ffu, tb_np = (tb_mscnt >> 12) & 0x7ffu;",
         "s2 = (gid.x * 128u + (gi & 0xffffffc0u));",
         "(min(gi & 63u, 32u) + 0x0u)",
         "(max(gi & 63u, 32u) - 32u + v0)",
@@ -386,7 +398,11 @@ fn bytecode(b: &[u8]) -> Vec<u8> {
 }
 
 unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
-    let t = translate(&ms(words, mesh_info(128, 128, 128, 2), pos_param_outs()))?;
+    render_mi(words, groups, mesh_info(128, 128, 128, 2))
+}
+
+unsafe fn render_mi(words: &[u32], groups: u32, mi: MeshInfo) -> Result<[u32; 4], String> {
+    let t = translate(&ms(words, mi, pos_param_outs()))?;
     let msb = dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("{e}\n{}", t.hlsl))?;
     let psb = dxc::compile(PS, "ps_6_5")?;
     let (mut gpu, kind) = mesh_gpu();
@@ -533,6 +549,37 @@ fn gpu_mesh_culled_and_empty_outputs_draw_nothing() {
     assert_eq!(empty, clear);
     let one = unsafe { render(&console_ms(67, 1, TRI), 1) }.unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(one, [64, 1, 0x77, 0x88]);
+}
+
+// s3 = merged_wave_info (RDNA2 ISA §3.12.2, ES+GS SGPR 3): TGsize[31:28], wave index [27:24],
+// GSPrimCount[15:8], ESVertCount[7:0]. The program extracts TGsize with s_bfe_u32 s4, s3, 0x4001c
+// and the counts with s_and_b32 s5, s3, 0xffff, and thread 64 (the provoking vertex) exports them.
+#[test]
+fn gpu_mesh_merged_wave_info_fields() {
+    let pre = [sop2(0x27, 4, 3, LIT), 0x4001c, sop2(0x0e, 5, 3, LIT), 0xffff];
+    // (wave32, threads, s3[15:0] of thread 64's wave, waves per group)
+    for (wave32, threads, counts, tg) in [(false, 128, 0x4040, 2), (true, 128, 0x2020, 4), (false, 96, 0x2020, 2), (true, 80, 0x1010, 3)] {
+        let w = ms_prog((1 << 12) | 67, TRI, false, wave32, &pre, [5, 4]);
+        let mi = mesh_info(threads, threads as u16, threads as u16, 2);
+        let t = translate(&ms(&w, mi, pos_param_outs())).expect("translate");
+        let ws = if wave32 { 32 } else { 64 };
+        let want = format!("s3 = {:#x}u | ((gi / {ws}u) << 24) | (min({ws}u, {threads}u - (gi & {:#x}u)) * 0x101u);", tg << 28, !(ws - 1u32));
+        assert!(t.hlsl.contains(&want), "missing `{want}` in\n{}", t.hlsl);
+        let got = unsafe { render_mi(&w, 2, mi) }.unwrap_or_else(|e| panic!("wave{ws} x {threads}: {e}"));
+        assert_eq!(got, [counts, tg, 0x77, 0x88], "wave{ws} x {threads}");
+    }
+}
+
+// GS_ALLOC_REQ m0 (RDNA2 ISA §12.5.1): vertices M0[9:0], primitives M0[22:12]. The request asks for
+// the PSO maxima (128 / 128) and sets bit 11 and bits 23-31, which lie outside both fields in the
+// ISA, Mesa and LLPC layouts; a 12-bit decode would ask SetMeshOutputCounts for 2176 vertices.
+#[test]
+fn gpu_mesh_alloc_req_counts_at_limit_ignore_bits_outside_fields() {
+    let w = ms_prog(0xff80_0800 | (128 << 12) | 128, TRI, false, false, &[], [2, 3]);
+    let t = translate(&ms(&w, mesh_info(128, 128, 128, 2), pos_param_outs())).expect("translate");
+    assert!(t.hlsl.contains("uint tb_nv = tb_mscnt & 0x3ffu, tb_np = (tb_mscnt >> 12) & 0x7ffu;"), "{}", t.hlsl);
+    let got = unsafe { render(&w, 3) }.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(got, [2 * 128 + 64, 1, 0x77, 0x88]);
 }
 
 fn rts0_blob(flags: u32) -> Vec<u8> {

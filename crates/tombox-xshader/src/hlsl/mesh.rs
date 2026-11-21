@@ -57,6 +57,26 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    // v5 is the merged ES-GS "vertex id" VGPR (after the five GS VGPRs; Mesa radv_shader_args.c
+    // declare_ms_input_vgprs L327-337 and L865-886 at Mesa ef594386). Two readings of it exist for
+    // a GFX10.3 mesh launch, and this translator keeps the first one:
+    // - Target (taken from the GTA VI mesh corpus layout): every lane holds its own vertex id,
+    //   gid.x * threads + thread index, as if the driver drew threads vertices per workgroup. Then
+    //   v_readfirstlane_b32 sX, v5 gives gid.x * threads + wave base.
+    // - Mesa RADV and AMD LLPC (legacy FAST_LAUNCH=1): the driver draws one input vertex per
+    //   workgroup (radv_cmd_buffer.c L12436 count = x * y * z, L4187 fast launch 1 below GFX11;
+    //   radv_shader_info.c L767-790 hw_max_esverts = max_gsprims = 1), so v5 is the flat
+    //   workgroup index. ac_nir_lower_ngg_mesh.c L603-612 says it is only filled for lane 0 of
+    //   wave 0 and broadcasts it through LDS; radv_shader_info.c L789 says every lane gets it;
+    //   LLPC lgc/lowering/MeshTaskShader.cpp L2398-2400 (40cb8d9) reads VGPR5 as the flat
+    //   workgroup id, "incremented by 1 for each subgroup", and also broadcasts it via LDS.
+    //   Leonida's console notes use this value.
+    // Both are statements about how the driver programs the GE, not a fixed hardware register
+    // definition, and the console driver's programming is unknown. What settles it is how GTA VI
+    // consumes v_readfirstlane_b32 sX, v5: a shift right by log2(threads) (or a divide by threads)
+    // supports the target reading; direct use as a group or meshlet index, a left shift, or an LDS
+    // broadcast from wave 0 supports the workgroup-index reading. s3[7:0]/[15:8] below follow the
+    // same choice and would become 1/1 in wave 0 and 0 elsewhere under the other reading.
     pub(super) fn mesh_readfirstlane(&self, src: &Opnd) -> Result<Option<String>, String> {
         if !self.is_ms() || !matches!(src, Opnd::Vgpr(5)) {
             return Ok(None);
@@ -224,13 +244,30 @@ impl<'a> Emitter<'a> {
         let _ = writeln!(h, "    SOut o = (SOut)0; uint tb_prim = 0u;");
         let _ = writeln!(h, "    if (gi == 0u) tb_mscnt = 0u;");
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
-        let _ = writeln!(h, "    v5 = gid.x * {n}u + gi; s3 = (gi / {w}u) << 24;");
+        // s3 = merged_wave_info, RDNA2 ISA §3.12.2 "SGPR Initialization", Geometry Shader (ES+GS) SGPR 3:
+        // { TGsize[31:28], WaveInSubgroup[27:24], GSWaveID[23:16], GSPrimCount[15:8], ESVertCount[7:0] }.
+        // Mesa ef594386 reads the same fields: ac_nir_lower_intrinsics_to_args.c L99 subgroup id =
+        // [27:24] and L127 num_subgroups = [31:28] for NGG; ac_nir_lower_ngg.c L157/L163 vertex and
+        // primitive presence from [7:0]/[15:8], L178 prim count = [15:8]; L409 gs_wave_id = [23:16]
+        // (legacy GS ring addressing). LLPC MeshTaskShader.cpp L2189-2193 takes the mesh wave id from
+        // [27:24]. The subgroup is the API workgroup here (finish_mesh refuses max vertices or
+        // primitives above the thread count), so TGsize = ceil(threads / wave). The per-wave vertex and
+        // primitive counts are the wave's live threads, matching the per-lane v5 reading (see
+        // mesh_readfirstlane). GSWaveID is a running GS wave counter used only for legacy GS rings and
+        // the ring messages are refused in mesh shaders, so it stays 0.
+        let tg = n.div_ceil(w);
+        let _ = writeln!(h, "    v5 = gid.x * {n}u + gi;");
+        let _ = writeln!(h, "    s3 = {:#x}u | ((gi / {w}u) << 24) | (min({w}u, {n}u - (gi & {:#x}u)) * 0x101u);", tg << 28, !(w - 1));
         if pl.is_some() {
             h.push_str(&self.amp_ms_prologue(m.payload_bytes));
         }
         h.push_str(&self.body);
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
-        let _ = writeln!(h, "    uint tb_nv = tb_mscnt & 0xfffu, tb_np = (tb_mscnt >> 12) & 0xfffu;");
+        // GS_ALLOC_REQ payload: RDNA2 ISA §12.5.1 "Send Message", GS alloc req: "M0[9:0] = number of vertices,
+        // M0[22:12] = number of primitives". Mesa ac_nir_prerast_utils.c L873-878 and LLPC
+        // MeshTaskShader.cpp L1778 describe vertices as M0[10:0]; bit 10 only matters above 1023
+        // vertices, beyond any mesh limit, so the ISA width is used.
+        let _ = writeln!(h, "    uint tb_nv = tb_mscnt & 0x3ffu, tb_np = (tb_mscnt >> 12) & 0x7ffu;");
         let _ = writeln!(h, "    SetMeshOutputCounts(tb_nv, tb_np);");
         let _ = writeln!(h, "    if (gi < tb_nv) verts[gi] = o;");
         let idx: Vec<&str> = ["tb_prim & 0x1ffu", "(tb_prim >> 10) & 0x1ffu", "(tb_prim >> 20) & 0x1ffu"][..nidx].to_vec();
