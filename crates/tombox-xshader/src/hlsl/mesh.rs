@@ -199,7 +199,8 @@ impl<'a> Emitter<'a> {
             if e.sysval == 1 {
                 let _ = writeln!(h, "    precise {ty} o{ei} : {};", semantic(e));
             } else {
-                let _ = writeln!(h, "    {ty} o{ei} : {};", semantic(e));
+                let interp = self.out_interp.for_output(e).map(|m| format!("{m} ")).unwrap_or_default();
+                let _ = writeln!(h, "    {interp}{ty} o{ei} : {};", semantic(e));
             }
         }
         let _ = writeln!(h, "}};");

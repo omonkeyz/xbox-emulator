@@ -46,6 +46,42 @@ pub struct Translated {
     pub needs_global: bool,
 }
 
+/// Interpolation modifiers of a pixel shader's inputs that the stage feeding it must repeat
+/// on its matching outputs, by semantic (`TEXCOORD0`), in input-signature order, as emitted
+/// (`centroid`). Inputs whose modifier is DXC's default for their type (none for float,
+/// `nointerpolation` for integers) and SV_Position are not listed.
+///
+/// DXC packs two signature elements into one register only if their interpolation modes
+/// match. The pixel shader picks modifiers from its input signature (`_centroid` names) while
+/// the stage feeding it declared none, so a centroid TEXCOORD1.xy shared r1 with a linear
+/// TEXCOORD0.xy in the vertex shader (r1.zw) but had r2.xy of its own in the pixel shader,
+/// and D3D12 rejected the pipeline (`CREATEGRAPHICSPIPELINESTATE_SHADER_LINKAGE_REGISTERINDEX`
+/// #660 / `_REGISTERMASK` #662). Get it with [`ps_input_interp`] and pass it to
+/// [`translate_linked`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct InputInterp(pub Vec<(String, String)>);
+
+impl InputInterp {
+    /// Modifier for output `e` of the stage feeding the pixel shader. Only `nointerpolation`
+    /// is valid on an integer element. A lowered centroid input (`TB_CEN_Q`) is plain linear
+    /// unless the pixel shader is compiled with `TB_CENTROID_PC` ([`InputInterp::pc_centroid`]).
+    fn for_output(&self, e: &SigElement) -> Option<&str> {
+        let s = semantic(e);
+        let m = self.0.iter().find(|(k, _)| *k == s).map(|(_, m)| m.as_str())?;
+        (m != "TB_CEN_Q" && (e.comp_type == 3 || m == "nointerpolation")).then_some(m)
+    }
+
+    /// For a pixel shader compiled with `TB_CENTROID_PC`, where `TB_CEN_Q` is `centroid`.
+    pub fn pc_centroid(mut self) -> Self {
+        for (_, m) in &mut self.0 {
+            if m == "TB_CEN_Q" {
+                *m = "centroid".into();
+            }
+        }
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sym {
     Table(u8),
@@ -308,6 +344,43 @@ fn semantic(e: &SigElement) -> String {
     format!("{}{}", e.name, e.index)
 }
 
+/// HLSL interpolation modifier, with a trailing space, of pixel-shader input `e`.
+fn ps_input_modifier(ex: &ShaderExtract, ei: usize, e: &SigElement) -> &'static str {
+    // DXIL validation: with a conservative depth output (SV_DepthLessEqual /
+    // SV_DepthGreaterEqual) the position input must be centroid-interpolated.
+    let cons_depth = || {
+        ex.output_sig.iter().any(|o| {
+            let s = semantic(o);
+            s.starts_with("SV_DepthLessEqual") || s.starts_with("SV_DepthGreaterEqual")
+        })
+    };
+    if e.sysval == 1 && cons_depth() {
+        "linear noperspective centroid "
+    } else if e.comp_type != 3 {
+        "nointerpolation "
+    } else if e.name.contains("_centroid") {
+        centroid::qualifier(ex, ei)
+    } else {
+        ""
+    }
+}
+
+/// The [`InputInterp`] of a pixel shader (empty for other stages): what its translation
+/// declares on each input, which depends on the signature only.
+pub fn ps_input_interp(ex: &ShaderExtract) -> InputInterp {
+    if ex.stage != Stage::Pixel {
+        return InputInterp::default();
+    }
+    // SV_Position is not mirrored: the producer declares it `precise` and DXC gives it a
+    // register of its own.
+    let modifiers = ex.input_sig.iter().enumerate().filter(|(_, e)| e.sysval != 1).filter_map(|(ei, e)| {
+        let m = ps_input_modifier(ex, ei, e).trim_end();
+        let default = if e.comp_type == 3 { "" } else { "nointerpolation" };
+        (m != default).then(|| (semantic(e), m.to_string()))
+    });
+    InputInterp(modifiers.collect())
+}
+
 struct Emitter<'a> {
     ex: &'a ShaderExtract,
     insns: Vec<Insn>,
@@ -392,6 +465,8 @@ struct Emitter<'a> {
     uses_bvh: bool,
     uses_global: bool,
     mode_use: mode::ModeUse,
+    /// Stage feeding a pixel shader (VS, GS, MS): modifiers for the matching outputs.
+    out_interp: InputInterp,
 }
 
 /// SGPR spills through vector lanes.
@@ -912,13 +987,24 @@ fn dst16(m: &str) -> bool {
 }
 
 pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
-    match translate_with(ex, None, BTreeSet::new()) {
-        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
+    translate_linked(ex, None)
+}
+
+/// [`translate`] for the stage that feeds a pixel shader (VS, GS or MS), given that pixel
+/// shader's [`ps_input_interp`]: the outputs it reads get the same interpolation modifiers,
+/// so DXC packs both signatures into the same registers. Ignored for other stages.
+pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
+    let out_interp = match ex.stage {
+        Stage::Vertex | Stage::Geometry | Stage::Mesh => feeds_ps.cloned().unwrap_or_default(),
+        _ => InputInterp::default(),
+    };
+    match translate_with(ex, &out_interp, None, BTreeSet::new()) {
+        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
         r => r,
     }
 }
 
-fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {
+fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {
     let (profile, is_ps) = match ex.stage {
         Stage::Vertex => ("vs_5_0", false),
         Stage::Pixel => ("ps_5_0", true),
@@ -1003,6 +1089,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
         uses_bvh: false,
         uses_global: false,
         mode_use: mode::ModeUse::default(),
+        out_interp: out_interp.clone(),
     };
     em.vreg_array = em.insns.iter().any(|i| i.mnemonic.starts_with("v_movrel"));
     em.mode_use = mode::analyze(&em.insns);
@@ -1024,7 +1111,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
     if !clash.is_empty() {
         let mut force = em.uav_force.clone();
         force.extend(clash);
-        return translate_with(ex, user_base_override, force);
+        return translate_with(ex, out_interp, user_base_override, force);
     }
     if is_ps {
         em.find_export_epilogs();
@@ -6220,23 +6307,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                     continue;
                 }
                 let (ty, _) = sig_type(e);
-                // DXIL validation: with a conservative depth output (SV_DepthLessEqual /
-                // SV_DepthGreaterEqual) the position input must be centroid-interpolated.
-                let cons_depth = ex.output_sig.iter().any(|o| {
-                    let s = semantic(o);
-                    s.starts_with("SV_DepthLessEqual") || s.starts_with("SV_DepthGreaterEqual")
-                });
-                let interp = if !is_ps {
-                    ""
-                } else if e.sysval == 1 && cons_depth {
-                    "linear noperspective centroid "
-                } else if e.comp_type != 3 {
-                    "nointerpolation "
-                } else if e.name.contains("_centroid") {
-                    centroid::qualifier(ex, ei)
-                } else {
-                    ""
-                };
+                let interp = if is_ps { ps_input_modifier(ex, ei, e) } else { "" };
                 let _ = writeln!(h, "    {interp}{ty} i{ei} : {};", semantic(e));
             }
         }
@@ -6253,7 +6324,9 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                 // in the character where the base pass failed the depth test).
                 let _ = writeln!(h, "    precise {ty} o{ei} : {};", semantic(e));
             } else {
-                let _ = writeln!(h, "    {ty} o{ei} : {};", semantic(e));
+                let interp = if is_ps { None } else { self.out_interp.for_output(e) };
+                let interp = interp.map(|m| format!("{m} ")).unwrap_or_default();
+                let _ = writeln!(h, "    {interp}{ty} o{ei} : {};", semantic(e));
             }
         }
         let no_out = ex.output_sig.is_empty();

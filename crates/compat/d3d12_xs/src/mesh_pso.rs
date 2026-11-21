@@ -8,6 +8,8 @@ pub const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 pub const SUB_ROOT_SIGNATURE: u32 = 0;
 pub const SUB_VS: u32 = 1;
 pub const SUB_PS: u32 = 2;
+pub const SUB_DS: u32 = 3;
+pub const SUB_GS: u32 = 5;
 pub const SUB_CS: u32 = 6;
 pub const SUB_AS: u32 = 24;
 pub const SUB_MS: u32 = 25;
@@ -111,13 +113,19 @@ pub fn stage_rtfmt(ty: u32, (n, f): (u32, [u32; 8])) -> [u8; 8] {
     if ty == SUB_PS { crate::shader_xlat::export_formats(n, &f) } else { [0; 8] }
 }
 
-pub fn translate_stream(stream: &[u8], xlat: &dyn Fn(u32, &[u8], (u32, [u32; 8])) -> Result<Arc<Vec<u8>>, String>) -> Result<(Vec<u8>, Vec<Arc<Vec<u8>>>), String> {
+/// Translates every shader subobject with `xlat(type, blob, render targets, feeds)`, where
+/// `feeds` is the pixel shader's blob for the stage that feeds it (MS, else GS, else DS,
+/// else VS), so that stage can repeat the pixel shader's interpolation modifiers.
+pub fn translate_stream(stream: &[u8], xlat: &dyn Fn(u32, &[u8], (u32, [u32; 8]), Option<&[u8]>) -> Result<Arc<Vec<u8>>, String>) -> Result<(Vec<u8>, Vec<Arc<Vec<u8>>>), String> {
     let subs = parse(stream)?;
     validate(stream, &subs)?;
     let rts = rt_formats(stream, &subs);
+    let code_of = |t: u32| subs.iter().find(|(x, _)| *x == t).map(|(_, o)| bytecode(stream, *o)).filter(|(p, n)| *p != 0 && *n != 0);
+    let feeder = [SUB_MS, SUB_GS, SUB_DS, SUB_VS].into_iter().find(|&t| code_of(t).is_some());
+    let ps = code_of(SUB_PS).map(|(p, n)| unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) });
     let mut out = stream.to_vec();
     let mut keep = Vec::new();
-    for (ty, inner) in subs {
+    for &(ty, inner) in &subs {
         if !matches!(ty, 1..=6 | SUB_AS | SUB_MS) {
             continue;
         }
@@ -126,7 +134,8 @@ pub fn translate_stream(stream: &[u8], xlat: &dyn Fn(u32, &[u8], (u32, [u32; 8])
             continue;
         }
         let blob = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
-        let code = xlat(ty, blob, rts).map_err(|e| format!("subobject {ty}: {e}"))?;
+        let feeds = if Some(ty) == feeder { ps } else { None };
+        let code = xlat(ty, blob, rts, feeds).map_err(|e| format!("subobject {ty}: {e}"))?;
         out[inner..inner + 8].copy_from_slice(&(code.as_ptr() as u64).to_le_bytes());
         out[inner + 8..inner + 16].copy_from_slice(&(code.len() as u64).to_le_bytes());
         keep.push(code);
@@ -149,15 +158,17 @@ pub unsafe fn create_pipeline_state(real: *mut c_void, desc: *const [u64; 2], ri
         return E_INVALIDARG;
     }
     let root = parse(stream).ok().and_then(|s| s.iter().find(|(t, _)| *t == 0).map(|&(_, o)| bytecode(stream, o).0)).unwrap_or(0);
-    let xlat = |ty: u32, b: &[u8], (n, f): (u32, [u32; 8])| {
+    let pc_centroid = crate::centroid_bind::tag_rtfmt(root, [0; 8])[0] & crate::centroid_bind::RTFMT_PC_CENTROID != 0;
+    let xlat = |ty: u32, b: &[u8], (n, f): (u32, [u32; 8]), feeds: Option<&[u8]>| {
+        let link = feeds.map(|ps| crate::shader_xlat::ps_link(ps, pc_centroid)).unwrap_or_else(crate::shader_xlat::no_link);
         if ty == SUB_MS && root != 0 && crate::shader_xlat::needs_external_root_data(b) {
             if let Some(data) = crate::console_slots_mesh::root_data(root as *mut c_void) {
-                return crate::shader_xlat::translate_mesh_with_root(b, &data).map_err(|e| e.to_string());
+                return crate::shader_xlat::translate_mesh_with_root(b, &data, &link).map_err(|e| e.to_string());
             }
         }
         let k = stage_rtfmt(ty, (n, f));
         let k = if ty == SUB_PS { crate::centroid_bind::tag_rtfmt(root, k) } else { k };
-        crate::shader_xlat::translate_for_targets(b.as_ptr(), b.len(), k).map_err(|e| e.to_string())
+        crate::shader_xlat::translate_for_targets(b.as_ptr(), b.len(), k, &link).map_err(|e| e.to_string())
     };
     let (out, keep) = match translate_stream(stream, &xlat) {
         Ok(v) => v,
@@ -267,8 +278,10 @@ mod tests {
         push(&mut s, 17, &[1, 0, 0, 0, 0, 0, 0, 0]);
         let subs = parse(&s).unwrap();
         assert_eq!(subs, vec![(0, 8), (25, 24), (2, 48), (15, 68), (17, 108)]);
-        let xl = |ty: u32, b: &[u8], rts: (u32, [u32; 8])| {
+        let xl = |ty: u32, b: &[u8], rts: (u32, [u32; 8]), feeds: Option<&[u8]>| {
             assert_eq!(rts, (1, [10, 0, 0, 0, 0, 0, 0, 0]), "subobject {ty}");
+            // The mesh shader feeds the pixel shader and is handed its blob.
+            assert_eq!(feeds, if ty == SUB_MS { Some(&ps[..]) } else { None }, "subobject {ty}");
             Ok(Arc::new(b.iter().map(|x| x + 100).collect::<Vec<u8>>()))
         };
         let (out, keep) = translate_stream(&s, &xl).unwrap();
@@ -307,7 +320,7 @@ mod tests {
         push(&mut s, SUB_MS, &bc(&b));
         s.truncate(20);
         assert!(parse(&s).unwrap_err().contains("past the stream end"));
-        let fail = |_: u32, _: &[u8], _: (u32, [u32; 8])| Err::<Arc<Vec<u8>>, String>("translate: x".into());
+        let fail = |_: u32, _: &[u8], _: (u32, [u32; 8]), _: Option<&[u8]>| Err::<Arc<Vec<u8>>, String>("translate: x".into());
         let mut s = Vec::new();
         push(&mut s, SUB_MS, &bc(&b));
         assert!(translate_stream(&s, &fail).unwrap_err().contains("subobject 25"));

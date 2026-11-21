@@ -3,14 +3,17 @@
 //! Xbox shader blob (DXBC wrapper → XDAT → zlib → FSSM → RDNA2) → HLSL (tombox-xshader)
 //! → DXC (`dxcompiler.dll`, SM6 DXIL; FXC/`D3DCompile` SM5 DXBC as fallback) → cached bytecode.
 //! Each unique shader is translated once per process (keyed by an FNV-1a hash of its
-//! bytes). Failures are cached too and reported with the reason; failing shaders are
-//! dumped to `%TEMP%\tombox_shaders` so coverage can be extended offline with `xshader`.
+//! bytes, plus the render-target export formats of a pixel shader and, for the stage feeding
+//! a pixel shader, that shader's interpolation modifiers). Failures are cached too and
+//! reported with the reason; failing shaders are dumped to `%TEMP%\tombox_shaders` so
+//! coverage can be extended offline with `xshader`.
 
 use compat_common::record;
 use core::ffi::c_void;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use tombox_xshader::hlsl::InputInterp;
 
 type Cached = Result<Arc<Vec<u8>>, Arc<String>>;
 static CACHE: OnceLock<Mutex<HashMap<u64, Arc<OnceLock<Cached>>>>> = OnceLock::new();
@@ -159,15 +162,15 @@ pub fn disable_loop_grad(hlsl: &str) -> String {
     tombox_xshader::runtime_hlsl::disable_loop_grad(hlsl)
 }
 
-fn translate_uncached(blob: &[u8], hash: u64, rtfmt: &[u8; 8]) -> Result<Vec<u8>, String> {
-    translate_uncached_with(blob, hash, rtfmt, None, None)
+fn translate_uncached(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp) -> Result<Vec<u8>, String> {
+    translate_uncached_with(blob, hash, rtfmt, link, None, None)
 }
 
 pub(crate) fn translate_edited(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: &dyn Fn(&str) -> Result<String, String>) -> Result<Vec<u8>, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| translate_uncached_with(blob, hash, rtfmt, Some(edit), None))).unwrap_or_else(|_| Err("translator panicked".to_string()))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| translate_uncached_with(blob, hash, rtfmt, &InputInterp::default(), Some(edit), None))).unwrap_or_else(|_| Err("translator panicked".to_string()))
 }
 
-fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: Option<&dyn Fn(&str) -> Result<String, String>>, root: Option<&[u8]>) -> Result<Vec<u8>, String> {
+fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp, edit: Option<&dyn Fn(&str) -> Result<String, String>>, root: Option<&[u8]>) -> Result<Vec<u8>, String> {
     let t_start = std::time::Instant::now();
     let mut ex = tombox_xshader::extract(blob).map_err(|e| {
         dump_failure(hash, blob, None, &e);
@@ -176,7 +179,7 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: Option
     if let Some(root) = root.filter(|_| !ex.has_root_sig) {
         ex.root_sig = Some(tombox_xshader::parse_root_signature(root).map_err(|e| format!("pipeline root signature: {e}"))?);
     }
-    let mut t = tombox_xshader::hlsl::translate(&ex).map_err(|e| {
+    let mut t = tombox_xshader::hlsl::translate_linked(&ex, Some(link)).map_err(|e| {
         dump_failure(hash, blob, None, &e);
         format!("translate: {e}")
     })?;
@@ -302,11 +305,11 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: Option
 /// Translate an Xbox shader blob to PC bytecode (cached). `ptr/len` come from a
 /// D3D12_SHADER_BYTECODE in the title's PSO desc.
 pub unsafe fn translate(ptr: *const u8, len: usize) -> Cached {
-    translate_for_targets(ptr, len, [0; 8])
+    translate_for_targets(ptr, len, [0; 8], &no_link())
 }
 
-pub fn retranslate(blob: &Arc<Vec<u8>>, hash: u64, rtfmt: [u8; 8]) -> Result<Arc<Vec<u8>>, String> {
-    let v = std::panic::catch_unwind(|| translate_uncached(blob, hash, &rtfmt)).unwrap_or_else(|_| Err("translator panicked".to_string()))?;
+pub fn retranslate(blob: &Arc<Vec<u8>>, hash: u64, rtfmt: [u8; 8], link: &InputInterp) -> Result<Arc<Vec<u8>>, String> {
+    let v = std::panic::catch_unwind(|| translate_uncached(blob, hash, &rtfmt, link)).unwrap_or_else(|_| Err("translator panicked".to_string()))?;
     let v = Arc::new(v);
     ORIGIN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(v.as_ptr() as usize, (hash, blob.clone()));
     Ok(v)
@@ -330,6 +333,37 @@ pub fn export_formats(num_rt: u32, formats: &[u32; 8]) -> [u8; 8] {
 
 pub fn cache_key(hash: u64, rtfmt: &[u8; 8]) -> u64 {
     if rtfmt.iter().any(|&k| k != 0) { hash ^ fnv1a(rtfmt).rotate_left(17) } else { hash }
+}
+
+/// [`cache_key`] of a stage translated for the pixel shader it feeds ([`ps_link`]): one
+/// translation per set of interpolation modifiers. Without modifiers the key is unchanged.
+pub fn link_key(key: u64, link: &InputInterp) -> u64 {
+    if link.0.is_empty() { key } else { key ^ fnv1a(format!("{:?}", link.0).as_bytes()).rotate_left(29) }
+}
+
+/// Interpolation modifiers of pixel shader `ps` (its Xbox blob) that the stage feeding it
+/// repeats on its outputs, so DXC packs both signatures alike (D3D12 rejects the pipeline
+/// otherwise, #660/#662). `pc_centroid`: the pixel shader is compiled with `TB_CENTROID_PC`
+/// ([`crate::centroid_bind::tag_rtfmt`]), so its lowered centroid inputs are `centroid`.
+/// Cached per blob; a blob that does not parse gives none (its own translation reports the
+/// error).
+pub fn ps_link(ps: &[u8], pc_centroid: bool) -> Arc<InputInterp> {
+    static LINKS: LazyLock<Mutex<HashMap<u64, Arc<InputInterp>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    let h = fnv1a(ps) ^ pc_centroid as u64;
+    if let Some(l) = LINKS.lock().unwrap_or_else(|e| e.into_inner()).get(&h) {
+        return l.clone();
+    }
+    let ex = std::panic::catch_unwind(|| tombox_xshader::extract(ps)).ok().and_then(Result::ok);
+    let l = ex.map(|ex| tombox_xshader::hlsl::ps_input_interp(&ex)).unwrap_or_default();
+    let l = Arc::new(if pc_centroid { l.pc_centroid() } else { l });
+    LINKS.lock().unwrap_or_else(|e| e.into_inner()).insert(h, l.clone());
+    l
+}
+
+/// The link of a stage that feeds no pixel shader.
+pub fn no_link() -> Arc<InputInterp> {
+    static NONE: LazyLock<Arc<InputInterp>> = LazyLock::new(Default::default);
+    NONE.clone()
 }
 
 pub fn rtfmt_hex(rtfmt: &[u8; 8]) -> String {
@@ -422,12 +456,15 @@ fn write_atomic(p: &std::path::Path, data: &[u8]) {
 
 static PREWARMED: AtomicUsize = AtomicUsize::new(0);
 
-fn produce(blob: &[u8], hash: u64, rtfmt: &[u8; 8], _key: u64) -> Result<Vec<u8>, String> {
-    let r = std::panic::catch_unwind(|| translate_uncached(blob, hash, rtfmt)).unwrap_or_else(|_| Err("translator panicked".to_string()));
+fn produce(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp, _key: u64) -> Result<Vec<u8>, String> {
+    let r = std::panic::catch_unwind(|| translate_uncached(blob, hash, rtfmt, link)).unwrap_or_else(|_| Err("translator panicked".to_string()));
     if let Ok(v) = &r {
         crate::dbcount::note_translated(v, blob, hash, rtfmt);
+        // Prewarm knows a shader by its blob and export formats only, so it would rebuild a
+        // linked translation unlinked. The compiled-shader pack is keyed by the generated
+        // HLSL, so a linked variant is found there on the next run without a manifest entry.
         let sp = src_path(hash, rtfmt);
-        if !sp.exists() {
+        if link.0.is_empty() && !sp.exists() {
             write_atomic(&sp, blob);
         }
     }
@@ -543,7 +580,7 @@ pub fn start_prewarm() {
                     let mut ran = false;
                     c.get_or_init(|| {
                         ran = true;
-                        finish(produce(&blob, h, &rt, key), h, blob.len(), &blob)
+                        finish(produce(&blob, h, &rt, &InputInterp::default(), key), h, blob.len(), &blob)
                     });
                     if ran {
                         done += 1;
@@ -578,25 +615,28 @@ fn helper_pool() -> &'static Mutex<std::sync::mpsc::Sender<Job>> {
     })
 }
 
-pub unsafe fn prefetch(ptr: *const u8, len: usize, rtfmt: [u8; 8]) -> bool {
+pub unsafe fn prefetch(ptr: *const u8, len: usize, rtfmt: [u8; 8], link: &Arc<InputInterp>) -> bool {
     if ptr.is_null() || len < 32 || len > 0x40_0000 {
         return false;
     }
     let blob = core::slice::from_raw_parts(ptr, len);
     let hash = fnv1a(blob);
-    let key = cache_key(hash, &rtfmt);
+    let key = link_key(cache_key(hash, &rtfmt), link);
     let c = cell(key);
     if c.get().is_some() {
         return false;
     }
     let blob = Arc::new(blob.to_vec());
+    let link = link.clone();
     let job: Job = Box::new(move || {
-        c.get_or_init(|| crate::perf::timed(crate::perf::SHADER, || finish(produce(&blob, hash, &rtfmt, key), hash, blob.len(), &blob)));
+        c.get_or_init(|| crate::perf::timed(crate::perf::SHADER, || finish(produce(&blob, hash, &rtfmt, &link, key), hash, blob.len(), &blob)));
     });
     helper_pool().lock().unwrap_or_else(|e| e.into_inner()).send(job).is_ok()
 }
 
-pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8]) -> Cached {
+/// Translate a shader for a pipeline: `rtfmt` are the export formats of a pixel shader
+/// ([`export_formats`]), `link` the [`ps_link`] of the pixel shader a VS/GS/MS feeds.
+pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8], link: &InputInterp) -> Cached {
     if ptr.is_null() || len < 32 || len > 0x40_0000 {
         return Err(Arc::new(format!("bad shader blob ({ptr:p}, {len})")));
     }
@@ -605,7 +645,7 @@ pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8]) 
     let hash = fnv1a(blob);
     crate::shader_dump::note(blob, hash, &rtfmt, None);
     let fmt_key = rtfmt.iter().any(|&k| k != 0);
-    let key = cache_key(hash, &rtfmt);
+    let key = link_key(cache_key(hash, &rtfmt), link);
     let c = cell(key);
     if let Some(hit) = c.get() {
         return hit.clone();
@@ -616,8 +656,14 @@ pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8]) 
             record("d3d12_xs", "shader_xlat", &format!("export-format PS hash={hash:016x} rtfmt={rtfmt:?} (1=fp16 RTZ, 2=r11g11b10)"));
         }
     }
+    if !link.0.is_empty() {
+        static LINKN: AtomicUsize = AtomicUsize::new(0);
+        if LINKN.fetch_add(1, Ordering::Relaxed) < 12 {
+            record("d3d12_xs", "shader_xlat", &format!("hash={hash:016x} feeds a pixel shader with interpolation modifiers {:?}", link.0));
+        }
+    }
     let t0 = std::time::Instant::now();
-    let entry = c.get_or_init(|| crate::perf::timed(crate::perf::SHADER, || finish(produce(blob, hash, &rtfmt, key), hash, len, blob))).clone();
+    let entry = c.get_or_init(|| crate::perf::timed(crate::perf::SHADER, || finish(produce(blob, hash, &rtfmt, link, key), hash, len, blob))).clone();
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
     if ms > 1.0 {
         BLOCKED_US.fetch_add((ms * 1000.0) as u64, Ordering::Relaxed);
@@ -637,13 +683,13 @@ pub fn needs_external_root_data(blob: &[u8]) -> bool {
         && tombox_xshader::Dxbc::parse(blob).is_ok_and(|dxbc| dxbc.chunk(b"RTS0").is_none())
 }
 
-pub fn translate_mesh_with_root(blob: &[u8], root: &[u8]) -> Cached {
+pub fn translate_mesh_with_root(blob: &[u8], root: &[u8], link: &InputInterp) -> Cached {
     let hash = fnv1a(blob);
     crate::shader_dump::note(blob, hash, &[0; 8], Some(root));
-    let entry = mesh_root_cell(hash, root);
+    let entry = mesh_root_cell(link_key(hash, link), root);
     entry.get_or_init(|| {
         crate::perf::timed(crate::perf::SHADER, || {
-            let result = std::panic::catch_unwind(|| translate_uncached_with(blob, hash, &[0; 8], None, Some(root)))
+            let result = std::panic::catch_unwind(|| translate_uncached_with(blob, hash, &[0; 8], link, None, Some(root)))
                 .unwrap_or_else(|_| Err("translator panicked".to_string()));
             finish_with(result, hash, blob.len(), None)
         })
@@ -692,13 +738,13 @@ mod tests {
 
     #[test]
     fn prefetch_rejects_bad_blobs_and_known_shaders() {
-        assert!(!unsafe { prefetch(core::ptr::null(), 64, [0; 8]) });
+        assert!(!unsafe { prefetch(core::ptr::null(), 64, [0; 8], &no_link()) });
         let blob = vec![7u8; 16];
-        assert!(!unsafe { prefetch(blob.as_ptr(), blob.len(), [0; 8]) });
+        assert!(!unsafe { prefetch(blob.as_ptr(), blob.len(), [0; 8], &no_link()) });
         let known = vec![0x5au8; 64];
         let key = cache_key(fnv1a(&known), &[0; 8]);
         let _ = cell(key).set(Ok(Arc::new(vec![1])));
-        assert!(!unsafe { prefetch(known.as_ptr(), known.len(), [0; 8]) });
+        assert!(!unsafe { prefetch(known.as_ptr(), known.len(), [0; 8], &no_link()) });
         let sent = std::sync::mpsc::channel::<u8>();
         let job: Job = Box::new(move || { let _ = sent.0.send(9); });
         assert!(helper_pool().lock().unwrap().send(job).is_ok());
@@ -731,6 +777,22 @@ mod tests {
         assert_eq!(disable_loop_grad("#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\n    #if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\nx"), "#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\n    #if 0\nx");
         assert_eq!(cache_key(5, &[0; 8]), 5);
         assert_ne!(cache_key(5, &rt), 5);
+    }
+
+    #[test]
+    fn feeding_stage_key_follows_the_pixel_shader_modifiers() {
+        let centroid = InputInterp(vec![("TEXCOORD1_centroid0".into(), "centroid".into())]);
+        let other = InputInterp(vec![("TEXCOORD2_centroid0".into(), "centroid".into())]);
+        let key = cache_key(5, &[0; 8]);
+        assert_eq!(link_key(key, &no_link()), key);
+        assert_ne!(link_key(key, &centroid), key);
+        assert_ne!(link_key(key, &centroid), link_key(key, &other));
+        assert_eq!(link_key(key, &centroid), link_key(key, &centroid.clone()));
+        // A blob that is not a shader links nothing (and is remembered).
+        let junk = vec![0x11u8; 64];
+        assert!(ps_link(&junk, false).0.is_empty());
+        assert!(Arc::ptr_eq(&ps_link(&junk, true), &ps_link(&junk, true)));
+        assert_eq!(InputInterp(vec![("T0".into(), "TB_CEN_Q".into())]).pc_centroid().0[0].1, "centroid");
     }
 }
 

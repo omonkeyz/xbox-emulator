@@ -146,6 +146,10 @@ unsafe fn rebuild(dev: *mut c_void, pso: usize, want: &Want, keep: &mut Vec<std:
     if !hit {
         return Ok(None);
     }
+    // As at creation: the stage feeding the pixel shader repeats its interpolation modifiers.
+    let feeder = ["gs", "ds", "vs"].into_iter().find(|n| stages.iter().any(|s| s.name == *n));
+    let pc_centroid = crate::centroid_bind::tag_rtfmt(u64::from_le_bytes(desc[0..8].try_into().unwrap()), [0; 8])[0] & crate::centroid_bind::RTFMT_PC_CENTROID != 0;
+    let ps_link = stages.iter().find(|s| s.name == "ps").map(|s| crate::shader_xlat::ps_link(&s.blob, pc_centroid)).unwrap_or_else(crate::shader_xlat::no_link);
     for s in &stages {
         let rtfmt = if s.name == "ps" {
             let mut f = [0u32; 8];
@@ -156,7 +160,8 @@ unsafe fn rebuild(dev: *mut c_void, pso: usize, want: &Want, keep: &mut Vec<std:
         } else {
             [0u8; 8]
         };
-        let code = crate::shader_xlat::retranslate(&s.blob, s.hash, rtfmt).map_err(|e| format!("{} {:016x}: {}", s.name, s.hash, e.lines().next().unwrap_or("")))?;
+        let link = if Some(s.name) == feeder { ps_link.clone() } else { crate::shader_xlat::no_link() };
+        let code = crate::shader_xlat::retranslate(&s.blob, s.hash, rtfmt, &link).map_err(|e| format!("{} {:016x}: {}", s.name, s.hash, e.lines().next().unwrap_or("")))?;
         wr64(&mut desc, s.off, code.as_ptr() as u64);
         wr64(&mut desc, s.off + 8, code.len() as u64);
         keep.push(code);

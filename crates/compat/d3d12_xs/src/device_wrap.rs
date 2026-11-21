@@ -785,8 +785,20 @@ unsafe extern "system" fn create_gfx_pso_sync(
     let ps_opts = if _pext.is_null() || _num_ext == 0 { None } else { crate::pso_ext::ps::options_in_entries(unsafe { core::slice::from_raw_parts(_pext, _num_ext as usize * crate::pso_ext::EXT_STRIDE) }, _num_ext as usize) };
     let mut ps_origin: Option<crate::pso_ext::ps::PsOrigin> = None;
     let stages = [("VS", 0x08usize), ("PS", 0x18), ("DS", 0x28), ("HS", 0x38), ("GS", 0x48)];
-    for &(stage, off) in stages.iter().filter(|&&(_, o)| rd(&desc, o) != 0 && rd(&desc, o + 8) != 0).skip(1) {
-        unsafe { crate::shader_xlat::prefetch(rd(&desc, off) as *const u8, rd(&desc, off + 8) as usize, stage_rtfmt(stage, &desc)) };
+    let present = |o: usize| rd(&desc, o) != 0 && rd(&desc, o + 8) != 0;
+    // The stage feeding the pixel shader (GS, else DS, else VS) repeats the pixel shader's
+    // interpolation modifiers on its outputs, so DXC packs both signatures alike.
+    let feeder = if present(0x48) { 0x48 } else if present(0x28) { 0x28 } else { 0x08 };
+    let ps_len = rd(&desc, 0x20) as usize;
+    let ps_link = if present(0x18) && (32..=0x40_0000).contains(&ps_len) {
+        let pc_centroid = stage_rtfmt("PS", &desc)[0] & crate::centroid_bind::RTFMT_PC_CENTROID != 0;
+        crate::shader_xlat::ps_link(unsafe { core::slice::from_raw_parts(rd(&desc, 0x18) as *const u8, ps_len) }, pc_centroid)
+    } else {
+        crate::shader_xlat::no_link()
+    };
+    let link = |off: usize| if off == feeder { ps_link.clone() } else { crate::shader_xlat::no_link() };
+    for &(stage, off) in stages.iter().filter(|&&(_, o)| present(o)).skip(1) {
+        unsafe { crate::shader_xlat::prefetch(rd(&desc, off) as *const u8, rd(&desc, off + 8) as usize, stage_rtfmt(stage, &desc), &link(off)) };
     }
     for (stage, off) in stages {
         let (p, n) = (rd(&desc, off) as *const u8, rd(&desc, off + 8) as usize);
@@ -794,7 +806,7 @@ unsafe extern "system" fn create_gfx_pso_sync(
             continue;
         }
         let rtfmt = stage_rtfmt(stage, &desc);
-        match unsafe { crate::shader_xlat::translate_for_targets(p, n, rtfmt) } {
+        match unsafe { crate::shader_xlat::translate_for_targets(p, n, rtfmt, &link(off)) } {
             Ok(code) => {
                 let code = if stage == "PS" {
                     ps_origin = crate::pso_ext::ps::origin_from_blob(p, n, rtfmt, ps_opts.unwrap_or_default());
@@ -1236,7 +1248,7 @@ unsafe extern "system" fn create_derived_pso_x(
         }
     }
     if let Some(o) = ps_origin.as_ref().filter(|o| o.options.iter().any(|&v| v != 0)) {
-        let code = crate::pso_ext::ps::variant(o, crate::pso_ext::ps::depth_stencil_writes(&desc)).or_else(|| unsafe { crate::shader_xlat::translate_for_targets(o.blob.as_ptr(), o.blob.len(), o.rtfmt) }.ok());
+        let code = crate::pso_ext::ps::variant(o, crate::pso_ext::ps::depth_stencil_writes(&desc)).or_else(|| unsafe { crate::shader_xlat::translate_for_targets(o.blob.as_ptr(), o.blob.len(), o.rtfmt, &crate::shader_xlat::no_link()) }.ok());
         if let Some(code) = code {
             desc[0x18..0x20].copy_from_slice(&(code.as_ptr() as u64).to_le_bytes());
             desc[0x20..0x28].copy_from_slice(&(code.len() as u64).to_le_bytes());

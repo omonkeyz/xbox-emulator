@@ -546,11 +546,11 @@ impl Engine {
         r
     }
 
-    fn translate(&mut self, pso: u64, stage: &str, hash: u64, rtfmt: [u8; 8]) -> Option<Vec<u8>> {
+    fn translate(&mut self, pso: u64, stage: &str, hash: u64, rtfmt: [u8; 8], link: &tombox_xshader::hlsl::InputInterp) -> Option<Vec<u8>> {
         let blob = std::fs::read(self.cap.dir.join("pso").join(format!("{pso:x}_{stage}.xbox"))).ok()?;
         let r = (|| -> Result<Vec<u8>, String> {
             let ex = tombox_xshader::extract(&blob)?;
-            let mut t = tombox_xshader::hlsl::translate(&ex)?;
+            let mut t = tombox_xshader::hlsl::translate_linked(&ex, Some(link))?;
             if let Some(dir) = &self.opts.hlsl_override {
                 if let Ok(h) = std::fs::read_to_string(dir.join(format!("{hash:016x}.hlsl"))) {
                     t.hlsl = h;
@@ -615,7 +615,7 @@ impl Engine {
             let (mut desc, mut code) = pso_serial::decode_compute(&parts)?;
             if self.opts.retranslate {
                 if let Some(h) = hash_of("cs") {
-                    if let Some(c) = self.translate(game, "cs", h, [0; 8]) {
+                    if let Some(c) = self.translate(game, "cs", h, [0; 8], &Default::default()) {
                         code = c;
                     }
                 }
@@ -642,12 +642,23 @@ impl Engine {
                     _ => 0,
                 };
             }
-            for (k, st) in ["vs", "ps", "ds", "hs", "gs"].iter().enumerate() {
+            // As in d3d12_xs: the stage feeding the pixel shader (GS, else DS, else VS)
+            // repeats its interpolation modifiers so both signatures pack alike.
+            let stages = ["vs", "ps", "ds", "hs", "gs"];
+            let feeder = [4usize, 2, 0].into_iter().find(|&k| code[k].is_some()).map(|k| stages[k]);
+            let link = std::fs::read(self.cap.dir.join("pso").join(format!("{game:x}_ps.xbox")))
+                .ok()
+                .and_then(|b| tombox_xshader::extract(&b).ok())
+                .map(|ex| tombox_xshader::hlsl::ps_input_interp(&ex))
+                .unwrap_or_default();
+            let none = tombox_xshader::hlsl::InputInterp::default();
+            for (k, st) in stages.iter().enumerate() {
                 if code[k].is_none() {
                     continue;
                 }
                 if let Some(h) = hash_of(st) {
-                    if let Some(c) = self.translate(game, st, h, if *st == "ps" { rtfmt } else { [0; 8] }) {
+                    let l = if Some(*st) == feeder { &link } else { &none };
+                    if let Some(c) = self.translate(game, st, h, if *st == "ps" { rtfmt } else { [0; 8] }, l) {
                         code[k] = Some(c);
                     }
                 }
