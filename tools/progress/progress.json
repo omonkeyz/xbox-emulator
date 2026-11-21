@@ -1135,7 +1135,8 @@
   "MFResetDXGIDeviceManagerX": "unwraps the d3d12_xs device to the real PC ID3D12Device and calls IMFDXGIDeviceManager::ResetDevice; run 23 tombox_compat.log:601 hr=0; test reset_device.rs",
   "D3D12XboxCreateDevice": "real PC D3D12 device wrapped with the Xbox vtable layout",
   "GameInputCreate": "GameInput.dll is not emulated: the console DLL exports only ordinal 1 = GameInputCreate (19041.3948 / 22000.4429 / 22621.1852, pefile), the PC GameInput.dll exports GameInputCreate at ordinal 1, so the title's #1 import binds to the PC GameInputCreate; compat-common gamepad.rs patches the host EXE's import slot only (TerrariaNative.dll's own #1 import is not redirected)",
-  "stages_audit": "2026-11-21 verifier: Hull/Domain have no translation (translate_with returns stage not supported; HS/DS PSOs fail E_FAIL). VS/PS/CS/GS translate and compile (Fortnite lobby 812/0) but no end-to-end per-stage output test exists yet; held yellow until verified."
+  "stages_audit": "2026-11-21 verifier: Hull/Domain have no translation (translate_with returns stage not supported; HS/DS PSOs fail E_FAIL). VS/PS/CS/GS translate and compile (Fortnite lobby 812/0) but no end-to-end per-stage output test exists yet; held yellow until verified.",
+  "console_verified_20261121": "Independent verifier 2026-11-21 PASS vs console DLLs (19041/22000/22621): KernelBase Add/RemovePackageToFamilyXref, advapi32(+legacy) LsaEnable/DisablePasswordLessCurrentUser, hix_xs CollectHangSummary/WriteHangDump/DebugLive (dump lacks GPU state, BLOCKERS), KernelTraceControl CreateMergedTraceFile, netprofmsvc_c DllMain, wldp WldpSendSmartAppControlBlockToast, xg_xs XGDecodeDCC, xbtp 16 exports, GCXAudioExt CreateXmaBufferEngine (CPU XMA decode), minappmodelx 1-4. FAIL: xbtp AddPipeEndpoint duplicate path, xmem XMemGetWorkingSetStatistics v2/legacy field copy."
  },
  "hooked": {
   "file": "crates/compat/compat-common/src/net_guard.rs",
@@ -2870,56 +2871,8 @@
   "xtffileio.dll": [
    "#4"
   ],
-  "xg_xs.dll": [
-   "XGDecodeDCC"
-  ],
-  "KernelTraceControl.dll": [
-   "CreateMergedTraceFile"
-  ],
-  "hix_xs.dll": [
-   "WriteHangDump",
-   "DebugLive",
-   "CollectHangSummary"
-  ],
-  "KernelBase.dll": [
-   "AddPackageToFamilyXref",
-   "RemovePackageFromFamilyXref"
-  ],
-  "advapi32.dll": [
-   "LsaDisablePasswordLessCurrentUser",
-   "LsaEnablePasswordLessCurrentUser"
-  ],
-  "advapi32legacy.dll": [
-   "LsaDisablePasswordLessCurrentUser",
-   "LsaEnablePasswordLessCurrentUser"
-  ],
-  "netprofmsvc_c.dll": [
-   "DllMain"
-  ],
-  "wldp.dll": [
-   "WldpSendSmartAppControlBlockToast"
-  ],
   "xbtp.dll": [
-   "??1XbtpConnectionDispatcher@@QEAA@XZ",
-   "?AddPipeEndpoint@XbtpConnectionDispatcher@@QEAAJPEBG@Z",
-   "?Initialize@XbtpConnectionDispatcher@@QEAAJV?$shared_ptr@VXbtpExtensionRegistry@@@std@@V?$shared_ptr@VXbtpConnection@@@3@1@Z",
-   "?Run@XbtpConnectionDispatcher@@QEAAJXZ",
-   "?Shutdown@XbtpConnectionDispatcher@@QEAAXXZ",
-   "?XbtpCompleteSessionSetupInternal@@YAJAEBU_GUID@@_NIV?$shared_ptr@VXbtpConnection@@@std@@PEAPEAVXbtpSession@@@Z",
-   "?XbtpOpenPipeSession@@YAJPEBGAEBU_GUID@@1PEAPEAX@Z",
-   "?XbtpOpenPipeSession@@YAJPEBGAEBU_GUID@@PEAV?$shared_ptr@VXbtpSession@@@std@@@Z",
-   "?XbtpOpenSession@@YAJAEBU_GUID@@PEBGKPEAPEAVXbtpSession@@_N@Z",
-   "?XbtpOpenSessionInternal@@YAJAEBU_GUID@@PEBGKPEAPEAVXbtpSession@@_NI@Z",
-   "?XbtpWrapDispatcher@@YAJV?$shared_ptr@VXbtpConnectionDispatcher@@@std@@AEBU_GUID@@PEAPEAX@Z",
-   "XbtpOpenSession",
-   "XbtpOpenSession2",
-   "XbtpOpenSessionEx",
-   "XbtpOpenSessionEx2",
-   "XbtpStartDispatcher",
-   "XbtpStartDispatcherEx"
-  ],
-  "GCXAudioExt.dll": [
-   "CreateXmaBufferEngine"
+   "?AddPipeEndpoint@XbtpConnectionDispatcher@@QEAAJPEBG@Z"
   ],
   "d3d12_xs.dll": [
    "D3D12CreateDevice",
@@ -2968,6 +2921,9 @@
   ],
   "GDK XSystemAnalytics (QueryApiImpl)": [
    "XSystemGetAnalyticsInfo"
+  ],
+  "xmem.dll": [
+   "XMemGetWorkingSetStatistics"
   ]
  }
 }
