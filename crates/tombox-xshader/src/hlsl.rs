@@ -1649,6 +1649,12 @@ impl<'a> Emitter<'a> {
                 self.cb_size.insert(slot, 4096 * 4);
                 return Ok(Res::CbDyn(slot));
             }
+            None if self.ex.root_sig.is_none() => {
+                return Err(format!(
+                    "mubuf at {:#x}: missing root signature for descriptor table in s{table}",
+                    ins.offset
+                ));
+            }
             other => return Err(format!("mubuf at {:#x}: buffer in table of kind {other:?}", ins.offset)),
         };
         if ins.mnemonic.contains("_atomic_") {
@@ -1927,6 +1933,14 @@ impl<'a> Emitter<'a> {
                     // 0x20 in MainOnePassPointLightPS).
                     let bsym = sym.get(&b).copied().or_else(|| (!written.contains(&b)).then_some(Sym::Table(b as u8)));
                     let cands = self.desc_candidates(bsym.as_ref(), 32).ok_or_else(|| {
+                        if let Some(Sym::Table(root)) = bsym {
+                            if self.ex.root_sig.is_none() {
+                                return format!(
+                                    "s_buffer_load at {:#x}: missing root signature for base s{b} (root s{root})",
+                                    ins.offset
+                                );
+                            }
+                        }
                         format!("s_buffer_load at {:#x}: base s{b} is not a buffer descriptor ({:?})", ins.offset, sym.get(&b))
                     })?;
                     // A dynamic SOFFSET register indexes the buffer at run time: size the

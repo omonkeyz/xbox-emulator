@@ -237,6 +237,67 @@ fn mesh_clip_distance_export_maps_to_pos1() {
 }
 
 #[test]
+fn mesh_scalar_buffer_load_uses_root_descriptor_for_aliased_register() {
+    use tombox_xshader::meta::{RootParam, RootParamKind, RootSig};
+
+    // Copy a user SGPR through two aliases, then read a dword from that buffer.
+    let mut words = vec![sop1(3, 0, 16), sop1(3, 28, 0), 0xf420_000e, 0xfa00_0000];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    let Err(error) = translate(&shader) else {
+        panic!("a scalar buffer load requires a known root descriptor");
+    };
+    assert!(error.contains("missing root signature for base s28 (root s16)"), "{error}");
+
+    shader.has_root_sig = true;
+    shader.root_sig = Some(RootSig {
+        version: 2,
+        flags: 0,
+        params: vec![RootParam {
+            visibility: 0,
+            kind: RootParamKind::Descriptor { kind: 2, register: 7, space: 2 },
+        }],
+        num_static_samplers: 0,
+    });
+    let translated = translate(&shader).expect("explicit CBV root descriptor");
+    assert!(translated.hlsl.contains("register(b7, space2)"), "{}", translated.hlsl);
+}
+
+#[test]
+fn mesh_typed_buffer_load_uses_root_table_range() {
+    use tombox_xshader::meta::{RootParam, RootParamKind, RootRange, RootSig};
+
+    // Read slot 1 via the table in s16, then use that descriptor for a typed load.
+    let mut words = vec![0xf408_0008, 0xfa00_0020, 0xe000_2000, 0x8000_0101];
+    words.extend(console_ms(3, 1, 0));
+    let mut shader = ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs());
+    let Err(error) = translate(&shader) else {
+        panic!("a typed buffer load requires a known descriptor table");
+    };
+    assert!(error.contains("missing root signature for descriptor table in s16"), "{error}");
+
+    shader.has_root_sig = true;
+    shader.root_sig = Some(RootSig {
+        version: 2,
+        flags: 0,
+        params: vec![RootParam {
+            visibility: 0,
+            kind: RootParamKind::Table(vec![RootRange {
+                range_type: 0,
+                num: 1,
+                base_register: 7,
+                space: 2,
+                offset_in_table: 1,
+            }]),
+        }],
+        num_static_samplers: 0,
+    });
+    let translated = translate(&shader).expect("explicit SRV descriptor range");
+    assert!(translated.hlsl.contains("Buffer<"), "{}", translated.hlsl);
+    assert!(translated.hlsl.contains("register(t7, space2)"), "{}", translated.hlsl);
+}
+
+#[test]
 fn mesh_refusals_are_explicit() {
     let base = console_ms(3, 1, 0);
     let mut mi = mesh_info(128, 128, 128, 2);
