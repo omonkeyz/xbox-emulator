@@ -4237,6 +4237,22 @@ impl<'a> Emitter<'a> {
             let halves: Vec<String> = if (w0 >> 15) & 1 != 0 { halves.into_iter().map(|h| format!("saturate({h})")).collect() } else { halves };
             return self.wv(&d, &format!("(tb_f2h({}) | (tb_f2h({}) << 16))", halves[0], halves[1]));
         }
+        if matches!(m.as_str(), "v_pk_lshlrev_b16" | "v_pk_lshrrev_b16") {
+            // Packed 16-bit shifts (VOP3P, RDNA2 ISA §6.4): each half of the result is the
+            // selected half of S1 shifted by bits [3:0] of the selected half of S0. Halves are
+            // picked by OPSEL (low result) and OPSEL_HI (high result) as for the f16 ops above.
+            let (w0, w1) = (ins.raw[0], ins.raw.get(1).copied().unwrap_or(0));
+            if (w1 >> 29) & 7 != 0 || (w0 >> 8) & 7 != 0 || (w0 >> 15) & 1 != 0 {
+                return Err(format!("{m}: NEG/NEG_HI/CLAMP on an integer packed op"));
+            }
+            let sel = [(w0 >> 11) & 7, ((w1 >> 27) & 3) | (((w0 >> 14) & 1) << 2)];
+            let mut halves = Vec::new();
+            for h in sel {
+                let x: Vec<String> = (0..2).map(|i| r(&s[i]).map(|x| if (h >> i) & 1 != 0 { format!("(({x}) >> 16)") } else { format!("(({x}) & 0xffffu)") })).collect::<Result<_, _>>()?;
+                halves.push(if m == "v_pk_lshlrev_b16" { format!("(({} << ({} & 15u)) & 0xffffu)", x[1], x[0]) } else { format!("({} >> ({} & 15u))", x[1], x[0]) });
+            }
+            return self.wv(&d, &format!("({} | ({} << 16))", halves[0], halves[1]));
+        }
         if matches!(m.as_str(), "v_min3_f16" | "v_max3_f16" | "v_med3_f16") {
             let (a, b, c) = (h16(&s[0])?, h16(&s[1])?, h16(&s[2])?);
             let e = match m.as_str() {
