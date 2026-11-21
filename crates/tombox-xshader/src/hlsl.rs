@@ -320,6 +320,7 @@ struct Emitter<'a> {
     uav_uint: BTreeSet<u32>,
     /// The shader uses wave intrinsics (needs shader model 6: DXC only).
     uses_wave: bool,
+    gds_counter: Option<gds::CounterMode>,
     msel: HashMap<usize, MSel>,
     /// Buffer ops (MUBUF, s_buffer_load) whose descriptor register holds one of several
     /// descriptors: (register key, candidates as (descriptor id, resource)).
@@ -919,6 +920,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
         multi_sets: Vec::new(),
         uav_uint: BTreeSet::new(),
         uses_wave: false,
+        gds_counter: None,
         msel: HashMap::new(),
         bsel: HashMap::new(),
         dsel_loads: HashMap::new(),
@@ -1002,6 +1004,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
     };
     let profile = match (em.sm6_minor, profile.split('_').next()) {
         (0, _) => profile,
+        (6, Some("cs")) => "cs_6_6",
         (7, Some("ps")) => "ps_6_7",
         (7, Some("vs")) => "vs_6_7",
         (7, Some("cs")) => "cs_6_7",
@@ -6057,9 +6060,7 @@ impl<'a> Emitter<'a> {
         if let Some(x) = self.xlane_header()? {
             let _ = writeln!(h, "{x}");
         }
-        if let Some(x) = gds::gds_header(&self.body) {
-            let _ = writeln!(h, "{x}");
-        }
+        let native_gds_wave32 = self.write_gds_header(&mut h)?;
         if let Some(x) = self.rm_header() {
             let _ = write!(h, "{x}");
         }
@@ -6080,8 +6081,12 @@ impl<'a> Emitter<'a> {
             let (tx, ty_, tz) = (p[1].max(1), p[2].max(1), p[3].max(1));
             let nparams = ex.root_sig.as_ref().map(|r| r.params.len()).unwrap_or(4);
             let g = self.cs_tgid_base(nparams);
+            if native_gds_wave32 {
+                let _ = writeln!(h, "[WaveSize(32)]");
+            }
+            let group_index = if self.gds_counter.is_some() { ", uint tb_gi : SV_GroupIndex" } else { "" };
             let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]
-void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
+void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID{group_index}) {{");
             let _ = writeln!(h, "    uint exec_lo = 1u, exec_hi = 0u, vcc_lo = 0u, vcc_hi = 0u, scc = 0u, m0 = 0u, nul = 0u;");
             for r in ["v0", "v1", "v2"] {
                 self.regs.insert(r.to_string());
