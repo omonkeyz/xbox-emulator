@@ -119,11 +119,18 @@ impl Port {
                 let mut q = me.items.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     if let Some(j) = q.pop_front() {
-                        break j;
+                        break Some(j);
+                    }
+                    if me.users.load(Ordering::Acquire) == 0 {
+                        // Termination can still enqueue completion markers. Reset
+                        // under the queue lock so a later marker can start a worker.
+                        me.serial_started.store(false, Ordering::Release);
+                        break None;
                     }
                     q = me.cv.wait(q).unwrap_or_else(|e| e.into_inner());
                 }
             };
+            let Some(job) = job else { return };
             job(me.terminated.load(Ordering::Acquire));
         });
     }
@@ -759,4 +766,85 @@ pub fn interfaces() -> Vec<Iface> {
             (30, thread_is_time_sensitive as usize),
         ],
     }]
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn running_serial_port(users: usize) -> Arc<Port> {
+        let port = Port::new(SERIALIZED);
+        port.users.store(users, Ordering::Release);
+        let (tx, rx) = mpsc::channel();
+        port.submit(Box::new(move |canceled| tx.send(canceled).unwrap()));
+        assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        port
+    }
+
+    fn assert_worker_stopped(port: &Arc<Port>) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(port) != 1 {
+            assert!(Instant::now() < deadline, "serialized worker still holds its port");
+            std::thread::yield_now();
+        }
+        assert!(!port.serial_started.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn serialized_worker_exits_after_last_user_releases_the_port() {
+        let port = running_serial_port(1);
+        port.release();
+        assert_worker_stopped(&port);
+        assert!(port.terminated.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn serialized_worker_survives_release_of_one_shared_user() {
+        let port = running_serial_port(2);
+        port.release();
+        assert!(!port.terminated.load(Ordering::Acquire));
+        let (tx, rx) = mpsc::channel();
+        port.submit(Box::new(move |canceled| tx.send(canceled).unwrap()));
+        assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        port.release();
+        assert_worker_stopped(&port);
+    }
+
+    #[test]
+    fn serialized_completion_marker_restarts_a_released_port_worker() {
+        let port = running_serial_port(1);
+        port.release();
+        assert_worker_stopped(&port);
+        let (tx, rx) = mpsc::channel();
+        port.submit_marker(Box::new(move |_| tx.send(()).unwrap()));
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_worker_stopped(&port);
+    }
+
+    #[test]
+    fn terminating_a_live_serialized_port_still_delivers_its_marker() {
+        let port = Port::new(SERIALIZED);
+        port.users.store(1, Ordering::Release);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        port.submit(Box::new(move |_| {
+            started_tx.send(()).unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }));
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        port.submit(Box::new(move |canceled| cancel_tx.send(canceled).unwrap()));
+        port.cancel_all();
+        assert!(cancel_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        let (marker_tx, marker_rx) = mpsc::channel();
+        port.submit_marker(Box::new(move |_| marker_tx.send(()).unwrap()));
+        assert!(matches!(marker_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        finish_tx.send(()).unwrap();
+        marker_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        port.release();
+        assert_worker_stopped(&port);
+    }
 }
