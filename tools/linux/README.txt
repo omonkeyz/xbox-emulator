@@ -45,6 +45,21 @@ VK_LOADER_DRIVERS_SELECT picks the Vulkan driver: '*intel*', '*radeon*', or
 '*lvp*' for Mesa's software renderer (llvmpipe). TOMBOX_EXEC_HW=1 is needed
 because Wine has no WARP adapter for the default path to enumerate.
 
+NVIDIA (untested)
+-----------------
+
+Mesa's drivers reach the GPU through /dev/dri, which run.sh passes in. NVIDIA's
+proprietary driver does not work that way: the container needs the driver's own
+libraries, which the NVIDIA Container Toolkit injects. When the host has
+nvidia-smi and the container engine knows the nvidia runtime, run.sh adds
+`--gpus all` (podman: `--device nvidia.com/gpu=all`) and asks for all driver
+capabilities, so the Vulkan ICD is included. Select the driver with
+
+    VK_LOADER_DRIVERS_SELECT='*nvidia*'
+
+This path was written from the toolkit's documentation and has not been run on
+an NVIDIA machine. TOMBOX_LINUX_GPU=dri, nvidia or none overrides the detection.
+
 How it differs from a Windows build
 -----------------------------------
 

@@ -17,8 +17,28 @@ mkdir -p "$cache"/{xwin,cargo-registry,cargo-git,target,wine,dxc,vkd3d-shader-ca
 
 tty=()
 [ -t 0 ] && [ -t 1 ] && tty=(-it)
+# GPU access. Mesa's drivers (Intel, AMD, llvmpipe) only need /dev/dri. NVIDIA's
+# proprietary driver needs the NVIDIA Container Toolkit on the host, which injects its
+# libraries and Vulkan ICD. The nvidia branch is UNTESTED: it follows the toolkit's
+# documentation and has not been run. TOMBOX_LINUX_GPU=dri|nvidia|none overrides the guess.
 gpu=()
-[ -e /dev/dri ] && gpu=(--device /dev/dri)
+gpu_mode="${TOMBOX_LINUX_GPU:-auto}"
+if [ "$gpu_mode" = auto ]; then
+    gpu_mode=dri
+    if command -v nvidia-smi >/dev/null 2>&1 && "$engine" info 2>/dev/null | grep -qi nvidia; then
+        gpu_mode=nvidia
+    fi
+fi
+case "$gpu_mode" in
+    nvidia)
+        if [ "$engine" = podman ]; then gpu=(--device nvidia.com/gpu=all); else gpu=(--gpus all); fi
+        gpu+=(-e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all)
+        [ -e /dev/dri ] && gpu+=(--device /dev/dri)
+        ;;
+    dri) [ -e /dev/dri ] && gpu=(--device /dev/dri) ;;
+    none) ;;
+    *) echo "TOMBOX_LINUX_GPU must be auto, dri, nvidia or none (got '$gpu_mode')" >&2; exit 2 ;;
+esac
 
 # Pass through the caller's settings for the runtime, Vulkan and Wine, for example
 #   TOMBOX_EXEC_HW=1 VK_LOADER_DRIVERS_SELECT='*lvp*' tools/linux/run.sh cargo test ...
