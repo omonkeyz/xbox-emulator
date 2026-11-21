@@ -161,10 +161,10 @@ pub fn vop3(op: u32) -> Option<&'static str> {
         return vopc(op);
     }
     if (0x100..0x140).contains(&op) {
-        return vop2(op - 0x100);
+        return if matches!(op - 0x100, 0x20 | 0x21 | 0x2c | 0x2d | 0x37 | 0x38 | 0x3c) { None } else { vop2(op - 0x100) };
     }
     if (0x180..0x200).contains(&op) {
-        return vop1(op - 0x180);
+        return if op - 0x180 == 0x65 { None } else { vop1(op - 0x180) };
     }
     Some(match op {
         0x140 => "v_mad_legacy_f32", 0x141 => "v_mad_f32", 0x142 => "v_mad_i32_i24",
@@ -404,11 +404,12 @@ pub fn lookup(enc: Enc, op: u32) -> Option<&'static str> {
             0x39 => Some("ds_read_i8"), 0x3a => Some("ds_read_u8"), 0x3b => Some("ds_read_i16"), 0x3c => Some("ds_read_u16"),
             _ => None,
         },
-        Enc::Vinterp => Some(match op {
-            0 => "v_interp_p1_f32",
-            1 => "v_interp_p2_f32",
-            _ => "v_interp_mov_f32",
-        }),
+        Enc::Vinterp => match op {
+            0 => Some("v_interp_p1_f32"),
+            1 => Some("v_interp_p2_f32"),
+            2 => Some("v_interp_mov_f32"),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -507,7 +507,7 @@ fn opcode_field(enc: Enc, w: u32) -> u32 {
 fn mnemonic_for(enc: Enc, op: u32) -> String {
     // MIMG sample (0x20..0x3f) / gather4 (0x40..0x5f) names are regular: base + [_c] +
     // modifier + [_o], so generate them instead of tabulating all 64.
-    if enc == Enc::Mimg && (0x20..0x60).contains(&op) {
+    if enc == Enc::Mimg && (0x20..0x60).contains(&op) && !(op >= 0x40 && matches!(op & 7, 2 | 3)) {
         let base = if op >= 0x40 { "image_gather4" } else { "image_sample" };
         let modi = ["", "_cl", "_d", "_d_cl", "_l", "_b", "_b_cl", "_lz"][(op & 7) as usize];
         return format!("{base}{}{modi}{}", if op & 8 != 0 { "_c" } else { "" }, if op & 0x10 != 0 { "_o" } else { "" });
