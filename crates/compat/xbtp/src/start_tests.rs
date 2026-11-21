@@ -256,7 +256,7 @@ fn fill_module_data_reports_version_strings_for_system_dll() {
 }
 
 #[test]
-fn ipv6_loopback_literal_against_v4_mapped_listener() {
+fn dispatcher_serves_ipv6_and_ipv4_loopback_on_one_port() {
     let _g = NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     init();
     unsafe {
@@ -264,12 +264,12 @@ fn ipv6_loopback_literal_against_v4_mapped_listener() {
         let mut o = XBTP_OPEN_SESSION_OPTIONS::default();
         o.quiet = 1;
         o.timeout_ms = 3000;
-        let host = wide("::1");
-        let mut s: *mut c_void = null_mut();
-        let hr = XbtpOpenSessionEx2(host.as_ptr(), 47931, &o, &SERVICE_INFO_EXTENSION, &IID_XBTP_CLIENT_SESSION, &mut s);
-        eprintln!("PROBE6 {:08X}", hr as u32);
-        if !s.is_null() {
-            com_release(s);
+        for address in ["::1", "127.0.0.1", "::1"] {
+            let host = wide(address);
+            let mut session = null_mut();
+            assert_eq!(XbtpOpenSessionEx2(host.as_ptr(), 47931, &o, &SERVICE_INFO_EXTENSION, &IID_XBTP_CLIENT_SESSION, &mut session), S_OK, "{address}");
+            assert_eq!(call(session, VM_READY_OPERATION, "{}").0, 0);
+            com_release(session);
         }
         stop(c);
     }

@@ -70,6 +70,7 @@ extern "system" {
     fn WSAEnumNetworkEvents(s: SOCKET, ev: HANDLE, out: *mut NetworkEvents) -> i32;
     fn WSAAccept(s: SOCKET, addr: *mut u8, len: *mut i32, cond: *const c_void, ctx: usize) -> SOCKET;
     fn select(n: i32, r: *mut FdSet, w: *mut FdSet, e: *mut FdSet, tv: *const TimeVal) -> i32;
+    fn getsockname(s: SOCKET, addr: *mut u8, len: *mut i32) -> i32;
     fn getpeername(s: SOCKET, addr: *mut u8, len: *mut i32) -> i32;
 }
 
@@ -901,6 +902,10 @@ pub struct TcpConnection {
     pub socket_event: HANDLE,
 }
 
+// Keep the second listener outside the console-visible TcpConnection layout.
+static IPV6_LISTENERS: std::sync::Mutex<std::collections::BTreeMap<SOCKET, SOCKET>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 pub static TCP_CONNECTION_VTBL: ConnectionVtbl = ConnectionVtbl {
     dtor: tcp_connection_deleting_dtor,
     connect: tcp_connection_connect,
@@ -922,7 +927,11 @@ unsafe fn tcp_connection_new() -> *mut TcpConnection {
 #[export_name = "??1TcpConnection@@UEAA@XZ"]
 pub unsafe extern "C" fn TcpConnection_dtor(this: *mut TcpConnection) {
     if (*this).listen_socket != INVALID_SOCKET {
+        if let Some(ipv6) = IPV6_LISTENERS.lock().unwrap().remove(&(*this).listen_socket) {
+            closesocket(ipv6);
+        }
         closesocket((*this).listen_socket);
+        (*this).listen_socket = INVALID_SOCKET;
     }
     if !(*this).socket_event.is_null() {
         CloseHandle((*this).socket_event);
@@ -1003,6 +1012,20 @@ unsafe fn tcp_server_setup(c: *mut TcpConnection, port: u32) -> HRESULT {
     };
     (*c).listen_socket = s;
     WSAEventSelect(s, (*c).socket_event, FD_ACCEPT_CLOSE);
+
+    // Use the assigned port even when the caller requested an ephemeral one.
+    let mut addr = loopback_listen_address(port);
+    let mut len = addr.size as i32;
+    if getsockname(s, addr.addr.as_mut_ptr(), &mut len) == 0 {
+        addr.addr[8..24].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        if let Ok(ipv6) = socket_listen(&addr) {
+            if WSAEventSelect(ipv6, (*c).socket_event, FD_ACCEPT_CLOSE) == 0 {
+                IPV6_LISTENERS.lock().unwrap().insert(s, ipv6);
+            } else {
+                closesocket(ipv6);
+            }
+        }
+    }
     S_OK
 }
 
@@ -1079,21 +1102,26 @@ unsafe extern "C" fn tcp_connection_accept(this: *mut c_void, out: *mut *mut Xbt
         return E_INVALIDARG;
     }
     *out = null_mut();
-    loop {
+    let primary = (*c).listen_socket;
+    let ipv6 = IPV6_LISTENERS.lock().unwrap().get(&primary).copied();
+    // Clear once before polling both queues. Clearing between sockets could
+    // discard a notification for the socket we just finished polling.
+    ResetEvent((*c).socket_event);
+    for socket in std::iter::once(primary).chain(ipv6) {
         let mut ne: NetworkEvents = core::mem::zeroed();
-        WSAEnumNetworkEvents((*c).listen_socket, (*c).socket_event, &mut ne);
-        let cs = WSAAccept((*c).listen_socket, null_mut(), null_mut(), core::ptr::null(), 0);
+        WSAEnumNetworkEvents(socket, null_mut(), &mut ne);
+        let cs = WSAAccept(socket, null_mut(), null_mut(), core::ptr::null(), 0);
         if cs == INVALID_SOCKET {
             let e = WSAGetLastError();
             if e == 0x2733 {
-                return E_PENDING;
+                continue;
             }
             log_error_args(b"Failed to accept connection %d\0", &[e as usize]);
-            let hr = map_wsa_error(e);
-            if hr < 0 {
-                return hr;
-            }
-            continue;
+            return map_wsa_error(e);
+        }
+        // Another queue may already have signalled before the reset.
+        if ipv6.is_some() {
+            SetEvent((*c).socket_event);
         }
         let ch = new_tcp_channel();
         if ch.is_null() {
@@ -1109,6 +1137,7 @@ unsafe extern "C" fn tcp_connection_accept(this: *mut c_void, out: *mut *mut Xbt
         *out = ch;
         return hr;
     }
+    E_PENDING
 }
 
 unsafe extern "C" fn tcp_connection_event(this: *mut c_void, out: *mut HANDLE) -> HRESULT {
