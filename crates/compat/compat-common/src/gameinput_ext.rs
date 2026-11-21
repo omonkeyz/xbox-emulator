@@ -632,8 +632,13 @@ pub fn store_rumble(device: usize, params: RumbleParams) -> (RumbleParams, bool)
 pub unsafe extern "system" fn dev_set_rumble_state(this: *mut c_void, params: *const RumbleParams) {
     let p = if params.is_null() { RumbleParams::default() } else { core::ptr::read_unaligned(params) };
     let (p, changed) = store_rumble(this as usize, p);
+    let sent = if this == crate::gamepad::virtual_device() { crate::pad_host::forward_rumble(p.low_frequency, p.high_frequency) } else { None };
     if changed {
-        log("SetRumbleState", &format!("device {this:p} low={:.2} high={:.2} lt={:.2} rt={:.2} (stored, not sent to a host device)",
+        let to = match sent {
+            Some(i) => format!("low/high sent to XInput pad {i}; trigger motors stored, XInput has none"),
+            None => "stored, not sent to a host device".into(),
+        };
+        log("SetRumbleState", &format!("device {this:p} low={:.2} high={:.2} lt={:.2} rt={:.2} ({to})",
             p.low_frequency, p.high_frequency, p.left_trigger, p.right_trigger));
     }
 }
