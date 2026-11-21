@@ -1,0 +1,18 @@
+Third-party material in this crate
+==================================
+
+tests/data/llvm_gfx10/*.txt
+
+  Instruction encodings and the assembly text LLVM prints for them, taken from the
+  LLVM Project's AMDGPU assembler and disassembler tests:
+
+      llvm/test/MC/AMDGPU/gfx10*.s
+      llvm/test/MC/Disassembler/AMDGPU/gfx10*.txt
+
+  at commit 901520fb5820180fe7a917c24f27740382550a7f, extracted by
+  tools/dev/llvm_vectors.py.
+
+  Source:  https://github.com/llvm/llvm-project
+  Licence: Apache License v2.0 with LLVM Exceptions (https://llvm.org/LICENSE.txt)
+
+  Test data only. It is not built into the library or the binaries.

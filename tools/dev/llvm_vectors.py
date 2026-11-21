@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Build the RDNA2 decoder test vectors from LLVM's AMDGPU assembler tests.
+
+LLVM checks its AMDGPU assembler and disassembler with lines such as
+
+    // GFX10: v_add_f32_e32 v5, v1, v2 ; encoding: [0x01,0x05,0x0a,0x06]
+
+Each one pairs an instruction's assembly with its exact encoding. This script collects
+every such pair for the GFX10 family (gfx10.1 and gfx10.3, which is RDNA2) and writes them
+as `<dwords> | <assembly>`, one per line, for `crates/tombox-xshader/tests/llvm_vectors.rs`.
+The output is three files, because `tools/publish_source.py` skips files over 2 MB.
+
+Usage:
+    git clone --depth 1 https://github.com/llvm/llvm-project
+    python tools/dev/llvm_vectors.py llvm-project crates/tombox-xshader/tests/data/llvm_gfx10
+
+Only text is read from the LLVM tree; nothing in it is run.
+"""
+import os
+import re
+import subprocess
+import sys
+
+CHECK = re.compile(r"^\s*(?://|#|;)\s*([A-Za-z0-9_-]+):\s*(.*?)\s*;\s*encoding:\s*\[([^\]]*)\]\s*$")
+BYTES = re.compile(r"^\s*((?:0x[0-9a-fA-F]{2}\s*,?\s*)+)$")
+RUN = re.compile(r"RUN:.*-triple=amdgpu(\d+)\.\d+.*-show-encoding.*FileCheck(.*)$")
+PREFIXES = re.compile(r"-check-prefix(?:es)?[= ]([A-Za-z0-9_,-]+)")
+DIRS = (("llvm/test/MC/AMDGPU", (".s",)), ("llvm/test/MC/Disassembler/AMDGPU", (".txt",)))
+# gfx1011 and gfx1013 are other chips: deep-learning ops and the gfx10.1 ray tracing forms.
+OTHER_CHIPS = ("gfx1011", "gfx1013")
+MAX_BYTES = 2 * 1024 * 1024  # the limit in tools/publish_source.py
+
+
+def group(asm):
+    """Output file for an instruction: vector compares, other vector ALU, the rest."""
+    if asm.startswith("v_cmp"):
+        return "vcmp"
+    return "valu" if asm.startswith("v_") else "scalar_mem"
+
+
+def dwords(byte_strings):
+    b = [int(x, 16) for x in byte_strings]
+    if not b or len(b) % 4:
+        return None
+    return tuple(b[i] | b[i + 1] << 8 | b[i + 2] << 16 | b[i + 3] << 24 for i in range(0, len(b), 4))
+
+
+def gfx10_prefixes(lines):
+    """FileCheck prefixes that a GFX10 run of this file checks encodings with."""
+    out = set()
+    for line in lines:
+        m = RUN.search(line)
+        if not m or m.group(1) != "10":
+            continue
+        found = PREFIXES.findall(m.group(2))
+        for group in found or ["CHECK"]:
+            out.update(group.split(","))
+    return out
+
+
+def vectors(root):
+    seen = set()
+    for sub, exts in DIRS:
+        d = os.path.join(root, *sub.split("/"))
+        for name in sorted(os.listdir(d)):
+            if not name.startswith("gfx10") or not name.endswith(exts) or name.startswith(OTHER_CHIPS):
+                continue
+            lines = open(os.path.join(d, name), encoding="utf-8", errors="replace").read().split("\n")
+            prefixes = gfx10_prefixes(lines)
+            given = None  # the input bytes of a disassembler test
+            for line in lines:
+                m = BYTES.match(line)
+                if m:
+                    given = dwords(re.findall(r"0x([0-9a-fA-F]{2})", m.group(1)))
+                    continue
+                m = CHECK.match(line)
+                if not m or m.group(1) not in prefixes or not m.group(2):
+                    continue
+                asm = " ".join(m.group(2).split())
+                printed = dwords(re.findall(r"0x([0-9a-fA-F]{2})", m.group(3)))
+                # A disassembler test may feed bytes that LLVM prints back differently
+                # (don't-care bits). Both spellings must decode to the same instruction.
+                for words in (printed, given):
+                    key = (words, asm.split()[0])
+                    if words and key not in seen:
+                        seen.add(key)
+                        yield words, asm
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    root, out_dir = sys.argv[1], sys.argv[2]
+    try:
+        commit = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"
+    files = {"vcmp": [], "valu": [], "scalar_mem": []}
+    for words, asm in vectors(root):
+        files[group(asm)].append(" ".join(f"{w:08x}" for w in words) + " | " + asm + "\n")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, rows in files.items():
+        path = os.path.join(out_dir, name + ".txt")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# RDNA2 decoder test vectors: <instruction dwords, hex> | <LLVM assembly>.\n")
+            f.write("# Taken from the AMDGPU assembler and disassembler tests of the LLVM Project\n")
+            f.write("# (llvm/test/MC/AMDGPU/gfx10*.s, llvm/test/MC/Disassembler/AMDGPU/gfx10*.txt),\n")
+            f.write("# licensed under the Apache License v2.0 with LLVM Exceptions. See THIRD_PARTY.\n")
+            f.write(f"# LLVM commit {commit}.\n")
+            f.write("# Generated by tools/dev/llvm_vectors.py. Do not edit by hand.\n")
+            f.writelines(rows)
+        size = os.path.getsize(path)
+        print(f"{len(rows):6} vectors, {size:8} bytes -> {path}")
+        if size > MAX_BYTES:
+            sys.exit(f"{path} is over {MAX_BYTES} bytes: tools/publish_source.py would skip it")
+
+
+if __name__ == "__main__":
+    main()
