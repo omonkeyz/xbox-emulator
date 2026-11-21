@@ -38,11 +38,11 @@ pub(super) fn groups(s: &State, pages: &[(usize, Option<u64>)]) -> Vec<(usize, u
     let mut i = 0;
     while i < pages.len() {
         let mut j = i + 1;
-        if let Some(p0) = pages[i].1.and_then(|p| s.pfns.get(&p)).copied() {
+        if let Some(p0) = pages[i].1.and_then(|p| s.backing(p)) {
             while j < pages.len() {
                 let ok = pages[j].0 == pages[j - 1].0 + PAGE
                     && pages[j].0 & (PAGE - 1) == 0
-                    && matches!(pages[j].1.and_then(|p| s.pfns.get(&p)), Some(&(sid, off)) if sid == p0.0 && off == p0.1 + ((j - i) * PAGE) as u64);
+                    && matches!(pages[j].1.and_then(|p| s.backing(p)), Some((sid, off)) if sid == p0.0 && off == p0.1 + ((j - i) * PAGE) as u64);
                 if !ok {
                     break;
                 }
@@ -77,7 +77,7 @@ unsafe fn drop_run(s: &mut State, r: &mut Runs, lo: usize) {
     split(lo, run.hi - lo);
     let mut p = lo;
     while p < run.hi {
-        s.views.remove(&p);
+        s.remove_view(p);
         p += PAGE;
     }
     unref(s, run.sid);
@@ -110,7 +110,7 @@ pub(super) unsafe fn try_map_run(s: &mut State, run: &[(usize, Option<u64>)]) ->
     }
     let lo = run[0].0;
     let hi = lo + run.len() * PAGE;
-    let Some(&(sid, off)) = run[0].1.and_then(|p| s.pfns.get(&p)) else { return false };
+    let Some((sid, off)) = run[0].1.and_then(|p| s.backing(p)) else { return false };
     let Some(base) = adopt(s, lo) else { return false };
     let (rsize, protect) = (s.regions[&base].size, s.regions[&base].protect);
     if hi > base + rsize {
@@ -143,7 +143,7 @@ pub(super) unsafe fn try_map_run(s: &mut State, run: &[(usize, Option<u64>)]) ->
         return false;
     }
     for &(va, pfn) in run {
-        s.views.insert(va, pfn.unwrap());
+        s.add_view(va, pfn.unwrap());
     }
     if let Some(sec) = s.sections.get_mut(&sid) {
         sec.live += 1;
@@ -210,7 +210,7 @@ pub(super) unsafe fn release_in(s: &mut State, lo: usize, hi: usize) {
         UnmapViewOfFile2(GetCurrentProcess(), a as *mut c_void, MEM_PRESERVE_PLACEHOLDER);
         let mut p = a;
         while p < run.hi {
-            s.views.remove(&p);
+            s.remove_view(p);
             p += PAGE;
         }
         unref(s, run.sid);

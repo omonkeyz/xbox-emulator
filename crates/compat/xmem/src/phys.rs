@@ -120,14 +120,41 @@ struct Region {
     split: bool,
 }
 
+struct PhysicalPage {
+    // Cleared when the title releases the PFN. Existing views still own the page.
+    backing: Option<(u64, u64)>,
+    views: usize,
+}
+
 struct State {
     next_pfn: u64,
     next_section: u64,
     sections: HashMap<u64, Section>,
-    pfns: HashMap<u64, (u64, u64)>,
+    pfns: HashMap<u64, PhysicalPage>,
     views: BTreeMap<usize, u64>,
     private: BTreeSet<usize>,
     regions: BTreeMap<usize, Region>,
+}
+
+impl State {
+    fn backing(&self, pfn: u64) -> Option<(u64, u64)> {
+        self.pfns.get(&pfn)?.backing
+    }
+
+    fn add_view(&mut self, va: usize, pfn: u64) {
+        self.views.insert(va, pfn);
+        self.pfns.get_mut(&pfn).unwrap().views += 1;
+    }
+
+    fn remove_view(&mut self, va: usize) {
+        if let Some(pfn) = self.views.remove(&va) {
+            let page = self.pfns.get_mut(&pfn).unwrap();
+            page.views -= 1;
+            if page.views == 0 && page.backing.is_none() {
+                self.pfns.remove(&pfn);
+            }
+        }
+    }
 }
 
 static S: Mutex<Option<State>> = Mutex::new(None);
@@ -176,7 +203,7 @@ pub fn allocate(n: usize) -> Option<Vec<u64>> {
         let base = s.next_pfn;
         s.next_pfn += n as u64;
         (0..n as u64).map(|i| {
-            s.pfns.insert(base + i, (sid, i * PAGE as u64));
+            s.pfns.insert(base + i, PhysicalPage { backing: Some((sid, i * PAGE as u64)), views: 0 });
             base + i
         }).collect()
     }))
@@ -185,11 +212,15 @@ pub fn allocate(n: usize) -> Option<Vec<u64>> {
 pub fn free(pfns: &[u64]) -> bool {
     with(|s| {
         let mut seen = std::collections::HashSet::with_capacity(pfns.len());
-        if pfns.iter().any(|p| !s.pfns.contains_key(p) || !seen.insert(*p)) {
+        if pfns.iter().any(|p| s.backing(*p).is_none() || !seen.insert(*p)) {
             return false;
         }
         for p in pfns {
-            if let Some((sid, _)) = s.pfns.remove(p) {
+            let page = s.pfns.get_mut(p).unwrap();
+            if let Some((sid, _)) = page.backing.take() {
+                if page.views == 0 {
+                    s.pfns.remove(p);
+                }
                 let gone = match s.sections.get_mut(&sid) {
                     Some(sec) => {
                         sec.live -= 1;
@@ -311,8 +342,11 @@ unsafe fn unmap_view(s: &mut State, va: usize) -> bool {
     if runs::run_range(va).is_some() && !runs::break_run(s, va) {
         return false;
     }
-    if s.views.remove(&va).is_some() {
-        return UnmapViewOfFile2(GetCurrentProcess(), va as *mut c_void, MEM_PRESERVE_PLACEHOLDER) != 0;
+    if s.views.contains_key(&va) {
+        if UnmapViewOfFile2(GetCurrentProcess(), va as *mut c_void, MEM_PRESERVE_PLACEHOLDER) == 0 {
+            return false;
+        }
+        s.remove_view(va);
     }
     true
 }
@@ -355,8 +389,8 @@ unsafe fn try_map_page(s: &mut State, va: usize, pfn: Option<u64>) -> bool {
             return true;
         }
     };
-    let (sid, off) = match s.pfns.get(&pfn) {
-        Some(v) => *v,
+    let (sid, off) = match s.backing(pfn) {
+        Some(v) => v,
         None => {
             SetLastError(ERROR_INVALID_PARAMETER);
             return false;
@@ -373,7 +407,7 @@ unsafe fn try_map_page(s: &mut State, va: usize, pfn: Option<u64>) -> bool {
     if p as usize != va {
         return false;
     }
-    s.views.insert(va, pfn);
+    s.add_view(va, pfn);
     true
 }
 
@@ -506,4 +540,37 @@ pub fn region_extent(addr: usize) -> Option<usize> {
 
 pub fn owns(addr: usize) -> bool {
     with(|s| region_of(s, addr).is_some())
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+
+    #[test]
+    fn released_pages_remain_charged_until_their_last_view_is_unmapped() {
+        // Other xmem tests allocate from the process-wide physical page pool.
+        const CHILD: &str = "TOMBOX_TEST_XMEM_PAGE_ACCOUNTING_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "phys::accounting_tests::released_pages_remain_charged_until_their_last_view_is_unmapped"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let base = unsafe { VirtualAlloc(core::ptr::null_mut(), PAGE * 4, MEM_RESERVE, PAGE_READWRITE) } as usize;
+        assert_ne!(base, 0);
+        let pages = allocate(2).unwrap();
+        let pair = 2 * PAGE as u64;
+        assert_eq!(live_bytes(), pair);
+        assert!(map(&[(base, Some(pages[0])), (base + PAGE, Some(pages[1])),
+                      (base + 3 * PAGE, Some(pages[0]))]));
+        assert_eq!(live_bytes(), pair);
+        assert!(free(&pages));
+        assert_eq!(live_bytes(), pair);
+        assert!(!free(&pages));
+        assert!(map(&[(base, None), (base + PAGE, None)]));
+        assert_eq!(live_bytes(), PAGE as u64);
+        assert_eq!(release_region(base, 0), Some(1));
+        assert_eq!(live_bytes(), 0);
+    }
 }
