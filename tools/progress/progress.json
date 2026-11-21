@@ -2917,6 +2917,57 @@
    "XbtpOpenSessionEx2",
    "XbtpStartDispatcher",
    "XbtpStartDispatcherEx"
+  ],
+  "GCXAudioExt.dll": [
+   "CreateXmaBufferEngine"
+  ],
+  "d3d12_xs.dll": [
+   "D3D12CreateDevice",
+   "D3D12XboxCreateDevice",
+   "D3D12XboxSetProcessDebugFlags"
+  ],
+  "d3d12_x.dll": [
+   "D3D12SerializeRootSignature",
+   "D3D12SerializeVersionedRootSignature",
+   "D3D12XboxSetProcessDebugFlags",
+   "D3D12XboxCreateDevice"
+  ],
+  "xfrontpaneldisplay.dll": [
+   "XFrontPanelGetButtonStates",
+   "XFrontPanelGetLightStates",
+   "XFrontPanelSetLightStates",
+   "XFrontPanelPresentBuffer"
+  ],
+  "minuserx.dll": [
+   "GetWindowLongPtrA",
+   "SetWindowLongPtrA"
+  ],
+  "chad.dll": [
+   "XDspActivate"
+  ],
+  "xapu.dll": [
+   "XApuConnect"
+  ],
+  "GDK XAppCapture (QueryApiImpl)": [
+   "XAppCapture(3a949778) slot 4 (diagnostic_clip)"
+  ],
+  "GDK XAsync/XTaskQueue/XThread (QueryApiImpl)": [
+   "XAsync/XTaskQueue/XThread(073b7dcb, emulated) slot 18 (q_submit)"
+  ],
+  "GDK XPackage (QueryApiImpl)": [
+   "XPackageGetCurrentProcessPackageIdentifier"
+  ],
+  "GDK XStore (QueryApiImpl)": [
+   "XStore(de3dbdd4) slot 35 (fulfill_async)",
+   "XStore(de3dbdd4) slot 36 (fulfill_result)"
+  ],
+  "GDK XUser (QueryApiImpl)": [
+   "XUserFindUserByLocalId",
+   "XUserFindUserById",
+   "XUser(1bf2f8c5) slot 35 (get_sign_out_deferral)"
+  ],
+  "GDK XSystemAnalytics (QueryApiImpl)": [
+   "XSystemGetAnalyticsInfo"
   ]
  }
 }
