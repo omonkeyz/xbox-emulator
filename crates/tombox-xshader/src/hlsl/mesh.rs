@@ -18,6 +18,20 @@ pub fn wave_size(insns: &[Insn]) -> u32 {
     if w64 { 64 } else { 32 }
 }
 
+impl crate::ShaderExtract {
+    pub(super) fn guest_wave_size(&self, insns: &[Insn]) -> Result<u32, String> {
+        if let Some(lanes) = &self.psv_wave_lanes {
+            match (lanes.contains(&32), lanes.contains(&64)) {
+                (true, false) => return Ok(32),
+                (false, true) => return Ok(64),
+                (false, false) => return Err(format!("PSV0 wave lane bounds {lanes:?} exclude both RDNA2 wave sizes")),
+                (true, true) => {}
+            }
+        }
+        Ok(wave_size(insns))
+    }
+}
+
 fn all_lanes(o: &Opnd) -> bool {
     matches!(o, Opnd::ConstInt(-1)) || matches!(o, Opnd::Literal(0xffff_ffff))
 }
@@ -48,7 +62,7 @@ impl<'a> Emitter<'a> {
         if !all_lanes(&ins.src[0]) {
             return Err(format!("{} with a mask other than all lanes in a mesh shader at {:#x}", ins.mnemonic, ins.offset));
         }
-        let w = wave_size(&self.insns);
+        let w = self.ex.guest_wave_size(&self.insns)?;
         Ok(match (ins.mnemonic.as_str(), w) {
             ("v_mbcnt_lo_u32_b32", 64) => format!("(min(gi & 63u, 32u) + {b})"),
             ("v_mbcnt_lo_u32_b32", _) => format!("((gi & 31u) + {b})"),
@@ -65,7 +79,7 @@ impl<'a> Emitter<'a> {
         if written {
             return Ok(None);
         }
-        let w = wave_size(&self.insns);
+        let w = self.ex.guest_wave_size(&self.insns)?;
         Ok(Some(format!("(gid.x * {}u + (gi & {:#x}u))", self.ms_threads()?, !(w - 1))))
     }
 
@@ -220,7 +234,7 @@ impl<'a> Emitter<'a> {
             self.amp_ms_regs();
         }
         let _ = writeln!(h, "{}", self.reg_decls());
-        let w = wave_size(&self.insns);
+        let w = self.ex.guest_wave_size(&self.insns)?;
         let _ = writeln!(h, "    SOut o = (SOut)0; uint tb_prim = 0u;");
         let _ = writeln!(h, "    if (gi == 0u) tb_mscnt = 0u;");
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");

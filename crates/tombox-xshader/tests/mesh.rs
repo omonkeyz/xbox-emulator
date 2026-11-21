@@ -89,6 +89,7 @@ fn ms(words: &[u32], mi: MeshInfo, outs: Vec<SigElement>) -> ShaderExtract {
         input_sig: vec![],
         output_sig: outs,
         resources: Vec::new(),
+        psv_wave_lanes: None,
         gs_info: Some(GsInfo { input_primitive: 0, output_topology: 0, max_vertex_count: 0, mesh: Some(mi) }),
         root_sig: None,
     }

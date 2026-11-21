@@ -494,6 +494,7 @@ pub fn extract_durango(
         input_sig: sig(b"ISG1", b"ISGN"),
         output_sig: sig(b"OSG1", b"OSGN"),
         resources: body(b"PSV0").and_then(|b| crate::meta::parse_psv0(b).ok()).unwrap_or_default(),
+        psv_wave_lanes: body(b"PSV0").and_then(crate::meta::parse_psv0_wave_lanes),
         gs_info: body(b"PSV0").and_then(crate::meta::parse_psv0_gs),
         root_sig: body(b"RTS0").and_then(|b| crate::meta::parse_rts0(b).ok()),
     })

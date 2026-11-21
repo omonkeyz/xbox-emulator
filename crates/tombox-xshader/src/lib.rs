@@ -157,6 +157,8 @@ pub struct ShaderExtract {
     pub input_sig: Vec<meta::SigElement>,
     pub output_sig: Vec<meta::SigElement>,
     pub resources: Vec<meta::PsvResource>,
+    /// Declared PSV0 wave lane bounds. Equal endpoints require a fixed wave size.
+    pub psv_wave_lanes: Option<std::ops::RangeInclusive<u32>>,
     /// Geometry-shader info from PSV0 (only meaningful for `Stage::Geometry`).
     pub gs_info: Option<meta::GsInfo>,
     pub root_sig: Option<meta::RootSig>,
@@ -267,6 +269,7 @@ pub fn extract(dxbc: &[u8]) -> Result<ShaderExtract, String> {
         input_sig: chunk_body(b"ISG1").and_then(|b| meta::parse_signature(b).ok()).unwrap_or_default(),
         output_sig: chunk_body(b"OSG1").and_then(|b| meta::parse_signature(b).ok()).unwrap_or_default(),
         resources: chunk_body(b"PSV0").and_then(|b| meta::parse_psv0(b).ok()).unwrap_or_default(),
+        psv_wave_lanes: chunk_body(b"PSV0").and_then(meta::parse_psv0_wave_lanes),
         gs_info: chunk_body(b"PSV0").and_then(meta::parse_psv0_gs),
         root_sig: chunk_body(b"RTS0").and_then(|b| meta::parse_rts0(b).ok()),
     })
