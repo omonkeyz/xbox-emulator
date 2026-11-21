@@ -131,6 +131,7 @@ fn ps() -> tombox_xshader::ShaderExtract {
         input_sig: vec![el("SV_Position", 1, 0, 0xf, 0), el("TEXCOORD_centroid", 0, 1, 0x3, 0x3)],
         output_sig: vec![el("SV_Target", 64, 0, 0xf, 0xf)],
         resources: Vec::new(),
+        psv_wave_lanes: None,
         gs_info: None,
         root_sig: None,
     }

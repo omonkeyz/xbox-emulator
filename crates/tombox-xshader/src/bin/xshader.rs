@@ -100,6 +100,12 @@ fn main() -> ExitCode {
     for r in &ex.resources {
         println!("  psv0 resource: type={} space={} reg={}..{}", r.res_type, r.space, r.lower, r.upper);
     }
+    match &ex.psv_wave_lanes {
+        Some(lanes) if lanes.start() == lanes.end() => println!("  psv0 wave lanes: fixed {}", lanes.start()),
+        Some(lanes) => println!("  psv0 wave lanes: {lanes:?}"),
+        None if ex.has_psv0 => println!("  psv0 wave lanes: no requirement reported"),
+        None => {}
+    }
     if let Some(rs) = &ex.root_sig {
         let source = root_signature.map_or("embedded", |path| path.as_str());
         println!("  rootsig v{} flags={:#x} staticSamplers={} source={source}", rs.version, rs.flags, rs.num_static_samplers);

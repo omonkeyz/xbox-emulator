@@ -101,6 +101,7 @@ fn ps_extract() -> ShaderExtract {
         ],
         output_sig: vec![SigElement { name: "SV_Target".into(), index: 0, sysval: 64, comp_type: 3, register: 0, mask: 0xf, rw_mask: 0xf }],
         resources: Vec::new(),
+        psv_wave_lanes: None,
         gs_info: None,
         root_sig: None,
     }

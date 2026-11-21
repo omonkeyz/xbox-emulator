@@ -350,6 +350,7 @@ fn cs_extract(words: &[u32]) -> ShaderExtract {
         input_sig: vec![],
         output_sig: vec![],
         resources: Vec::new(),
+        psv_wave_lanes: None,
         gs_info: None,
         root_sig: Some(root),
     }

@@ -46,9 +46,90 @@ fn shader(stage: Stage, words: &[u32], input_sig: Vec<SigElement>, output_sig: V
         input_sig,
         output_sig,
         resources: Vec::new(),
+        psv_wave_lanes: None,
         gs_info: None,
         root_sig: root,
     }
+}
+
+fn psv_counter_container(bounds: Option<(u32, u32)>) -> Vec<u8> {
+    let words = |ws: &[u32]| ws.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>();
+    // A compute shader with a zero-offset GDS ds_append and no wave-width-specific ISA.
+    let program = words(&[
+        0, 64, 1, 1, 0xd580_0000, 0x03fe_0000, 0x1234_5678, // group size and driver v_nop
+        0xbefc_03ff, 0x0110_0004, 0xd8fa_0000, 0x0a00_0000, S_ENDPGM,
+    ]);
+    let mut fssm = vec![0u8; 0x100];
+    fssm[..4].copy_from_slice(b"FSSM");
+    fssm[0xc0..0xc4].copy_from_slice(&0x100u32.to_le_bytes());
+    fssm[0xc8..0xcc].copy_from_slice(&(program.len() as u32).to_le_bytes());
+    fssm.extend(program);
+    let mut xdat = b"XDAT\x01\0\0\0".to_vec();
+    xdat.extend(miniz_oxide::deflate::compress_to_vec_zlib(&fssm, 1));
+    xdat.resize(xdat.len().next_multiple_of(4), 0);
+    let mut dxil = words(&[
+        0x5_0068, 7 + xdat.len() as u32 / 4, u32::from_le_bytes(*b"DXIL"),
+        0x108, 16 + xdat.len() as u32, 4,
+    ]);
+    dxil.extend(xdat);
+    dxil.extend(b"NOBC");
+
+    let mut parts = vec![(b"DXIL", dxil)];
+    if let Some((min, max)) = bounds {
+        // PSVRuntimeInfo0 size, stage union, lane bounds and zero resource count.
+        parts.push((b"PSV0", words(&[24, 0, 0, 0, 0, min, max, 0])));
+    }
+    let mut container = vec![0u8; 32 + 4 * parts.len()];
+    container[..4].copy_from_slice(b"DXBC");
+    container[20..24].copy_from_slice(&1u32.to_le_bytes());
+    container[28..32].copy_from_slice(&(parts.len() as u32).to_le_bytes());
+    for (index, (tag, body)) in parts.into_iter().enumerate() {
+        let offset = container.len() as u32;
+        let entry = 32 + 4 * index;
+        container[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+        container.extend(tag);
+        container.extend((body.len() as u32).to_le_bytes());
+        container.extend(body);
+    }
+    let size = container.len() as u32;
+    container[24..28].copy_from_slice(&size.to_le_bytes());
+    container
+}
+
+#[test]
+fn psv_wave_lanes_control_width_without_an_isa_marker() {
+    for (bounds, declared, refusal) in [
+        (Some((64, 64)), Some(64..=64), Some("wave")),
+        (Some((32, 32)), Some(32..=32), None),
+        (Some((32, 64)), Some(32..=64), None),
+        (Some((64, 128)), Some(64..=128), Some("wave")),
+        (Some((4, 16)), Some(4..=16), Some("exclude both RDNA2 wave sizes")),
+        (Some((0, u32::MAX)), None, None),
+        (None, None, None),
+    ] {
+        let ex = tombox_xshader::extract(&psv_counter_container(bounds)).unwrap();
+        assert_eq!(ex.has_psv0, bounds.is_some());
+        assert_eq!(ex.psv_wave_lanes, declared);
+        let error = translate(&ex).err();
+        if let Some(reason) = refusal {
+            let message = error.unwrap_or_else(|| panic!("PSV {bounds:?}: ds_append unexpectedly translated"));
+            assert!(message.contains("ds_append") && message.contains(reason), "PSV {bounds:?}: {message}");
+        } else {
+            assert!(error.is_none(), "PSV {bounds:?}: {error:?}");
+        }
+    }
+}
+
+#[test]
+fn psv_wave_lanes_respect_the_runtime_info_size() {
+    use tombox_xshader::meta::parse_psv0_wave_lanes;
+    let mut psv: Vec<u8> = [24u32, 0, 0, 0, 0, 64, 64, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
+    assert_eq!(parse_psv0_wave_lanes(&psv[..27]), None);
+    psv[..4].copy_from_slice(&20u32.to_le_bytes());
+    assert_eq!(parse_psv0_wave_lanes(&psv), None); // the max would come from outside runtime info
+    psv[..4].copy_from_slice(&24u32.to_le_bytes());
+    psv[24..28].copy_from_slice(&32u32.to_le_bytes());
+    assert_eq!(parse_psv0_wave_lanes(&psv), None); // reversed bounds
 }
 
 #[test]

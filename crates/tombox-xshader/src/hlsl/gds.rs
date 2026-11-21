@@ -1,4 +1,4 @@
-use super::{mesh, r, Emitter};
+use super::{r, Emitter};
 use crate::gds_abi::{TB_GDS_HLSL_DECL, TB_GDS_TITLE_DWORDS};
 use crate::rdna2::Insn;
 
@@ -26,7 +26,7 @@ impl Emitter<'_> {
         let d = ins.dst.first().copied();
         let (a, v0, v1) = (ins.src[0], ins.src[1], ins.src[2]);
         let counter = matches!(m.as_str(), "ds_append" | "ds_consume");
-        if counter && mesh::wave_size(&self.insns) == 64 {
+        if counter && self.ex.guest_wave_size(&self.insns)? == 64 {
             return Err(format!("{m}: a wave64 shader spans two host waves, so count_bits(exec) and the shared pre-op value cannot be formed in one host wave"));
         }
         let rel = if counter {

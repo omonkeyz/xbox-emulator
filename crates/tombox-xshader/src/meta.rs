@@ -61,7 +61,16 @@ pub struct PsvResource {
     pub upper: u32,
 }
 
-/// Parse the PSV0 chunk far enough to recover the resource-binding list.
+/// Inclusive lane-count bounds in PSVRuntimeInfo0, following its 16-byte stage union.
+/// Equal bounds require a fixed width. DXC writes (0, u32::MAX) for no requirement.
+pub fn parse_psv0_wave_lanes(body: &[u8]) -> Option<std::ops::RangeInclusive<u32>> {
+    let size = u32_at(body, 0).ok()? as usize;
+    let info = body.get(4..)?.get(..size)?;
+    let min = u32_at(info, 16).ok()?;
+    let max = u32_at(info, 20).ok()?;
+    (max != 0 && min <= max && (min, max) != (0, u32::MAX)).then_some(min..=max)
+}
+
 /// Geometry-shader facts from the PSV0 runtime info.
 #[derive(Debug, Clone, Copy)]
 pub struct GsInfo {
@@ -130,6 +139,7 @@ pub fn parse_psv0_gs(body: &[u8]) -> Option<GsInfo> {
     })
 }
 
+/// Parse the PSV0 chunk far enough to recover the resource-binding list.
 pub fn parse_psv0(body: &[u8]) -> Result<Vec<PsvResource>, String> {
     let info_size = u32_at(body, 0)? as usize;
     let mut p = 4 + info_size;
