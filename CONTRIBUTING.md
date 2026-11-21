@@ -41,6 +41,21 @@ cargo test -p <crate>
 
 Some crates also need third-party SDKs (the DirectX Agility SDK, DXC, libopus). Their `build.rs` says which.
 
+## Core checks
+
+The following checks run in GitHub Actions on Windows with stable Rust. They do
+not require game dumps, console DLLs, DXC or a GPU:
+
+```
+cargo test --locked -p tombox-pe -p tombox-archive -p tombox-rpf
+cargo test --locked -p tombox-xshader --lib --test synthetic
+```
+
+The shader check runs library tests and hand-assembled regression programs.
+Other shader tests can require local title fixtures or D3D12/DXC; compatibility
+DLL tests can also require resources absent from the public checkout. Those
+checks are not part of this workflow.
+
 ## Licence
 
 Contributions are accepted under the project licence: MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

@@ -1,0 +1,28 @@
+name: Core tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Parsers and synthetic shaders
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test file parsers
+        run: cargo test --locked -p tombox-pe -p tombox-archive -p tombox-rpf
+      - name: Test shader translation without title fixtures or a GPU
+        run: cargo test --locked -p tombox-xshader --lib --test synthetic
