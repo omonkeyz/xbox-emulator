@@ -19,14 +19,28 @@ pub struct NlHint {
     pub roaming: u8,
 }
 
-#[link(name = "iphlpapi")]
-extern "system" {
-    fn GetNetworkConnectivityHint(hint: *mut NlHint) -> u32;
-}
-
+/// `GetNetworkConnectivityHint` is looked up on first use and not imported: it needs
+/// Windows 10 2004, and Wine has none. A missing import would load as a stub that aborts
+/// the process when called. Without it there is no hint, as when the call fails.
 pub fn system_hint() -> Option<NlHint> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryA(name: *const u8) -> usize;
+        fn GetProcAddress(module: usize, name: *const u8) -> usize;
+    }
+    static F: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let f = *F.get_or_init(|| unsafe {
+        match LoadLibraryA(b"iphlpapi.dll\0".as_ptr()) {
+            0 => 0,
+            module => GetProcAddress(module, b"GetNetworkConnectivityHint\0".as_ptr()),
+        }
+    });
+    if f == 0 {
+        return None;
+    }
+    let get: unsafe extern "system" fn(*mut NlHint) -> u32 = unsafe { core::mem::transmute(f) };
     let mut h = NlHint::default();
-    if unsafe { GetNetworkConnectivityHint(&mut h) } == 0 { Some(h) } else { None }
+    if unsafe { get(&mut h) } == 0 { Some(h) } else { None }
 }
 
 pub fn connectivity_level() -> u32 {

@@ -73,10 +73,38 @@ pub struct SegmentHeapParameters {
     pub tail: [u64; 4],
 }
 
+const STATUS_NOT_IMPLEMENTED: i32 = 0xc000_0002u32 as i32;
+
+/// Address of an ntdll export, null when this ntdll has none by that name.
+fn ntdll_export(name: &'static [u8]) -> *const c_void {
+    let ntdll: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+    unsafe { GetProcAddress(GetModuleHandleW(ntdll.as_ptr()), name.as_ptr()) }
+}
+
+// The two partition calls are looked up on first use and not imported. An ntdll without
+// them (Wine, which turns a missing import into a stub that aborts the process when
+// called) gives STATUS_NOT_IMPLEMENTED, and `open_partition` treats that like any other
+// partition it cannot open.
+#[allow(non_snake_case)]
+unsafe fn NtOpenPartition(out: *mut Handle, access: u32, attrs: *const ObjectAttributes) -> i32 {
+    static F: OnceLock<usize> = OnceLock::new();
+    match *F.get_or_init(|| ntdll_export(b"NtOpenPartition\0") as usize) {
+        0 => STATUS_NOT_IMPLEMENTED,
+        f => core::mem::transmute::<usize, unsafe extern "system" fn(*mut Handle, u32, *const ObjectAttributes) -> i32>(f)(out, access, attrs),
+    }
+}
+
+#[allow(non_snake_case)]
+unsafe fn NtManagePartition(target: Handle, source: Handle, class: u32, info: *mut u8, len: u32) -> i32 {
+    static F: OnceLock<usize> = OnceLock::new();
+    match *F.get_or_init(|| ntdll_export(b"NtManagePartition\0") as usize) {
+        0 => STATUS_NOT_IMPLEMENTED,
+        f => core::mem::transmute::<usize, unsafe extern "system" fn(Handle, Handle, u32, *mut u8, u32) -> i32>(f)(target, source, class, info, len),
+    }
+}
+
 #[link(name = "ntdll", kind = "raw-dylib")]
 extern "system" {
-    fn NtOpenPartition(out: *mut Handle, access: u32, attrs: *const ObjectAttributes) -> i32;
-    fn NtManagePartition(target: Handle, source: Handle, class: u32, info: *mut u8, len: u32) -> i32;
     fn RtlCreateHeap(flags: u32, base: *mut c_void, reserve: usize, commit: usize, lock: *mut c_void, params: *mut c_void) -> Handle;
 }
 

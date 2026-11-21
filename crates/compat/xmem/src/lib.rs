@@ -120,10 +120,38 @@ struct ObjectAttributes {
     qos: *const core::ffi::c_void,
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
-extern "system" {
-    fn NtOpenPartition(out: *mut Handle, access: u32, attrs: *const ObjectAttributes) -> i32;
-    fn NtManagePartition(target: Handle, source: Handle, class: u32, info: *mut u8, len: u32) -> i32;
+const STATUS_NOT_IMPLEMENTED: i32 = 0xc000_0002u32 as i32;
+
+/// Address of an ntdll export, 0 when this ntdll has none by that name.
+fn ntdll_export(name: &'static [u8]) -> usize {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleA(name: *const u8) -> usize;
+        fn GetProcAddress(h: usize, name: *const u8) -> usize;
+    }
+    unsafe { GetProcAddress(GetModuleHandleA(b"ntdll.dll\0".as_ptr()), name.as_ptr()) }
+}
+
+// The two partition calls are looked up on first use and not imported. An ntdll without
+// them (Wine, which turns a missing import into a stub that aborts the process when
+// called) gives STATUS_NOT_IMPLEMENTED, and `open_partition` treats that like any other
+// partition it cannot open.
+#[allow(non_snake_case)]
+unsafe fn NtOpenPartition(out: *mut Handle, access: u32, attrs: *const ObjectAttributes) -> i32 {
+    static F: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    match *F.get_or_init(|| ntdll_export(b"NtOpenPartition\0")) {
+        0 => STATUS_NOT_IMPLEMENTED,
+        f => core::mem::transmute::<usize, unsafe extern "system" fn(*mut Handle, u32, *const ObjectAttributes) -> i32>(f)(out, access, attrs),
+    }
+}
+
+#[allow(non_snake_case)]
+unsafe fn NtManagePartition(target: Handle, source: Handle, class: u32, info: *mut u8, len: u32) -> i32 {
+    static F: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    match *F.get_or_init(|| ntdll_export(b"NtManagePartition\0")) {
+        0 => STATUS_NOT_IMPLEMENTED,
+        f => core::mem::transmute::<usize, unsafe extern "system" fn(Handle, Handle, u32, *mut u8, u32) -> i32>(f)(target, source, class, info, len),
+    }
 }
 
 pub const PARTITION_SYSTEM: u32 = 0;
