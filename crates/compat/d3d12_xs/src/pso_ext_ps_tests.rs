@@ -140,7 +140,7 @@ fn null() -> *mut c_void {
     core::ptr::null_mut()
 }
 
-const VS: &str = "#define RS \"UAV(u0)\"\nstruct VOut { float4 p : SV_Position; float4 t : TEXCOORD0; nointerpolation uint4 k : TEXCOORD1; };\n[RootSignature(RS)]\nVOut main(uint id : SV_VertexID) { VOut o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * float2(2, -2) + float2(-1, 1), TB_Z, 1); o.t = float4(uv * 64.0, 0, 1); o.k = uint4(id, 0, 0, 0); return o; }\n";
+const VS: &str = "#define RS \"UAV(u0)\"\nstruct VOut { float4 p : SV_Position; float4 t : TEXCOORD0; nointerpolation uint4 k : TEXCOORD1; };\n[RootSignature(RS)]\nVOut main(uint id : SV_VertexID) { VOut o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv.x - 1, 1 - uv.y, TB_Z, 1); o.t = float4(uv * 64.0, 0, 1); o.k = uint4(id, 0, 0, 0); return o; }\n";
 
 unsafe fn rig() -> Rig {
     unsafe {
@@ -270,7 +270,10 @@ unsafe fn run(r: &Rig, draws: &[Draw], samples: u32, clear_depth: f32) -> u32 {
         call!(l, 30, (*mut c_void) -> (), r.rs);
         let va = call!(uav, 11, () -> u64);
         call!(l, 42, (u32, u64) -> (), 0, va);
-        let vp = [0f32, 0.0, SIZE as f32, SIZE as f32, 0.0, 1.0];
+        // Map the in-bounds VS triangle over the scissor without clipping. A clipper-generated
+        // edge can invoke the pixel-frequency shader twice for one MSAA pixel.
+        let viewport_size = (2 * SIZE) as f32;
+        let vp = [0f32, 0.0, viewport_size, viewport_size, 0.0, 1.0];
         call!(l, 21, (u32, *const f32) -> (), 1, vp.as_ptr());
         let sc = [0i32, 0, SIZE as i32, SIZE as i32];
         call!(l, 22, (u32, *const i32) -> (), 1, sc.as_ptr());
