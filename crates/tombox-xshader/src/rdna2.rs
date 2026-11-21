@@ -383,13 +383,16 @@ fn decode_operands(enc: Enc, raw: &[u32]) -> (Vec<Opnd>, Vec<Opnd>, InsnAux) {
         Enc::Flat => {
             // dword0: offset[11:0], seg[15:14] (0 flat, 1 scratch, 2 global), op[24:18];
             // dword1: addr[7:0], data[15:8], saddr[22:16] (0x7f = none), vdst[31:24].
+            // RDNA2 ISA, FLAT fields: scratch/global take a 12-bit signed offset, FLAT an
+            // 11-bit unsigned one (MSB ignored); SADDR is unused by FLAT.
             let d1 = raw.get(1).copied().unwrap_or(0);
-            aux.imm = (((w & 0xfff) as i32) << 20 >> 20) as i64;
             aux.mask = ((w >> 14) & 3) as u8;
+            let flat = aux.mask == 0;
+            aux.imm = if flat { (w & 0x7ff) as i64 } else { (((w & 0xfff) as i32) << 20 >> 20) as i64 };
             let saddr = (d1 >> 16) & 0x7f;
             (vec![Opnd::Vgpr((d1 >> 24) as u8)],
              vec![Opnd::Vgpr((d1 & 0xff) as u8), Opnd::Vgpr(((d1 >> 8) & 0xff) as u8),
-                  if saddr == 0x7f { Opnd::Null } else { ssrc8(saddr as u16, None) }], aux)
+                  if saddr == 0x7f || flat { Opnd::Null } else { ssrc8(saddr as u16, None) }], aux)
         }
         Enc::Ds => {
             // dword0: offset0[7:0], offset1[15:8], gds[17], op[25:18];

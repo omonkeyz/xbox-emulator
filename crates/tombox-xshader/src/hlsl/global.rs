@@ -97,8 +97,8 @@ fn width(m: &str) -> Option<(bool, u8, u8, bool)> {
         "flat_load_dwordx2" => (false, 2, 4, false),
         "flat_load_dwordx3" => (false, 3, 4, false),
         "flat_load_dwordx4" => (false, 4, 4, false),
-        "flat_store_byte" => (true, 1, 1, false),
-        "flat_store_short" => (true, 1, 2, false),
+        "flat_store_byte" | "flat_store_byte_d16_hi" => (true, 1, 1, false),
+        "flat_store_short" | "flat_store_short_d16_hi" => (true, 1, 2, false),
         "flat_store_dword" => (true, 1, 4, false),
         "flat_store_dwordx2" => (true, 2, 4, false),
         "flat_store_dwordx3" => (true, 3, 4, false),
@@ -161,6 +161,9 @@ impl<'a> Emitter<'a> {
         if ins.aux.mask == 1 {
             return Err(format!("{m}: scratch-segment access unsupported"));
         }
+        if ins.raw.first().is_some_and(|w| (w >> 13) & 1 != 0) {
+            return Err(format!("{m}: LDS=1 (memory <-> LDS transfer) is not lowered"));
+        }
         let (store, n, bytes, signed) = width(m).ok_or_else(|| format!("{m}: global/flat operation unsupported"))?;
         let va = self.global_va(ins)?;
         let t = self.tmp;
@@ -176,7 +179,9 @@ impl<'a> Emitter<'a> {
             for k in 0..n {
                 let o = Opnd::Vgpr(data + k);
                 self.touch(&o);
-                body.push(self.global_store_line(&g, k, &r(&o)?, bytes));
+                // `_d16_hi` stores take the high half: DATA[23:16] (byte) or DATA[31:16] (short).
+                let v = if m.ends_with("_d16_hi") { format!("({} >> 16u)", r(&o)?) } else { r(&o)? };
+                body.push(self.global_store_line(&g, k, &v, bytes));
             }
             self.line(&format!("if (exec_lo & 1u) {{ {} }}", body.join(" ")));
             return Ok(());

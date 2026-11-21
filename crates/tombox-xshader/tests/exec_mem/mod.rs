@@ -439,11 +439,7 @@ pub fn run_mem_cases(group: &str, cs: &[MCase]) {
             }
         }
     }
-    let ok: Vec<&str> = all.iter().filter(|m| !bad.contains(*m)).copied().collect();
-    if let Some(dir) = std::env::var_os("TOMBOX_EXEC_VERIFIED") {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{group}.txt")), ok.join("\n") + "\n");
-    }
+    let ok = verified(group, &all, &bad);
     println!("{group}: {} mnemonics verified, {} failing, {} cases, {runtime} rerun with runtime inputs", ok.len(), bad.len(), cs.len());
     assert!(fails.is_empty(), "{group}: {} failing\n{}", fails.len(), fails.join("\n\n"));
 }
@@ -590,11 +586,17 @@ pub fn run_cs_cases(group: &str, cs: &[CsCase]) {
             }
         }
     }
+    let ok = verified(group, &all, &bad);
+    println!("{group}: {} mnemonics verified, {} failing, {} cases, {runtime} rerun with runtime inputs", ok.len(), bad.len(), cs.len());
+    assert!(fails.is_empty(), "{group}: {} failing\n{}", fails.len(), fails.join("\n\n"));
+}
+
+/// Mnemonics of `all` without a failing case; written to `$TOMBOX_EXEC_VERIFIED/<group>.txt`.
+pub fn verified<'a>(group: &str, all: &std::collections::BTreeSet<&'a str>, bad: &std::collections::BTreeSet<&'a str>) -> Vec<&'a str> {
     let ok: Vec<&str> = all.iter().filter(|m| !bad.contains(*m)).copied().collect();
     if let Some(dir) = std::env::var_os("TOMBOX_EXEC_VERIFIED") {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{group}.txt")), ok.join("\n") + "\n");
     }
-    println!("{group}: {} mnemonics verified, {} failing, {} cases, {runtime} rerun with runtime inputs", ok.len(), bad.len(), cs.len());
-    assert!(fails.is_empty(), "{group}: {} failing\n{}", fails.len(), fails.join("\n\n"));
+    ok
 }

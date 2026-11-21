@@ -170,7 +170,7 @@ fn global_windows_load_store_and_fault() {
 #[test]
 fn global_routing_and_refusals() {
     let isa = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|x| x.to_le_bytes()).collect() };
-    for (op, m) in [(0x08u32, "flat_load_ubyte"), (0x0b, "flat_load_sshort"), (0x18, "flat_store_byte"), (0x1a, "flat_store_short"), (0x1c, "flat_store_dword"), (0x1d, "flat_store_dwordx2"), (0x1e, "flat_store_dwordx4"), (0x1f, "flat_store_dwordx3")] {
+    for (op, m) in [(0x08u32, "flat_load_ubyte"), (0x0b, "flat_load_sshort"), (0x18, "flat_store_byte"), (0x19, "flat_store_byte_d16_hi"), (0x1a, "flat_store_short"), (0x1b, "flat_store_short_d16_hi"), (0x1c, "flat_store_dword"), (0x1d, "flat_store_dwordx2"), (0x1e, "flat_store_dwordx4"), (0x1f, "flat_store_dwordx3")] {
         let got = tombox_xshader::rdna2::disassemble(&isa(&g(op, 2, 0, 1, 2, 20, 3))).into_iter().next().map(|i| i.mnemonic).unwrap_or_default();
         assert_eq!(got, m);
     }
@@ -186,4 +186,159 @@ fn global_routing_and_refusals() {
     w.push(S_ENDPGM);
     let e = translate(&cs_extract(&w, 64)).err().unwrap_or_default();
     assert!(e.contains("unsupported"), "{e}");
+    let mut p = Prog::new();
+    let mut lds = g(0x0c, 2, 0, 1, 0, 20, 3);
+    lds[0] |= 1 << 13;
+    p.raw(&lds);
+    let mut w = p.w.clone();
+    w.push(S_ENDPGM);
+    let e = translate(&cs_extract(&w, 64)).err().unwrap_or_default();
+    assert!(e.contains("LDS=1"), "{e}");
+}
+
+struct GCase {
+    m: &'static str,
+    op: Vec<u32>,
+    words: Vec<u32>,
+    w0: Vec<(usize, u32)>,
+    w1: Vec<u32>,
+}
+
+fn run_global_cases(group: &str, cs: &[GCase]) {
+    let mut fails = Vec::new();
+    let mut all: std::collections::BTreeSet<&str> = Default::default();
+    let mut bad: std::collections::BTreeSet<&str> = Default::default();
+    let mut runtime = 0;
+    for (i, c, rtw) in with_runtime(cs, |c| runtime_words(&c.words, &c.op, vop2(0x16, 200, ic(31), 0))) {
+        all.insert(c.m);
+        let isa: Vec<u8> = c.op.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let got_m = tombox_xshader::rdna2::disassemble(&isa).into_iter().next().map(|i| i.mnemonic).unwrap_or_default();
+        if got_m != c.m {
+            fails.push(format!("#{i} {}: decodes as {got_m}", c.m));
+            bad.insert(c.m);
+            continue;
+        }
+        let tag = if rtw.is_some() { runtime += 1; " (runtime inputs)" } else { "" };
+        match unsafe { run(rtw.as_deref().unwrap_or(&c.words)) } {
+            Ok((w0, w1, fault, hlsl)) => {
+                let mut wrong: Vec<String> = c.w0.iter().filter(|&&(k, w)| w0[k] != w).map(|&(k, w)| format!("w0[{k}] {:08x} want {w:08x}", w0[k])).collect();
+                wrong.extend(w1.iter().zip(&c.w1).enumerate().filter(|(_, (g, w))| g != w).map(|(k, (g, w))| format!("w1[{k}] {g:08x} want {w:08x}")));
+                let f = fault_of(&fault);
+                if f.count != 0 {
+                    wrong.push(format!("{} faults, first va {:#x}", f.count, f.first_va));
+                }
+                if !wrong.is_empty() {
+                    let body: String = hlsl.lines().filter(|l| l.starts_with("    ") && !l.contains("// 0x")).collect::<Vec<_>>().join("\n");
+                    fails.push(format!("#{i} {}{tag}: {}\n{body}", c.m, wrong.into_iter().take(6).collect::<Vec<_>>().join(", ")));
+                    bad.insert(c.m);
+                }
+            }
+            Err(e) => {
+                fails.push(format!("#{i} {}{tag}: {}", c.m, e.lines().take(4).collect::<Vec<_>>().join(" | ")));
+                bad.insert(c.m);
+            }
+        }
+    }
+    let ok = verified(group, &all, &bad);
+    println!("{group}: {} mnemonics verified, {} failing, {} cases, {runtime} rerun with runtime inputs", ok.len(), bad.len(), cs.len());
+    assert!(fails.is_empty(), "{group}: {} failing\n{}", fails.len(), fails.join("\n\n"));
+}
+
+const KD: [u32; 4] = [0x8080_8080, 0x1234_5678, 0xdead_beef, 0x0bad_f00d];
+
+fn dval(t: u32, k: u32) -> u32 {
+    t.wrapping_mul(0x2f5b3) ^ KD[k as usize]
+}
+
+/// Address modes over window 1: (seg, saddr, encoded offset, effective offset). Global takes
+/// a 12-bit signed offset (SGPR base + 32-bit VGPR offset, or a 64-bit VGPR address); FLAT
+/// a 64-bit VGPR address and an 11-bit unsigned offset whose MSB is ignored (RDNA2 ISA,
+/// FLAT fields).
+const MODES: [(u32, u32, i32, i32); 5] = [(2, 22, -4, -4), (2, 22, 8, 8), (2, 0x7d, -16, -16), (0, 0x7d, 0, 0), (0, 0x7d, 0x80c, 12)];
+
+/// Program: s[20:21] = window 0, s[22:23] = window 1, v1 = 4t, v10..v13 = dval(t, k), then
+/// the address of byte `mul * t + add` of window 1 in v20 (offset) / v[20:21] (address).
+fn gprog(mul: u32, add: u32, eff: i32, body: &[u32]) -> Vec<u32> {
+    let mut p = Prog::new();
+    p.sv(20, W0.base as u32).sv(21, (W0.base >> 32) as u32);
+    p.sv(22, W1.base as u32).sv(23, (W1.base >> 32) as u32);
+    p.raw(&[vop2(0x1a, 1, ic(2), 0)]);
+    for k in 0..4 {
+        p.raw(&[vop2(0x0b, 10 + k, LIT, 0), 0x2f5b3, vop2(0x1d, 10 + k, LIT, 10 + k), KD[k as usize]]);
+    }
+    p.raw(&[vop2(0x0b, 20, LIT, 0), mul, vop2(0x25, 20, LIT, 20), add.wrapping_sub(eff as u32)]);
+    p.vv(21, (W1.base >> 32) as u32);
+    p.raw(body);
+    let mut w = p.w;
+    w.push(S_ENDPGM);
+    w
+}
+
+#[test]
+fn flat_global_mem() {
+    assert_eq!(W1.base as u32, 0);
+    let w1_init: Vec<u8> = (0..W1.size as usize / 4).flat_map(|i| m1(i).to_le_bytes()).collect();
+    let le = |b: &[u8], a: usize| u32::from_le_bytes(b[a..a + 4].try_into().unwrap());
+    let words_of = |b: &[u8]| -> Vec<u32> { (0..b.len() / 4).map(|i| le(b, 4 * i)).collect() };
+    let mut cs = Vec::new();
+    type Ext = fn(u32) -> u32;
+    let loads: [(&'static str, u32, u32, u32, u32, Ext); 8] = [
+        ("flat_load_ubyte", 0x08, 1, 3, 17, |x| x & 0xff),
+        ("flat_load_sbyte", 0x09, 1, 3, 18, |x| x as u8 as i8 as i32 as u32),
+        ("flat_load_ushort", 0x0a, 1, 2, 16, |x| x & 0xffff),
+        ("flat_load_sshort", 0x0b, 1, 2, 18, |x| x as u16 as i16 as i32 as u32),
+        ("flat_load_dword", 0x0c, 1, 4, 16, |x| x),
+        ("flat_load_dwordx2", 0x0d, 2, 8, 16, |x| x),
+        ("flat_load_dwordx3", 0x0f, 3, 12, 16, |x| x),
+        ("flat_load_dwordx4", 0x0e, 4, 12, 16, |x| x),
+    ];
+    for (m, opc, n, mul, add, ext) in loads {
+        for (seg, saddr, enc, eff) in MODES {
+            let op = g(opc, seg, enc, 20, 0, saddr, 24);
+            let mut body = op.to_vec();
+            for k in 0..n {
+                body.extend_from_slice(&g(0x1c, 2, 256 * k as i32, 1, 24 + k, 20, 0));
+            }
+            let mut w0 = Vec::new();
+            for t in 0..64u32 {
+                let a = (mul * t + add) as usize;
+                for k in 0..n {
+                    w0.push(((k * 64 + t) as usize, ext(le(&w1_init, a + 4 * k as usize))));
+                }
+            }
+            cs.push(GCase { m, op: op.to_vec(), words: gprog(mul, add, eff, &body), w0, w1: words_of(&w1_init) });
+        }
+    }
+    // RDNA2 ISA FLAT opcodes: store_byte S0[7:0], byte_d16_hi S0[23:16], short S0[15:0],
+    // short_d16_hi S0[31:16]. Threads write disjoint bytes of window 1.
+    let stores: [(&'static str, u32, u32, u32, u32, u32, u32); 8] = [
+        ("flat_store_byte", 0x18, 1, 1, 0, 3, 17),
+        ("flat_store_byte_d16_hi", 0x19, 1, 1, 16, 3, 17),
+        ("flat_store_short", 0x1a, 1, 2, 0, 6, 16),
+        ("flat_store_short_d16_hi", 0x1b, 1, 2, 16, 6, 16),
+        ("flat_store_dword", 0x1c, 1, 4, 0, 4, 16),
+        ("flat_store_dwordx2", 0x1d, 2, 4, 0, 8, 16),
+        ("flat_store_dwordx3", 0x1f, 3, 4, 0, 12, 16),
+        ("flat_store_dwordx4", 0x1e, 4, 4, 0, 16, 0),
+    ];
+    for (m, opc, n, bytes, sh, mul, add) in stores {
+        for (seg, saddr, enc, eff) in MODES {
+            if (add as i32) < eff {
+                continue;
+            }
+            let op = g(opc, seg, enc, 20, 10, saddr, 0);
+            let mut b = w1_init.clone();
+            for t in 0..64u32 {
+                let a = (mul * t + add) as usize;
+                for k in 0..n {
+                    let v = dval(t, k) >> sh;
+                    for i in 0..bytes as usize {
+                        b[a + 4 * k as usize + i] = (v >> (8 * i)) as u8;
+                    }
+                }
+            }
+            cs.push(GCase { m, op: op.to_vec(), words: gprog(mul, add, eff, &op), w0: vec![], w1: words_of(&b) });
+        }
+    }
+    run_global_cases("flat_global", &cs);
 }
