@@ -123,7 +123,10 @@ static REAL_BARRIER: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn resource_barrier_x(this: *mut c_void, n: u32, barriers: *const u8) {
     let fixed = crate::xone_barrier::sanitize(n, barriers);
-    let barriers = fixed.as_ref().map_or(barriers, |v| v.as_ptr());
+    let (n, barriers) = fixed.as_ref().map_or((n, barriers), |v| ((v.len() / 32) as u32, v.as_ptr()));
+    if n == 0 {
+        return;
+    }
     crate::gpu_va::note_barriers(n, barriers);
     if crate::rtcap::enabled() {
         crate::rtcap::note_barriers(n, barriers);

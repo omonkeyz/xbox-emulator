@@ -413,6 +413,7 @@ unsafe fn replay_one(list: *mut c_void, r: &Rec) {
         a[*i] = b.as_ptr() as u64;
         if r.xslot == 26 && *i == 1 {
             if let Some(v) = crate::xone_barrier::sanitize(r.a[0] as u32, b.as_ptr()) {
+                a[0] = (v.len() / 32) as u64;
                 fixed.push(v);
                 a[1] = fixed.last().unwrap().as_ptr() as u64;
             }

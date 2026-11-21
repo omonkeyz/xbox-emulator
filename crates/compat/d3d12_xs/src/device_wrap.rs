@@ -470,6 +470,7 @@ unsafe extern "system" fn create_committed_resource(
         desc_copy.as_ptr() as *const u32
     };
     let init_state = if pheap.is_null() { init_state } else { crate::xone_tex::committed_state(unsafe { *pheap }, init_state) };
+    let init_state = if pdesc.is_null() { init_state } else { crate::xone_barrier::initial_state(unsafe { *pdesc }, init_state) };
     let hr = unsafe { f(real, pheap, heap_flags, desc_ptr, init_state, pclear, use_riid, ppv) };
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
@@ -1304,6 +1305,7 @@ unsafe extern "system" fn create_placed_resource(
     let mut d = unsafe { core::slice::from_raw_parts(pdesc, 0x38).to_vec() };
     let flags = u32::from_le_bytes(d[0x30..0x34].try_into().unwrap());
     d[0x30..0x34].copy_from_slice(&(flags & 0xFF).to_le_bytes());
+    let init_state = crate::xone_barrier::initial_state(u32::from_le_bytes(d[0..4].try_into().unwrap()), init_state);
     let hr = unsafe { f(real, heap, offset, d.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) };
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
@@ -1338,6 +1340,7 @@ unsafe extern "system" fn create_placed_resource_x(
     let orig: [u8; 0x38] = unsafe { core::slice::from_raw_parts(pdesc, 0x38) }.try_into().unwrap();
     let mut d = orig;
     let dim = u32::from_le_bytes(d[0..4].try_into().unwrap());
+    let init_state = crate::xone_barrier::initial_state(dim, init_state);
     let flags = u32::from_le_bytes(d[0x30..0x34].try_into().unwrap());
     d[8..16].copy_from_slice(&0u64.to_le_bytes()); // Alignment: let the host choose
     d[0x2c..0x30].copy_from_slice(&(if dim == 1 { 1u32 } else { 0u32 }).to_le_bytes()); // Layout: ROW_MAJOR for buffers, UNKNOWN for textures (Xbox tile modes have no PC meaning)
