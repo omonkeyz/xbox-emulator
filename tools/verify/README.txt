@@ -59,3 +59,13 @@ Findings from the 2026-11-21 run (coverage.json: Fortnite 233/233 unverified row
   PartyXboxLive.dll on PC resolves all 238 imports and every PartyXbl* P/Invoke name from GameAssembly. The only
   unresolved metadata name, PartyXblInterop, is not in GameAssembly's P/Invoke strings (a managed type name).
   WinHTTP websocket entry points are only resolved, never called; the probe makes no network traffic.
+
+XAudio2 PCM guest
+
+From an x64 Visual Studio Developer PowerShell with stable MSVC Rust on PATH, run
+  .\tools\verify\run_xaudio_pcm_guest.ps1
+
+The guest imports Xbox XAudio2_9.dll ordinal 1 and submits 20 ms of generated mono PCM at 48 kHz to a
+source voice. It uses the default Windows render endpoint with the mastering voice muted. The runner
+checks the original buffer context in OnBufferEnd, the OnStreamEnd callback and the child's exit under
+mdbg. It prints the shim and backend paths and the directory containing the launch logs.
