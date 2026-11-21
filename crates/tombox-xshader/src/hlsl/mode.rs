@@ -28,7 +28,7 @@ float tb_m_mul(float a, float b, uint m) { precise double p = (double)a * (doubl
 float tb_m_mull(float a, float b, uint m) { return (a == 0.0 || b == 0.0) ? 0.0 : tb_m_mul(a, b, m); }
 float tb_m_fma(float a, float b, float c, uint m) { precise double p = (double)a * (double)b; precise float r = tb_fma(a, b, c); precise double e = tb_res2(p, (double)c, r); float q = tb_rfix(r, e, m); if ((m & 3u) == 2u && asuint(q) == 0u && !(abs(e) > 0.0) && !(p == 0.0 && ((asuint(a) ^ asuint(b)) >> 31) == 0u && asuint(c) == 0u)) q = asfloat(0x80000000u); return q; }
 float tb_m_cvti(int x, uint m) { precise float r = (float)x; double e = (r >= 2147483648.0) ? -1.0 : (((int)r < x) ? 1.0 : (((int)r > x) ? -1.0 : 0.0)); return tb_rfix(r, e, m); }
-float tb_m_cvtu(uint x, uint m) { precise float r = (float)x; double e = (r >= 4294967296.0) ? -1.0 : (((uint)r < x) ? 1.0 : (((uint)r > x) ? -1.0 : 0.0)); return tb_rfix(r, e, m); }
+float tb_m_cvtu(uint x, uint m) { precise float r = tb_u2f(x); double e = (r >= 4294967296.0) ? -1.0 : (((uint)r < x) ? 1.0 : (((uint)r > x) ? -1.0 : 0.0)); return tb_rfix(r, e, m); }
 float tb_m_cvtd(double x, uint m) { precise float r = (float)x; precise double e = x - (double)r; return tb_rfix(r, e, m); }
 double tb_p2(int n) { return asdouble(0u, (uint)(clamp(n, -1000, 1000) + 1023) << 20); }
 float tb_m_ldexp(float a, int n, uint m) { int k = clamp(n, -300, 300); precise double x = (double)a * tb_p2(k >> 1) * tb_p2(k - (k >> 1)); precise float r = (float)x; precise double e = x - (double)r; return tb_rfix(r, e, m); }

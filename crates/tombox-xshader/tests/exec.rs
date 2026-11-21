@@ -572,6 +572,17 @@ pub fn run_res_ex(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Optio
     }
 }
 
+/// Expected value matching any f32 NaN, for NaNs the ISA *generates* (INF - INF, log/rsq/sqrt
+/// of a negative, fract(INF)). The RDNA2 ISA examples (V_LOG/V_RSQ/V_SQRT/V_SIN) and RDNA3
+/// ISA 13.3 ("INF - INF = -QNAN") give 0xffc00000, but the translated op's bits come from the
+/// host (AMD/WARP 0xffc00000, NVIDIA 0x7fffffff, DXC constant folding 0x7fc00000), so the
+/// payload is not pinned. Propagated / quieted input NaNs and non-NaN results stay exact.
+pub const GEN_NAN: u32 = 0x7f80_0bad;
+
+pub fn exp_match(got: &[u32], exp: &[u32]) -> bool {
+    got.len() >= exp.len() && exp.iter().zip(got).all(|(&e, &g)| e == g || (e == GEN_NAN && g & 0x7fff_ffff > 0x7f80_0000))
+}
+
 pub struct Case {
     pub m: &'static str,
     pub pre: Vec<u32>,
@@ -611,7 +622,7 @@ impl Cases {
             p.raw(&c.pre).raw(&c.op).raw(&c.post);
             match run(&p.words()) {
                 Ok(r) => {
-                    if r[..c.exp.len()] != c.exp[..] {
+                    if !exp_match(&r, &c.exp) {
                         let h = hlsl_of(&p.words()).unwrap_or_default();
                         let body: String = h.lines().filter(|l| l.starts_with("    ") && !l.contains("TB_RTFMT")).collect::<Vec<_>>().join("\n");
                         fails.push(format!("#{i} {}: got {:08x?} want {:08x?}\n{body}", c.m, &r[..c.exp.len()], c.exp));

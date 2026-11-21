@@ -84,7 +84,8 @@ const XYZW: [&str; 4] = ["x", "y", "z", "w"];
 /// to the direction vector HLSL TextureCube sampling expects.
 const CUBE_HELPERS: &str = r#"uint tb_perm_byte(uint hi, uint lo, uint sel) { if (sel >= 13u) return 0xffu; if (sel == 12u) return 0u; if (sel == 11u) return (hi >> 31) * 0xffu; if (sel == 10u) return ((hi >> 15) & 1u) * 0xffu; if (sel == 9u) return (lo >> 31) * 0xffu; if (sel == 8u) return ((lo >> 15) & 1u) * 0xffu; return sel >= 4u ? ((hi >> ((sel - 4u) * 8u)) & 0xffu) : ((lo >> (sel * 8u)) & 0xffu); }
 uint tb_perm(uint hi, uint lo, uint sel) { return tb_perm_byte(hi, lo, sel & 0xffu) | (tb_perm_byte(hi, lo, (sel >> 8) & 0xffu) << 8) | (tb_perm_byte(hi, lo, (sel >> 16) & 0xffu) << 16) | (tb_perm_byte(hi, lo, sel >> 24) << 24); }
-bool tb_cmp_class(uint b, uint mask) { uint e = (b >> 23) & 0xffu; uint m = b & 0x7fffffu; bool neg = (b >> 31) != 0u; uint c; if (e == 0xffu) { c = (m != 0u) ? (((m & 0x400000u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }uint tb_bfe_i32(uint a, uint b) { uint o = b & 31u, w = (b >> 16) & 127u; if (w == 0u) return 0u; if (w + o >= 32u) return asuint(asint(a) >> o); return asuint(asint(a << (32u - w - o)) >> (32u - w)); }uint tb_mulhi_u32(uint a, uint b) { uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16; uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1; uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu); return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16); }
+bool tb_cmp_class(uint b, uint mask) { uint e = (b >> 23) & 0xffu; uint m = b & 0x7fffffu; bool neg = (b >> 31) != 0u; uint c; if (e == 0xffu) { c = (m != 0u) ? (((m & 0x400000u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }uint tb_bfe_i32v(uint a, uint o, uint w) { w &= 31u; uint s = 32u - w; return (w == 0u) ? 0u : asuint(((asint(a) >> (o & 31u)) << s) >> s); }
+uint tb_bfe_i32(uint a, uint b) { return tb_bfe_i32v(a, b, b >> 16); }uint tb_mulhi_u32(uint a, uint b) { uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16; uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1; uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu); return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16); }
 uint tb_mulhi_i32(uint a, uint b) { uint h = tb_mulhi_u32(a, b); if (asint(a) < 0) h -= b; if (asint(b) < 0) h -= a; return h; }
 float tb_cubema(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return 2.0 * z; if (ay >= ax) return 2.0 * y; return 2.0 * x; }
 float tb_cubesc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return z < 0.0 ? -x : x; if (ay >= ax) return x; return x < 0.0 ? z : -z; }
@@ -100,6 +101,18 @@ float tb_fma(float a, float b, float c) { precise double p = (double)a * (double
 bool tb_nan(float x) { return (asuint(x) & 0x7fffffffu) > 0x7f800000u; }
 uint tb_f2h(float x) { uint b = asuint(x); uint s = (b >> 16) & 0x8000u; uint a = b & 0x7fffffffu; if (a > 0x7f800000u) return s | 0x7e00u | ((a >> 13) & 0x3ffu); if (a >= 0x477ff000u) return s | 0x7c00u; if (a >= 0x38800000u) { uint r = a - 0x38000000u; return s | ((r + 0xfffu + ((r >> 13) & 1u)) >> 13); } if (a < 0x33000000u) return s; uint e = a >> 23; uint m = (a & 0x7fffffu) | 0x800000u; uint sh = 126u - e; uint q = m >> sh; uint rem = m & ((1u << sh) - 1u); uint hf = 1u << (sh - 1u); if (rem > hf || (rem == hf && (q & 1u) != 0u)) q += 1u; return s | q; }
 float tb_rne(float x) { float a = abs(x); if (!(a < 8388608.0)) return x; float r = floor(a); float f = a - r; if (f > 0.5 || (f == 0.5 && (((uint)r) & 1u) != 0u)) r += 1.0; return asfloat(asuint(r) | (asuint(x) & 0x80000000u)); }
+float tb_add(float a, float b) { precise float r = a + b; return r; }
+float tb_sub(float a, float b) { precise float r = a - b; return r; }
+// D3D only recommends RNE for utof (WARP truncates above 2^31); both halves convert exactly
+// and the single add rounds to nearest even, as V_CVT_F32_U32 does.
+float tb_u2f(uint a) { precise float r = (float)(a & 0xffff0000u) + (float)(a & 0xffffu); return r; }
+// Input NaNs come back quieted; NaNs the ISA generates (fract(INF), rsq/sqrt/log of a negative,
+// ISA examples: 0xffc00000) take whatever NaN the host or these selects give. Denormal inputs
+// flush to zero for log/rsq/sqrt ("denormals are flushed"), not for fract ("accepted").
+float tb_fract(float x, float c) { uint b = asuint(x); precise float r = x - floor(x); return ((b & 0x7fffffffu) >= 0x7f800000u) ? asfloat(b | 0x400000u) : min(r, c); }
+float tb_log(float x) { uint b = asuint(x); if ((b & 0x7fffffffu) > 0x7f800000u) return asfloat(b | 0x400000u); if ((b & 0x7f800000u) == 0u) return asfloat(0xff800000u); if (b >= 0x7f800000u) return asfloat(b == 0x7f800000u ? b : 0xffc00000u); return log2(x); }
+float tb_rsq(float x) { uint b = asuint(x); if ((b & 0x7fffffffu) > 0x7f800000u) return asfloat(b | 0x400000u); return ((b & 0x7f800000u) == 0u) ? asfloat((b & 0x80000000u) | 0x7f800000u) : rsqrt(x); }
+float tb_sqrt(float x) { uint b = asuint(x); if ((b & 0x7fffffffu) > 0x7f800000u) return asfloat(b | 0x400000u); return ((b & 0x7f800000u) == 0u) ? asfloat(b & 0x80000000u) : sqrt(x); }
 uint tb_cvt_i(float x) { if (tb_nan(x)) return 0u; if (x >= 2147483648.0) return 0x7fffffffu; if (x <= -2147483648.0) return 0x80000000u; return asuint((int)x); }
 uint tb_cvt_u(float x) { if (tb_nan(x) || x <= 0.0) return 0u; if (x >= 4294967296.0) return 0xffffffffu; return (uint)x; }
 #if defined(__HLSL_VERSION) && __HLSL_VERSION >= 2021
@@ -2818,31 +2831,37 @@ impl<'a> Emitter<'a> {
                     return Ok(());
                 }
                 if m == "s_bfm_b64" || m == "s_cselect_b64" || m == "s_lshl_b64" {
-                    let (lo, hi_e) = if m == "s_lshl_b64" {
-                        let ah = r(&hi(&s[0]))?;
+                    let shl64 = |l: &str, h: &str| {
                         (
-                            format!("((({b} & 63u) >= 32u) ? 0u : ({a} << ({b} & 31u)))"),
-                            format!(
-                                "((({b} & 63u) == 0u) ? {ah} : ((({b} & 63u) >= 32u) ? ({a} << (({b} & 63u) - 32u)) : (({ah} << ({b} & 31u)) | ({a} >> (32u - ({b} & 31u))))))"
-                            ),
+                            format!("((({b} & 63u) >= 32u) ? 0u : ({l} << ({b} & 31u)))"),
+                            format!("((({b} & 63u) == 0u) ? {h} : ((({b} & 63u) >= 32u) ? ({l} << (({b} & 63u) - 32u)) : (({h} << ({b} & 31u)) | ({l} >> (32u - ({b} & 31u))))))"),
                         )
+                    };
+                    let t = self.tmp;
+                    self.tmp += 1;
+                    let (lo, hi_e) = if m == "s_lshl_b64" {
+                        shl64(&a, &r(&hi(&s[0]))?)
                     } else if m == "s_bfm_b64" {
-                        // Bitfield mask ((1 << a) - 1) << b. Lane model keeps the low word;
-                        // counts >= 32 saturate it.
-                        (format!("((({a} & 63u) >= 32u ? 0xffffffffu : ((1u << ({a} & 31u)) - 1u)) << ({b} & 31u))"), "0u".to_string())
+                        // D.u64 = ((1 << S0[5:0]) - 1) << S1[5:0].
+                        self.line(&format!(
+                            "uint t{t}n = {a} & 63u; uint t{t}ml = (t{t}n >= 32u) ? 0xffffffffu : ((1u << t{t}n) - 1u); uint t{t}mh = (t{t}n > 32u) ? ((1u << (t{t}n - 32u)) - 1u) : 0u;"
+                        ));
+                        shl64(&format!("t{t}ml"), &format!("t{t}mh"))
                     } else {
                         (
                             format!("((scc != 0u) ? {a} : {b})"),
                             format!("((scc != 0u) ? {} : {})", r(&hi(&s[0]))?, r(&hi(&s[1]))?),
                         )
                     };
-                    let t = self.tmp;
-                    self.tmp += 1;
                     self.line(&format!("uint t{t}l = {lo}; uint t{t}h = {hi_e};"));
                     self.ws(&d, &format!("t{t}l"))?;
                     let dh = hi(&d);
                     self.touch(&dh);
-                    return self.ws(&dh, &format!("t{t}h"));
+                    self.ws(&dh, &format!("t{t}h"))?;
+                    if m == "s_lshl_b64" {
+                        self.line(&format!("scc = ((t{t}l | t{t}h) != 0u) ? 1u : 0u;"));
+                    }
+                    return Ok(());
                 }
                 let is64 = m.ends_with("_b64");
                 let bit = |op: &str, a: &str, b: &str| -> Option<String> {
@@ -3183,7 +3202,14 @@ impl<'a> Emitter<'a> {
                         Ok(())
                     }
                     "s_waitcnt_vscnt" | "s_waitcnt_vmcnt" | "s_waitcnt_expcnt" | "s_waitcnt_lgkmcnt" => Ok(()),
-                    "s_addk_i32" => self.ws(&d, &format!("({} + {imm})", name(&d)?)),
+                    "s_addk_i32" => {
+                        // SCC = signed overflow: operands agree in sign and the sum does not.
+                        self.touch(&d);
+                        let (dn, t) = (name(&d)?, self.tmp);
+                        self.tmp += 1;
+                        self.line(&format!("uint t{t} = {dn} + {imm}; scc = ((({dn} ^ t{t}) & ({imm} ^ t{t})) >> 31);"));
+                        self.ws(&d, &format!("t{t}"))
+                    }
                     "s_mulk_i32" => self.ws(&d, &format!("({} * {imm})", name(&d)?)),
                     _ if m.starts_with("s_cmpk_") => {
                         let fake = m.replace("s_cmpk_", "s_cmp_");
@@ -3813,7 +3839,8 @@ impl<'a> Emitter<'a> {
                 "v_ceil_f16" => format!("ceil({a})"),
                 "v_trunc_f16" => format!("trunc({a})"),
                 "v_rndne_f16" => format!("tb_rne({a})"),
-                _ => format!("frac({a})"),
+                // Largest half below 1.0 (0x3bff) bounds the result, as for v_fract_f32.
+                _ => format!("tb_fract({a}, 0.99951171875)"),
             };
             return self.wv(&d, &hres(e));
         }
@@ -4163,10 +4190,8 @@ impl<'a> Emitter<'a> {
             return self.wv(&d, &format!("tb_perm({}, {}, {})", r(&s[0])?, r(&s[1])?, r(&s[2])?));
         }
         if m == "v_bfe_i32" {
-            // Sign-extended bit field: offset = S1[4:0], width = S2[4:0].
-            let (a, o, w) = (r(&s[0])?, r(&s[1])?, r(&s[2])?);
-            return self.wv(&d, &format!(
-                "((({w}) & 31u) == 0u ? 0u : asuint(asint(({a}) << ((32u - (({w}) & 31u) - (({o}) & 31u)) & 31u)) >> ((32u - (({w}) & 31u)) & 31u)))"));
+            // Sign-extended bit field: offset = S1[4:0], width = S2[4:0]; width 0 gives 0.
+            return self.wv(&d, &format!("tb_bfe_i32v({}, {}, {})", r(&s[0])?, r(&s[1])?, r(&s[2])?));
         }
         if matches!(m.as_str(), "v_movrels_b32" | "v_movreld_b32" | "v_movrelsd_b32") {
             // Register-relative moves: the source and/or destination VGPR number is offset by
@@ -4213,7 +4238,9 @@ impl<'a> Emitter<'a> {
                 }
                 v.push(e);
             }
-            let e = format!("{} * {} + {}", v[0], v[1], v[2]);
+            // Fused: a product of two halves is exact in f32, so a plain multiply-add rounds
+            // once; a 32-bit multiplicand needs the single-rounding helper.
+            let e = if opsel_hi & 3 == 3 { format!("{} * {} + {}", v[0], v[1], v[2]) } else { format!("tb_fma({}, {}, {})", v[0], v[1], v[2]) };
             return match m.as_str() {
                 "v_fma_mix_f32" => self.wv(&d, &format!("asuint({e})")),
                 // The f16 result replaces one half of the destination; the other half is kept.
@@ -4427,9 +4454,10 @@ impl<'a> Emitter<'a> {
             None
         };
         let fexpr: Option<String> = if mode_e.is_some() { mode_e } else { match m.as_str() {
-            "v_add_f32" => Some(format!("{} + {}", fa()?, fb()?)),
-            "v_sub_f32" => Some(format!("{} - {}", fa()?, fb()?)),
-            "v_subrev_f32" => Some(format!("{} - {}", fb()?, fa()?)),
+            // `precise`: fast-math folds (x - x -> 0, x + -x -> 0) are wrong for INF / NaN.
+            "v_add_f32" => Some(format!("tb_add({}, {})", fa()?, fb()?)),
+            "v_sub_f32" => Some(format!("tb_sub({}, {})", fa()?, fb()?)),
+            "v_subrev_f32" => Some(format!("tb_sub({}, {})", fb()?, fa()?)),
             "v_mul_f32" if legacy => Some(format!("tb_mull({}, {})", fa()?, fb()?)),
             "v_mul_f32" => Some(format!("{} * {}", fa()?, fb()?)),
             "v_min_f32" => Some(format!("min({}, {})", fa()?, fb()?)),
@@ -4458,22 +4486,23 @@ impl<'a> Emitter<'a> {
                 fc()?
             )),
             "v_cvt_f32_i32" => Some(format!("(float)asint({a})")),
-            "v_cvt_f32_u32" => Some(format!("(float)({a})")),
+            "v_cvt_f32_u32" => Some(format!("tb_u2f({a})")),
             "v_cvt_f32_ubyte0" => Some(format!("(float)({a} & 0xffu)")),
             "v_cvt_f32_ubyte1" => Some(format!("(float)(({a} >> 8) & 0xffu)")),
             "v_cvt_f32_ubyte2" => Some(format!("(float)(({a} >> 16) & 0xffu)")),
             "v_cvt_f32_ubyte3" => Some(format!("(float)(({a} >> 24) & 0xffu)")),
             "v_cvt_f32_f16" => Some(format!("f16tof32({a})")),
-            "v_fract_f32" => Some(format!("frac({})", fa()?)),
+            // ISA: D = S0 + -floor(S0), clamped below 1.0 (DX frc; LLVM `amdgcn_fract` folding).
+            "v_fract_f32" => Some(format!("tb_fract({}, asfloat(0x3f7fffffu))", fa()?)),
             "v_trunc_f32" => Some(format!("trunc({})", fa()?)),
             "v_ceil_f32" => Some(format!("ceil({})", fa()?)),
             "v_rndne_f32" => Some(format!("tb_rne({})", fa()?)),
             "v_floor_f32" => Some(format!("floor({})", fa()?)),
             "v_exp_f32" => Some(format!("exp2({})", fa()?)),
-            "v_log_f32" => Some(format!("log2({})", fa()?)),
+            "v_log_f32" => Some(format!("tb_log({})", fa()?)),
             "v_rcp_f32" | "v_rcp_iflag_f32" => Some(format!("1.0 / {}", fa()?)),
-            "v_rsq_f32" => Some(format!("rsqrt({})", fa()?)),
-            "v_sqrt_f32" => Some(format!("sqrt({})", fa()?)),
+            "v_rsq_f32" => Some(format!("tb_rsq({})", fa()?)),
+            "v_sqrt_f32" => Some(format!("tb_sqrt({})", fa()?)),
             "v_sin_f32" => Some(format!("sin({} * 6.28318530718)", fa()?)),
             "v_cubema_f32" => Some(format!("tb_cubema({}, {}, {})", fa()?, fb()?, fc()?)),
             "v_cubesc_f32" => Some(format!("tb_cubesc({}, {}, {})", fa()?, fb()?, fc()?)),

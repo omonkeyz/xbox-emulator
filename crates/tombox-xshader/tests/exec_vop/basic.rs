@@ -7,6 +7,11 @@ fn qnan(x: f32) -> u32 {
     if x.is_nan() { 0x7fc0_0000 } else { x.to_bits() }
 }
 
+/// Result of an op on non-NaN inputs: a NaN here is ISA-generated (see `GEN_NAN`).
+fn gq(x: f32) -> u32 {
+    if x.is_nan() { GEN_NAN } else { x.to_bits() }
+}
+
 fn v2(c: &mut Cases, m: &'static str, op: u32, a: u32, b: u32, exp: u32) {
     vc(c, m, &[(1, a), (2, b)], &[vop2(op, 10, v(1), 2)], &[10], &[exp]);
 }
@@ -33,8 +38,8 @@ fn vop2_basic() {
     for &a in &F {
         for &b in &F {
             let (x, y) = (fb(a), fb(b));
-            v2(&mut c, "v_sub_f32", 0x04, x, y, qnan(a - b));
-            v2(&mut c, "v_subrev_f32", 0x05, x, y, qnan(b - a));
+            v2(&mut c, "v_sub_f32", 0x04, x, y, gq(a - b));
+            v2(&mut c, "v_subrev_f32", 0x05, x, y, gq(b - a));
             v2(&mut c, "v_mul_legacy_f32", 0x07, x, y, qnan(legacy_mul(a, b)));
             if a != b || a != 0.0 {
                 v2(&mut c, "v_min_f32", 0x0f, x, y, qnan(fmin(a, b)));
@@ -136,9 +141,10 @@ fn vop1_basic() {
         v1c(&mut c, "v_ceil_f32", 0x22, fb(a), qnan(a.ceil()));
         v1c(&mut c, "v_rndne_f32", 0x23, fb(a), qnan(rne(a)));
         v1c(&mut c, "v_floor_f32", 0x24, fb(a), qnan(a.floor()));
-        let fr = if a.is_infinite() { f32::NAN } else { (a - a.floor()).min(f32::from_bits(0x3f7f_ffff)) };
-        let fr = if a == 0.0 { a } else { fr };
-        v1c(&mut c, "v_fract_f32", 0x20, fb(a), qnan(fr));
+        // ISA: D = S0 + -floor(S0) clamped to 0x3f7fffff; -0 + 0 = +0 (DX frc table); INF gives
+        // INF - INF, a generated NaN; NaN inputs are returned quieted.
+        let fr = if a.is_nan() { 0x7fc0_0000 } else if a.is_infinite() { GEN_NAN } else { (a - a.floor()).min(f32::from_bits(0x3f7f_ffff)).to_bits() };
+        v1c(&mut c, "v_fract_f32", 0x20, fb(a), fr);
     }
     v1c(&mut c, "v_fract_f32", 0x20, fb(-1.0e-10), 0x3f7f_ffff);
     for &h in &[0x3c00u32, 0xc100, 0x0001, 0x8200, 0x7bff, 0x7c00, 0xfc00, 0x3555, 0x0000, 0x8000] {
@@ -150,7 +156,8 @@ fn vop1_basic() {
     for &(x, r) in &[(1.0f32, 0.0f32), (8.0, 3.0), (0.25, -2.0), (1024.0, 10.0), (0.0, f32::NEG_INFINITY), (f32::INFINITY, f32::INFINITY), (-0.0, f32::NEG_INFINITY)] {
         v1c(&mut c, "v_log_f32", 0x27, fb(x), fb(r));
     }
-    v1c(&mut c, "v_log_f32", 0x27, fb(-1.0), 0x7fc0_0000);
+    // Negative inputs generate a NaN (RDNA2 ISA V_LOG/V_RSQ/V_SQRT functional examples).
+    v1c(&mut c, "v_log_f32", 0x27, fb(-1.0), GEN_NAN);
     for &(x, r) in &[(1.0f32, 1.0f32), (2.0, 0.5), (-4.0, -0.25), (0.0, f32::INFINITY), (-0.0, f32::NEG_INFINITY), (f32::INFINITY, 0.0), (0.125, 8.0)] {
         v1c(&mut c, "v_rcp_f32", 0x2a, fb(x), fb(r));
         v1c(&mut c, "v_rcp_iflag_f32", 0x2b, fb(x), fb(r));
@@ -158,11 +165,11 @@ fn vop1_basic() {
     for &(x, r) in &[(1.0f32, 1.0f32), (4.0, 0.5), (0.25, 2.0), (0.0, f32::INFINITY), (f32::INFINITY, 0.0), (16.0, 0.25)] {
         v1c(&mut c, "v_rsq_f32", 0x2e, fb(x), fb(r));
     }
-    v1c(&mut c, "v_rsq_f32", 0x2e, fb(-1.0), 0x7fc0_0000);
+    v1c(&mut c, "v_rsq_f32", 0x2e, fb(-1.0), GEN_NAN);
     for &(x, r) in &[(4.0f32, 2.0f32), (0.0, 0.0), (-0.0, -0.0), (2.25, 1.5), (f32::INFINITY, f32::INFINITY), (1.0e10, 1.0e5), (0.0625, 0.25)] {
         v1c(&mut c, "v_sqrt_f32", 0x33, fb(x), fb(r));
     }
-    v1c(&mut c, "v_sqrt_f32", 0x33, fb(-4.0), 0x7fc0_0000);
+    v1c(&mut c, "v_sqrt_f32", 0x33, fb(-4.0), GEN_NAN);
     for &(x, s, co) in &[(0.0f32, 0.0f32, 1.0f32), (0.25, 1.0, 0.0), (-0.25, -1.0, 0.0), (0.5, 0.0, -1.0), (1.0, 0.0, 1.0)] {
         if s == 0.0 && x != 0.0 {
             v1c(&mut c, "v_cos_f32", 0x36, fb(x), fb(co));
@@ -180,7 +187,7 @@ fn vop1_basic() {
         v16(&mut c, "v_floor_f16", 0x5b, 0x4321_0000 | f2h(x), f2h(x.floor()));
         v16(&mut c, "v_ceil_f16", 0x5c, 0x4321_0000 | f2h(x), f2h(x.ceil()));
     }
-    v16(&mut c, "v_ceil_f16", 0x5c, 0xbc00 - 0x3c00 + 0x8001, 0x8000);
+    v16(&mut c, "v_ceil_f16", 0x5c, 0x4321_8001, 0x8000);
     for &(a, b) in &[(0x1111_1111u32, 0x2222_2222u32), (0, 0xffff_ffff)] {
         let mut pre = pr();
         pre.vv(1, a).vv(10, b);
@@ -314,7 +321,7 @@ fn vop3_basic() {
         for (j, &b) in fv.iter().enumerate() {
             let cc = fv[(i * 3 + j * 5 + 1) % fv.len()];
             let (x, y, z) = (fb(a), fb(b), fb(cc));
-            v3c(&mut c, "v_mad_legacy_f32", 0x140, x, y, z, qnan(ftz(ftz(legacy_mul(a, b)) + cc)));
+            v3c(&mut c, "v_mad_legacy_f32", 0x140, x, y, z, gq(ftz(ftz(legacy_mul(a, b)) + cc)));
             v3c(&mut c, "v_min3_f32", 0x151, x, y, z, qnan(fmin(fmin(a, b), cc)));
             v3c(&mut c, "v_max3_f32", 0x154, x, y, z, qnan(fmax(fmax(a, b), cc)));
             if !(a == 0.0 && b == 0.0) {
@@ -357,7 +364,7 @@ fn vop3_basic() {
             let ml = vop3p(0x21, 10, [v(1), v(2), v(3)], 0, 7, 0, 0);
             vc(&mut c, "v_fma_mixlo_f16", &[(1, p), (2, q), (3, r)], &ml, &[10], &[D16 | lo]);
             let mh = vop3p(0x22, 10, [v(1), v(2), v(3)], 0, 7, 0, 0);
-            vc(&mut c, "v_fma_mixhi_f16", &[(1, p), (2, q), (3, r)], &mh, &[10], &[(D16 >> 16) | (lo << 16)]);
+            vc(&mut c, "v_fma_mixhi_f16", &[(1, p), (2, q), (3, r)], &mh, &[10], &[(D16 & 0xffff) | (lo << 16)]);
         }
     }
     let m32 = vop3p(0x20, 10, [v(1), v(2), v(3)], 0, 0, 0, 0);

@@ -69,7 +69,7 @@ impl Cases {
             let mut p = Prog::new();
             p.raw(&opaque(&c.pre)).raw(&c.op).raw(&c.post);
             match run_pos(&p.words()) {
-                Ok(r) if r[..c.exp.len()] == c.exp[..] => {}
+                Ok(r) if exp_match(&r, &c.exp) => {}
                 Ok(r) => {
                     let h = if std::env::var_os("TOMBOX_EXEC_HLSL").is_some() { translate(&shader(&p.words())).map(|t| t.hlsl).unwrap_or_default() } else { String::new() };
                     fails.push(format!("#{i} {}: got {:08x?} want {:08x?}{h}", c.m, &r[..c.exp.len()], c.exp));
