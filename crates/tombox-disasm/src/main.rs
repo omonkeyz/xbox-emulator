@@ -6,10 +6,63 @@
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, Instruction, IntelFormatter, OpKind};
 use std::collections::VecDeque;
 
+#[derive(Debug)]
 struct Sym {
     rva: u32,
     size: u32,
     name: String,
+}
+
+fn read_u32(b: &[u8], o: usize) -> Option<u32> {
+    let end = o.checked_add(4)?;
+    let s = b.get(o..end)?;
+    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn parse_syms(b: &[u8]) -> Vec<Sym> {
+    let Some(count) = read_u32(b, 0x2c).map(|v| v as usize) else {
+        return Vec::new();
+    };
+    let rec_base = 0x30usize;
+    let Some(rec_end) = count.checked_mul(12).and_then(|n| rec_base.checked_add(n)) else {
+        return Vec::new();
+    };
+    if rec_end > b.len() {
+        return Vec::new();
+    }
+    let mut syms: Vec<Sym> = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = rec_base + i * 12;
+        let (Some(rva), Some(size)) = (read_u32(b, o), read_u32(b, o + 4)) else {
+            return syms;
+        };
+        syms.push(Sym { rva, size, name: String::new() });
+    }
+    // strings: skip repeated count u32, then count length-prefixed strings
+    let mut so = rec_end;
+    if read_u32(b, so).is_none() {
+        return syms;
+    }
+    so += 4;
+    for s in syms.iter_mut() {
+        let Some(len) = read_u32(b, so).map(|v| v as usize) else {
+            break;
+        };
+        so += 4;
+        if len == 0 {
+            break;
+        }
+        let Some(end) = so.checked_add(len) else {
+            break;
+        };
+        if end > b.len() {
+            break;
+        }
+        s.name = String::from_utf8_lossy(&b[so..end - 1]).into_owned();
+        so = end;
+    }
+    syms.sort_by_key(|s| s.rva);
+    syms
 }
 
 fn load_syms(path: &str) -> Vec<Sym> {
@@ -20,31 +73,7 @@ fn load_syms(path: &str) -> Vec<Sym> {
             return Vec::new();
         }
     };
-    let u32at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    let count = u32at(0x2c) as usize;
-    let rec_base = 0x30usize;
-    let str_base = rec_base + count * 12;
-    let mut syms: Vec<Sym> = Vec::with_capacity(count);
-    for i in 0..count {
-        let o = rec_base + i * 12;
-        syms.push(Sym { rva: u32at(o), size: u32at(o + 4), name: String::new() });
-    }
-    // strings: skip repeated count u32, then count length-prefixed strings
-    let mut so = str_base + 4;
-    for s in syms.iter_mut() {
-        if so + 4 > b.len() {
-            break;
-        }
-        let len = u32::from_le_bytes([b[so], b[so + 1], b[so + 2], b[so + 3]]) as usize;
-        so += 4;
-        if len == 0 || so + len > b.len() {
-            break;
-        }
-        s.name = String::from_utf8_lossy(&b[so..so + len - 1]).into_owned();
-        so += len;
-    }
-    syms.sort_by_key(|s| s.rva);
-    syms
+    parse_syms(&b)
 }
 
 fn resolve<'a>(syms: &'a [Sym], rva: u32) -> Option<(String, u32)> {
@@ -144,6 +173,75 @@ fn main() {
             if instr.flow_control() == FlowControl::Return {
                 // keep going a little past the first ret to catch tails
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sym_file(records: &[(u32, u32)], names: &[&str]) -> Vec<u8> {
+        assert_eq!(records.len(), names.len());
+        let count = records.len() as u32;
+        let mut b = vec![0u8; 0x30];
+        b[0x2c..0x30].copy_from_slice(&count.to_le_bytes());
+        for (rva, size) in records {
+            b.extend_from_slice(&rva.to_le_bytes());
+            b.extend_from_slice(&size.to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+        }
+        b.extend_from_slice(&count.to_le_bytes());
+        for name in names {
+            let mut s = name.as_bytes().to_vec();
+            s.push(0);
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(&s);
+        }
+        b
+    }
+
+    #[test]
+    fn parses_and_sorts_symbols() {
+        let b = sym_file(&[(0x2000, 0x20), (0x1000, 0x10)], &["second", "first"]);
+        let v = parse_syms(&b);
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].rva, v[0].size, v[0].name.as_str()), (0x1000, 0x10, "first"));
+        assert_eq!((v[1].rva, v[1].size, v[1].name.as_str()), (0x2000, 0x20, "second"));
+    }
+
+    #[test]
+    fn short_header_is_empty() {
+        assert!(parse_syms(&[1, 2, 3, 4]).is_empty());
+        assert!(parse_syms(&[0u8; 0x2c]).is_empty());
+    }
+
+    #[test]
+    fn records_past_eof_are_empty() {
+        let mut b = vec![0u8; 0x30];
+        b[0x2c..0x30].copy_from_slice(&2u32.to_le_bytes());
+        assert!(parse_syms(&b).is_empty());
+    }
+
+    #[test]
+    fn huge_count_is_empty() {
+        let mut b = vec![0u8; 0x30];
+        b[0x2c..0x30].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_syms(&b).is_empty());
+    }
+
+    #[test]
+    fn bad_string_lengths_keep_records_without_names() {
+        // rec_end = 0x30 + 12 = 0x3c; repeated count at 0x3c; first
+        // length-prefixed string at 0x40.
+        let str_len = 0x30 + 12 + 4;
+        for bad in [0u32, u32::MAX] {
+            let mut b = sym_file(&[(0x1000, 0x10)], &["name"]);
+            b[str_len..str_len + 4].copy_from_slice(&bad.to_le_bytes());
+            let v = parse_syms(&b);
+            assert_eq!(v.len(), 1, "bad length {bad:#x}");
+            assert_eq!(v[0].rva, 0x1000);
+            assert_eq!(v[0].name, "");
         }
     }
 }
