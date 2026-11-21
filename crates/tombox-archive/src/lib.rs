@@ -120,8 +120,8 @@ pub fn read_inventory<P: AsRef<Path>>(path: P) -> Result<ZipInventory> {
     let tail_len = std::cmp::min(file_len, 65_557) as usize;
     let tail_start = file_len - tail_len as u64;
     let tail = read_at(&mut file, tail_start, tail_len)?;
-    let eocd_rel = find_sig_backwards(&tail, SIG_EOCD)
-        .ok_or_else(|| ArchiveError::NotZip("EOCD signature not found in tail".into()))?;
+    let eocd_rel = find_eocd(&tail)
+        .ok_or_else(|| ArchiveError::NotZip("no EOCD record ending at EOF in tail".into()))?;
     let eocd = &tail[eocd_rel..];
 
     let mut entry_count = u16le(eocd, 10)? as u64;
@@ -145,6 +145,14 @@ pub fn read_inventory<P: AsRef<Path>>(path: P) -> Result<ZipInventory> {
         }
         let z64_eocd_offset = u64le(loc, 8)?;
         // Read the ZIP64 EOCD record (fixed part is 56 bytes).
+        z64_eocd_offset
+            .checked_add(56)
+            .filter(|&end| end <= file_len)
+            .ok_or_else(|| {
+                ArchiveError::Malformed(format!(
+                    "ZIP64 EOCD record at {z64_eocd_offset} extends past EOF ({file_len})"
+                ))
+            })?;
         let z = read_at(&mut file, z64_eocd_offset, 56)?;
         if u32le(&z, 0)? != SIG_EOCD64 {
             return Err(ArchiveError::Malformed("ZIP64 EOCD record signature wrong".into()));
@@ -159,10 +167,14 @@ pub fn read_inventory<P: AsRef<Path>>(path: P) -> Result<ZipInventory> {
             "central directory is {cd_size} bytes (> {MAX_CD_BYTES} cap)"
         )));
     }
-    if cd_offset + cd_size > file_len {
+    let cd_end = cd_offset.checked_add(cd_size).ok_or_else(|| {
+        ArchiveError::Malformed(format!(
+            "central directory bounds overflow (offset {cd_offset}, size {cd_size})"
+        ))
+    })?;
+    if cd_end > file_len {
         return Err(ArchiveError::Malformed(format!(
-            "central directory [{cd_offset}, {}) extends past EOF ({file_len})",
-            cd_offset + cd_size
+            "central directory [{cd_offset}, {cd_end}) extends past EOF ({file_len})"
         )));
     }
 
@@ -179,16 +191,19 @@ pub fn read_inventory<P: AsRef<Path>>(path: P) -> Result<ZipInventory> {
     })
 }
 
-fn find_sig_backwards(buf: &[u8], sig: u32) -> Option<usize> {
-    if buf.len() < 4 {
-        return None;
-    }
-    let s = sig.to_le_bytes();
-    // scan from the latest possible position backwards
-    let mut i = buf.len() - 4;
+/// Find the EOCD record whose comment ends exactly at EOF. A ZIP comment may
+/// contain arbitrary bytes, including another EOCD signature, so a signature
+/// match alone is not enough: the record's comment length must place the end
+/// of the comment at the end of the file.
+fn find_eocd(buf: &[u8]) -> Option<usize> {
+    let s = SIG_EOCD.to_le_bytes();
+    let mut i = buf.len().checked_sub(22)?;
     loop {
         if buf[i..i + 4] == s {
-            return Some(i);
+            let comment = u16::from_le_bytes([buf[i + 20], buf[i + 21]]) as usize;
+            if i + 22 + comment == buf.len() {
+                return Some(i);
+            }
         }
         if i == 0 {
             return None;

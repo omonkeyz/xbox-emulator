@@ -49,15 +49,28 @@ fn eocd(entry_count: u16, cd_size: u32, cd_offset: u32) -> Vec<u8> {
     e
 }
 
+fn eocd_with_comment(entry_count: u16, cd_size: u32, cd_offset: u32, comment: &[u8]) -> Vec<u8> {
+    assert!(comment.len() <= u16::MAX as usize);
+    let mut e = eocd(entry_count, cd_size, cd_offset);
+    let n = e.len();
+    e[n - 2..].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+    e.extend_from_slice(comment);
+    e
+}
+
 /// Assemble an archive = [central directory][EOCD], cd at offset 0.
 fn assemble(headers: &[Vec<u8>]) -> Vec<u8> {
+    assemble_with_comment(headers, b"")
+}
+
+fn assemble_with_comment(headers: &[Vec<u8>], comment: &[u8]) -> Vec<u8> {
     let mut cd = Vec::new();
     for h in headers {
         cd.extend_from_slice(h);
     }
     let cd_size = cd.len() as u32;
     let mut buf = cd;
-    buf.extend_from_slice(&eocd(headers.len() as u16, cd_size, 0));
+    buf.extend_from_slice(&eocd_with_comment(headers.len() as u16, cd_size, 0, comment));
     buf
 }
 
@@ -171,6 +184,85 @@ fn resolves_zip64_extra_sizes() {
     let inv = inspect(&assemble(&[h]), "zip64");
     assert_eq!(inv.entries[0].uncomp_size, big_unc);
     assert_eq!(inv.entries[0].comp_size, big_cmp);
+}
+
+#[test]
+fn ignores_fake_eocd_inside_comment() {
+    // A ZIP comment may contain EOCD signature bytes. The fake record ends
+    // before EOF, so it must not hide the real EOCD or its entries.
+    let h = cd_header("../evil.txt", 1, 1, 0, 0, &[]);
+    let fake = eocd(0, 0, 0);
+    let mut comment = b"note: ".to_vec();
+    comment.extend_from_slice(&fake);
+    comment.extend_from_slice(b" -- end");
+    let inv = inspect(&assemble_with_comment(&[h], &comment), "fake-eocd");
+    assert_eq!(inv.entry_count, 1);
+    assert_eq!(inv.entries.len(), 1);
+    assert_eq!(inv.entries[0].name, "../evil.txt");
+    let r = validate(&inv, 1000.0);
+    assert!(!r.is_safe_to_extract());
+    assert!(r.findings.iter().any(|f| f.issue.contains("traversal")));
+}
+
+#[test]
+fn accepts_eocd_with_comment() {
+    let inv = inspect(
+        &assemble_with_comment(&[cd_header("ok.txt", 1, 1, 0, 0, &[])], b"release notes"),
+        "comment",
+    );
+    assert_eq!(inv.entry_count, 1);
+    assert_eq!(inv.entries.len(), 1);
+    assert_eq!(inv.entries[0].name, "ok.txt");
+}
+
+/// Build a ZIP64 EOCD record, its locator, and the sentinel EOCD.
+fn zip64_eocd(cd_offset: u64, cd_size: u64) -> Vec<u8> {
+    let mut z = Vec::new();
+    z.extend_from_slice(&SIG_EOCD64.to_le_bytes());
+    z.extend_from_slice(&44u64.to_le_bytes()); // size of the remaining record
+    z.extend_from_slice(&45u16.to_le_bytes()); // version made by
+    z.extend_from_slice(&45u16.to_le_bytes()); // version needed
+    z.extend_from_slice(&0u32.to_le_bytes()); // this disk
+    z.extend_from_slice(&0u32.to_le_bytes()); // disk with CD
+    z.extend_from_slice(&0u64.to_le_bytes()); // entries this disk
+    z.extend_from_slice(&0u64.to_le_bytes()); // total entries
+    z.extend_from_slice(&cd_size.to_le_bytes());
+    z.extend_from_slice(&cd_offset.to_le_bytes());
+    z.extend_from_slice(&SIG_EOCD64_LOCATOR.to_le_bytes());
+    z.extend_from_slice(&0u32.to_le_bytes()); // disk with ZIP64 EOCD
+    z.extend_from_slice(&0u64.to_le_bytes()); // offset of ZIP64 EOCD (0)
+    z.extend_from_slice(&1u32.to_le_bytes()); // total disks
+    z.extend_from_slice(&eocd(0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF));
+    z
+}
+
+#[test]
+fn rejects_zip64_cd_bounds_overflow() {
+    let bytes = zip64_eocd(0xFFFF_FFFF_FFFF_FFF8, 16);
+    let p = temp_zip(&bytes, "zip64-overflow");
+    let res = read_inventory(&p);
+    let _ = std::fs::remove_file(&p);
+    match res {
+        Err(ArchiveError::Malformed(msg)) => assert!(msg.contains("bounds overflow"), "{msg}"),
+        Err(e) => panic!("expected malformed, got {e}"),
+        Ok(_) => panic!("expected an error, got a valid inventory"),
+    }
+}
+
+#[test]
+fn rejects_zip64_eocd_past_eof() {
+    let mut bytes = zip64_eocd(0, 0);
+    // Locator: 56-byte ZIP64 record, then signature (4) + disk (4); the
+    // ZIP64 EOCD offset is the next eight bytes.
+    bytes[64..72].copy_from_slice(&u64::MAX.to_le_bytes());
+    let p = temp_zip(&bytes, "zip64-past-eof");
+    let res = read_inventory(&p);
+    let _ = std::fs::remove_file(&p);
+    match res {
+        Err(ArchiveError::Malformed(msg)) => assert!(msg.contains("extends past EOF"), "{msg}"),
+        Err(e) => panic!("expected malformed, got {e}"),
+        Ok(_) => panic!("expected an error, got a valid inventory"),
+    }
 }
 
 #[test]
