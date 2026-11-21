@@ -188,3 +188,82 @@ fn sample_pe() -> Option<Vec<u8>> {
     }
     None
 }
+
+/// A complete PE32+ header with one section and no data directories. The raw
+/// section range may deliberately exceed the file to exercise best-effort parsing.
+fn synthetic_pe(raw_offset: u32, raw_size: u32, virtual_size: u32, headers_size: u32) -> Vec<u8> {
+    fn u16_at(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    fn u32_at(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let mut bytes = vec![0; 0x200];
+    u16_at(&mut bytes, 0, 0x5a4d);
+    u32_at(&mut bytes, 0x3c, 0x80);
+    u32_at(&mut bytes, 0x80, 0x4550);
+    u16_at(&mut bytes, 0x84, constants::IMAGE_FILE_MACHINE_AMD64);
+    u16_at(&mut bytes, 0x86, 1);
+    u16_at(&mut bytes, 0x94, 0xf0);
+    u16_at(&mut bytes, 0x98, 0x20b);
+    u32_at(&mut bytes, 0x98 + 32, 0x1000);
+    u32_at(&mut bytes, 0x98 + 36, 0x200);
+    u32_at(&mut bytes, 0x98 + 56, 0x2000);
+    u32_at(&mut bytes, 0x98 + 60, headers_size);
+    let section = 0x188;
+    bytes[section..section + 5].copy_from_slice(b".test");
+    u32_at(&mut bytes, section + 8, virtual_size);
+    u32_at(&mut bytes, section + 12, 0x1000);
+    u32_at(&mut bytes, section + 16, raw_size);
+    u32_at(&mut bytes, section + 20, raw_offset);
+    bytes
+}
+
+#[test]
+fn rva_mapping_rejects_section_offsets_outside_the_file() {
+    for raw_offset in [0x200, 0xffff_ff00, u32::MAX] {
+        let bytes = synthetic_pe(raw_offset, 0x200, 0x200, 0x200);
+        let pe = PeFile::parse(&bytes).expect("malformed raw ranges remain inspectable");
+        for rva in [0x1000, 0x1001, 0x10ff] {
+            assert_eq!(
+                pe.rva_to_offset(rva),
+                Err(ParseError::UnmappableRva { rva }),
+                "raw offset {raw_offset:#x}, RVA {rva:#x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rva_mapping_keeps_backed_bytes_of_a_truncated_section() {
+    let bytes = synthetic_pe(0x1f0, 0x100, 0x200, 0x200);
+    let pe = PeFile::parse(&bytes).unwrap();
+    assert_eq!(pe.rva_to_offset(0x1000), Ok(0x1f0));
+    assert_eq!(pe.rva_to_offset(0x100f), Ok(bytes.len() - 1));
+    assert_eq!(
+        pe.rva_to_offset(0x1010),
+        Err(ParseError::UnmappableRva { rva: 0x1010 })
+    );
+}
+
+#[test]
+fn rva_mapping_rejects_headers_at_and_past_eof() {
+    let bytes = synthetic_pe(0x1f0, 0x10, 0x10, 0x10000);
+    let pe = PeFile::parse(&bytes).unwrap();
+    assert_eq!(pe.rva_to_offset(0), Ok(0));
+    assert_eq!(pe.rva_to_offset(0x1ff), Ok(0x1ff));
+    for rva in [0x200, 0x300] {
+        assert_eq!(pe.rva_to_offset(rva), Err(ParseError::UnmappableRva { rva }));
+    }
+}
+
+#[test]
+fn rva_mapping_rejects_virtual_only_section_bytes() {
+    let bytes = synthetic_pe(0x1f0, 0x10, 0x200, 0x200);
+    let pe = PeFile::parse(&bytes).unwrap();
+    assert_eq!(pe.rva_to_offset(0x100f), Ok(0x1ff));
+    for rva in [0x1010, 0x11ff, 0x1200] {
+        assert_eq!(pe.rva_to_offset(rva), Err(ParseError::UnmappableRva { rva }));
+    }
+}

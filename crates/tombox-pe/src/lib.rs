@@ -156,11 +156,16 @@ impl<'a> PeFile<'a> {
                     // Falls in uninitialised (BSS-like) space: no file bytes.
                     return Err(ParseError::UnmappableRva { rva });
                 }
-                return Ok(s.pointer_to_raw_data as usize + delta as usize);
+                return (s.pointer_to_raw_data as usize)
+                    .checked_add(delta as usize)
+                    .filter(|&offset| offset < self.data.len())
+                    .ok_or(ParseError::UnmappableRva { rva });
             }
         }
         // Header region fallback.
-        if (rva as usize) < self.opt.size_of_headers as usize {
+        if (rva as usize) < self.opt.size_of_headers as usize
+            && (rva as usize) < self.data.len()
+        {
             return Ok(rva as usize);
         }
         Err(ParseError::UnmappableRva { rva })
