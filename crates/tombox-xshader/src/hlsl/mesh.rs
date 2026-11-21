@@ -236,7 +236,9 @@ impl<'a> Emitter<'a> {
             let _ = writeln!(h, "    if (gi == 0u) tb_mscnt = 0u;");
             let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
         }
-        let _ = writeln!(h, "    v5 = gid.x * {n}u + gi; s3 = (gi / {w}u) << 24;");
+        let tg = n.div_ceil(w);
+        let _ = writeln!(h, "    v5 = gid.x * {n}u + gi;");
+        let _ = writeln!(h, "    s3 = {:#x}u | ((gi / {w}u) << 24) | (min({w}u, {n}u - (gi & {:#x}u)) * 0x101u);", tg << 28, !(w - 1));
         if pl.is_some() {
             h.push_str(&self.amp_ms_prologue(m.payload_bytes));
         }
@@ -244,7 +246,7 @@ impl<'a> Emitter<'a> {
         if !local_counts {
             let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
         }
-        let _ = writeln!(h, "    uint tb_nv = tb_mscnt & 0xfffu, tb_np = (tb_mscnt >> 12) & 0xfffu;");
+        let _ = writeln!(h, "    uint tb_nv = tb_mscnt & 0x3ffu, tb_np = (tb_mscnt >> 12) & 0x7ffu;");
         let _ = writeln!(h, "    SetMeshOutputCounts(tb_nv, tb_np);");
         let _ = writeln!(h, "    if (gi < tb_nv) verts[gi] = o;");
         let idx: Vec<&str> = ["tb_prim & 0x1ffu", "(tb_prim >> 10) & 0x1ffu", "(tb_prim >> 20) & 0x1ffu"][..nidx].to_vec();
