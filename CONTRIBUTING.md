@@ -22,6 +22,13 @@ Contributions are welcome. The most useful thing you can add right now is covera
 5. Update the row in `exports.txt` to `implemented` (or `forwarded` when it maps 1:1 to a PC function), with a short note citing where the behaviour came from.
 6. Run `cargo test -p <crate>`, then open a pull request.
 
+   The `gcxaudioext` heap test loads `xmem.dll`. Its two ACP state tests load both `xmem.dll` and `acphal.dll`. Build the two workspace DLLs in the same Cargo target directory and profile as the tests.
+
+   ```powershell
+   cargo build --locked -p xmem -p acphal
+   cargo test --locked -p gcxaudioext
+   ```
+
 ## Rules
 
 - **Never commit game or console files.** No dumps, no console DLLs, no extracted assets, shaders or data, and no binaries of any kind (`.exe`, `.dll`, `.pdb`, ...). Pull requests containing them will be closed.
