@@ -2,8 +2,8 @@
 2 ElfFlushEventLog implemented | PE forwarder to advapi32legacy.ElfFlushEventLog; console forwards to api-ms-win-eventlog-private-l1-1-0, which only advapi32legacy exports on console
 3 ElfRegisterEventSourceW implemented | PE forwarder to advapi32legacy.ElfRegisterEventSourceW; console forwards to api-ms-win-eventlog-private-l1-1-0, which only advapi32legacy exports on console
 4 ElfReportEventW implemented | PE forwarder to advapi32legacy.ElfReportEventW; console forwards to api-ms-win-eventlog-private-l1-1-0, which only advapi32legacy exports on console
-5 LsaDisablePasswordLessCurrentUser missing | console forwards to ext-ms-win-advapi32-lsa-l1-1-3 (advapi32legacy); no PC DLL exports it and calling the PC LSA opnum would change the signed-in user's sign-in options, so it is not reproduced
-6 LsaEnablePasswordLessCurrentUser missing | console forwards to ext-ms-win-advapi32-lsa-l1-1-3 (advapi32legacy); no PC DLL exports it and calling the PC LSA opnum would change the signed-in user's sign-in options, so it is not reproduced
+5 LsaDisablePasswordLessCurrentUser implemented | PE forwarder to advapi32legacy.LsaDisablePasswordLessCurrentUser; console forwards to ext-ms-win-advapi32-lsa-l1-1-3, which resolves to advapi32legacy, where the in-process policy state is ported
+6 LsaEnablePasswordLessCurrentUser implemented | PE forwarder to advapi32legacy.LsaEnablePasswordLessCurrentUser; console forwards to ext-ms-win-advapi32-lsa-l1-1-3, which resolves to advapi32legacy, where the in-process policy state is ported
 7 OpenTraceFromBufferStream forwarded | PE forwarder to sechost.OpenTraceFromBufferStream; console forwards to api-ms-win-eventing-consumer-l1-1-2, which resolves to sechost on console and PC
 8 OpenTraceFromFile forwarded | PE forwarder to sechost.OpenTraceFromFile; console forwards to api-ms-win-eventing-consumer-l1-1-2, which resolves to sechost on console and PC
 9 OpenTraceFromRealTimeLogger forwarded | PE forwarder to sechost.OpenTraceFromRealTimeLogger; console forwards to api-ms-win-eventing-consumer-l1-1-2, which resolves to sechost on console and PC

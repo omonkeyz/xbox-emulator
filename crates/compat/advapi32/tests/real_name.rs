@@ -43,6 +43,10 @@ fn elf_calls_work_when_the_compat_dll_is_loaded_as_advapi32() {
         assert!(!ev.is_null());
         assert_eq!(report(core::ptr::null_mut(), 4, 0, 1, core::ptr::null_mut(), 0, 0, core::ptr::null(), core::ptr::null(), 0, core::ptr::null_mut(), core::ptr::null_mut()), 0xC000_0008u32 as i32);
         assert_eq!(dereg(ev), 0);
+        let enable: unsafe extern "system" fn() -> i32 = core::mem::transmute(proc(h, "LsaEnablePasswordLessCurrentUser"));
+        let disable: unsafe extern "system" fn() -> i32 = core::mem::transmute(proc(h, "LsaDisablePasswordLessCurrentUser"));
+        assert_eq!(enable(), 0);
+        assert_eq!(disable(), 0);
         let staged = proc(system("advapi32_sys.dll"), "RegisterEventSourceW");
         assert!(!staged.is_null());
     }

@@ -46,9 +46,9 @@
  },
  "extra": {
   "console_exports": {
-   "done": 2076,
+   "done": 2080,
    "total": 2141,
-   "pct": 96.96
+   "pct": 97.15
   },
   "shader_compile_lobby_frame": {
    "done": 139,
@@ -91,9 +91,9 @@
    "pct": 100.0
   },
   "console_exports_targeted": {
-   "done": 2076,
+   "done": 2080,
    "total": 2134,
-   "pct": 97.28
+   "pct": 97.47
   },
   "console_exports_not_targeted": {
    "done": null,
@@ -105,14 +105,14 @@
  "all_including_pc": {
   "note": "previous definition, kept for history: every export of every console OS DLL and every title import, PC-provided ones included",
   "console_exports": {
-   "done": 21970,
+   "done": 21974,
    "total": 23729,
-   "pct": 92.59
+   "pct": 92.6
   },
   "xbox_only_exports": {
-   "done": 2012,
+   "done": 2014,
    "total": 2064,
-   "pct": 97.48
+   "pct": 97.58
   },
   "title_import_status": {
    "Fortnite": {

@@ -27,6 +27,7 @@ extern "system" {
 }
 
 pub mod pc;
+pub mod policy;
 
 #[link(name = "ntdll")]
 extern "system" {
@@ -139,6 +140,23 @@ pub unsafe extern "system" fn ElfFlushEventLog(_h: Handle) -> NtStatus {
     STATUS_ACCESS_DENIED
 }
 
+/// Console `LsaEnablePasswordLessCurrentUser`: `lsarpc` `NdrClientCall3`
+/// opnum 0x7e with no arguments. The PC user's real sign-in options must not
+/// change, so this applies the console operation to process-local state.
+#[no_mangle]
+pub unsafe extern "system" fn LsaEnablePasswordLessCurrentUser() -> NtStatus {
+    policy::set(true);
+    STATUS_SUCCESS
+}
+
+/// Console `LsaDisablePasswordLessCurrentUser`: `lsarpc` `NdrClientCall3`
+/// opnum 0x7f with no arguments. See [`LsaEnablePasswordLessCurrentUser`].
+#[no_mangle]
+pub unsafe extern "system" fn LsaDisablePasswordLessCurrentUser() -> NtStatus {
+    policy::set(false);
+    STATUS_SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +244,18 @@ mod tests {
             assert_eq!(ElfReportEventW(h, 4, 0, 1, n, 2, 0, core::ptr::null(), core::ptr::null(), 0, n as _, n as _), STATUS_INVALID_PARAMETER);
             assert_eq!(GetLastError(), 0x55);
             assert_eq!(ElfDeregisterEventSource(h), STATUS_SUCCESS);
+        }
+    }
+
+    #[test]
+    fn passwordless_exports_round_trip_process_state() {
+        unsafe {
+            assert_eq!(LsaDisablePasswordLessCurrentUser(), STATUS_SUCCESS);
+            assert!(!policy::enabled());
+            assert_eq!(LsaEnablePasswordLessCurrentUser(), STATUS_SUCCESS);
+            assert!(policy::enabled());
+            assert_eq!(LsaDisablePasswordLessCurrentUser(), STATUS_SUCCESS);
+            assert!(!policy::enabled());
         }
     }
 

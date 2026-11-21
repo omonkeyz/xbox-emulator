@@ -21,6 +21,18 @@ fn every_export_forwards_to_sechost_or_the_emulator_advapi32legacy() {
 }
 
 #[test]
+fn passwordless_exports_reach_the_advapi32legacy_implementation() {
+    let (h, _) = dlls();
+    unsafe {
+        let disable: unsafe extern "system" fn() -> i32 = core::mem::transmute(proc(h, "LsaDisablePasswordLessCurrentUser"));
+        let enable: unsafe extern "system" fn() -> i32 = core::mem::transmute(proc(h, "LsaEnablePasswordLessCurrentUser"));
+        assert_eq!(disable(), 0);
+        assert_eq!(enable(), 0);
+        assert_eq!(disable(), 0);
+    }
+}
+
+#[test]
 fn elf_exports_reach_the_advapi32legacy_implementation() {
     let (h, _) = dlls();
     unsafe {

@@ -1787,7 +1787,7 @@
 <rect x="875.00" y="880.00" width="125.00" height="60.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="880.00" y="896.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Amplification</text>
 </g>
-<text x="4.00" y="971.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Xbox console libraries: 96.96% (2076/2141)</text>
+<text x="4.00" y="971.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Xbox console libraries: 97.15% (2080/2141)</text>
 <rect x="4" y="982" width="10" height="10" fill="#2ea043"/>
 <text x="18.00" y="991.00" font-family="sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">implemented</text>
 <rect x="109" y="982" width="10" height="10" fill="#388bfd"/>
@@ -1848,10 +1848,10 @@
 <rect x="0.00" y="998.00" width="302.20" height="421.48" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="5.00" y="1014.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">kernel32legacy</text>
 </g>
-<g><title>advapi32legacy.dll: 205/207 covered; Fortnite imports 1, Terraria imports 1, Trackmania imports 1, XDefiant imports 1</title>
-<rect x="1.00" y="1420.48" width="80.05" height="20.42" fill="#2ea043"/>
-<rect x="81.05" y="1420.48" width="20.01" height="20.42" fill="#91bffd"/>
-<rect x="101.07" y="1420.48" width="200.13" height="20.42" fill="#388bfd"/>
+<g><title>advapi32legacy.dll: 207/207 covered; Fortnite imports 1, Terraria imports 1, Trackmania imports 1, XDefiant imports 1</title>
+<rect x="1.00" y="1420.48" width="120.08" height="20.42" fill="#2ea043"/>
+<rect x="121.08" y="1420.48" width="20.01" height="20.42" fill="#91bffd"/>
+<rect x="141.09" y="1420.48" width="160.10" height="20.42" fill="#388bfd"/>
 <rect x="1.00" y="1440.91" width="300.20" height="20.42" fill="#388bfd"/>
 <rect x="1.00" y="1461.33" width="300.20" height="20.42" fill="#388bfd"/>
 <rect x="1.00" y="1481.76" width="300.20" height="20.42" fill="#388bfd"/>
@@ -1864,8 +1864,7 @@
 <rect x="1.00" y="1624.73" width="300.20" height="20.42" fill="#388bfd"/>
 <rect x="1.00" y="1645.15" width="300.20" height="20.42" fill="#388bfd"/>
 <rect x="1.00" y="1665.58" width="300.20" height="20.42" fill="#388bfd"/>
-<rect x="1.00" y="1686.00" width="200.13" height="20.42" fill="#388bfd"/>
-<rect x="201.13" y="1686.00" width="40.03" height="20.42" fill="#6e7681"/>
+<rect x="1.00" y="1686.00" width="240.16" height="20.42" fill="#388bfd"/>
 <line x1="1.00" y1="1440.91" x2="301.20" y2="1440.91" stroke="#0d1117" stroke-width="0.5"/>
 <line x1="1.00" y1="1461.33" x2="301.20" y2="1461.33" stroke="#0d1117" stroke-width="0.5"/>
 <line x1="1.00" y1="1481.76" x2="301.20" y2="1481.76" stroke="#0d1117" stroke-width="0.5"/>
@@ -2460,12 +2459,12 @@
 <rect x="863.77" y="1519.46" width="68.12" height="80.23" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="868.77" y="1535.46" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">wldp</text>
 </g>
-<g><title>advapi32.dll: 11/13 covered; not imported by an analysed title</title>
+<g><title>advapi32.dll: 13/13 covered; not imported by an analysed title</title>
 <rect x="932.88" y="1520.46" width="66.12" height="19.56" fill="#2ea043"/>
-<rect x="932.88" y="1540.02" width="66.12" height="19.56" fill="#388bfd"/>
-<rect x="932.88" y="1559.58" width="49.59" height="19.56" fill="#388bfd"/>
-<rect x="982.47" y="1559.58" width="16.53" height="19.56" fill="#6e7681"/>
-<rect x="932.88" y="1579.13" width="16.53" height="19.56" fill="#6e7681"/>
+<rect x="932.88" y="1540.02" width="33.06" height="19.56" fill="#2ea043"/>
+<rect x="965.94" y="1540.02" width="33.06" height="19.56" fill="#388bfd"/>
+<rect x="932.88" y="1559.58" width="66.12" height="19.56" fill="#388bfd"/>
+<rect x="932.88" y="1579.13" width="16.53" height="19.56" fill="#388bfd"/>
 <line x1="932.88" y1="1540.02" x2="999.00" y2="1540.02" stroke="#0d1117" stroke-width="0.5"/>
 <line x1="932.88" y1="1559.58" x2="999.00" y2="1559.58" stroke="#0d1117" stroke-width="0.5"/>
 <line x1="932.88" y1="1579.13" x2="999.00" y2="1579.13" stroke="#0d1117" stroke-width="0.5"/>
