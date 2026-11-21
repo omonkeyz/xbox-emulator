@@ -41,6 +41,8 @@ extern "system" {
     fn GetModuleHandleW(n: *const u16) -> *mut c_void;
     fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
     fn Sleep(ms: u32);
+    fn GetCurrentProcess() -> *mut c_void;
+    fn TerminateProcess(p: *mut c_void, code: u32) -> i32;
 }
 
 #[link(name = "user32")]
@@ -68,6 +70,8 @@ extern "system" {
     fn SetWindowPos(h: *mut c_void, after: *mut c_void, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetSystemMetrics(i: i32) -> i32;
     fn GetWindowRect(h: *mut c_void, r: *mut [i32; 4]) -> i32;
+    fn SetWindowLongPtrW(h: *mut c_void, idx: i32, v: isize) -> isize;
+    fn CallWindowProcW(prev: isize, h: *mut c_void, msg: u32, w: usize, l: isize) -> isize;
 }
 
 pub(crate) fn start_window_clamp() {
@@ -158,8 +162,41 @@ struct WndClassExW {
     icon_sm: *mut c_void,
 }
 
+const WM_CLOSE: u32 = 0x0010;
+
+unsafe fn end_title_on_close() -> ! {
+    record("d3d12_xs", "window", "close requested: ending the title");
+    TerminateProcess(GetCurrentProcess(), 0);
+    unreachable!("TerminateProcess(self) returned")
+}
+
 unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, w: usize, l: isize) -> isize {
+    if msg == WM_CLOSE {
+        end_title_on_close();
+    }
     DefWindowProcW(h, msg, w, l)
+}
+
+static TITLE_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+unsafe extern "system" fn title_wndproc(h: *mut c_void, msg: u32, w: usize, l: isize) -> isize {
+    if msg == WM_CLOSE {
+        end_title_on_close();
+    }
+    CallWindowProcW(TITLE_WNDPROC.load(std::sync::atomic::Ordering::Relaxed), h, msg, w, l)
+}
+
+unsafe fn close_ends_title(hwnd: usize) {
+    if TITLE_WNDPROC.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        return;
+    }
+    const GWLP_WNDPROC: i32 = -4;
+    let prev = SetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC, title_wndproc as *const () as isize);
+    if prev == 0 {
+        record("d3d12_xs", "window", "could not hook the title window's close button");
+        return;
+    }
+    TITLE_WNDPROC.store(prev, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -300,6 +337,7 @@ unsafe fn init(queue: *mut c_void, src: *mut c_void) -> Result<State, String> {
     let mut hwnd = if own { 0 } else { find_title_window() };
     if hwnd != 0 {
         (cw, ch) = fit_window_to_aspect(hwnd, width, height);
+        close_ends_title(hwnd);
         let mut cls = [0u16; 128];
         let n = GetClassNameW(hwnd as *mut c_void, cls.as_mut_ptr(), 128).max(0) as usize;
         record("d3d12_xs", "PresentX", &format!(
@@ -927,5 +965,89 @@ pub fn apply_queue_vtable(queue: *mut c_void) {
             let mut tmp: u32 = 0;
             VirtualProtect(slot0 as *mut c_void, 8, old, &mut tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendMessageW(h: *mut c_void, msg: u32, w: usize, l: isize) -> isize;
+        fn PostMessageW(h: *mut c_void, msg: u32, w: usize, l: isize) -> i32;
+    }
+
+    const CHILD: &str = "TOMBOX_CLOSE_TEST_CHILD";
+    const WM_APP: u32 = 0x8000;
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "system" fn title_proc(h: *mut c_void, msg: u32, w: usize, l: isize) -> isize {
+        match msg {
+            WM_APP => {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+                0x5a
+            }
+            WM_CLOSE => 0,
+            _ => DefWindowProcW(h, msg, w, l),
+        }
+    }
+
+    unsafe fn child() -> ! {
+        let class = wide("tombox-close-test");
+        let wc = WndClassExW {
+            size: core::mem::size_of::<WndClassExW>() as u32,
+            style: 0,
+            wndproc: title_proc,
+            cls_extra: 0,
+            wnd_extra: 0,
+            instance: GetModuleHandleW(core::ptr::null()),
+            icon: core::ptr::null_mut(),
+            cursor: core::ptr::null_mut(),
+            background: core::ptr::null_mut(),
+            menu_name: core::ptr::null(),
+            class_name: class.as_ptr(),
+            icon_sm: core::ptr::null_mut(),
+        };
+        if RegisterClassExW(&wc) == 0 {
+            std::process::exit(2);
+        }
+        let hwnd = CreateWindowExW(
+            0, class.as_ptr(), class.as_ptr(), 0, 0, 0, 64, 64,
+            core::ptr::null_mut(), core::ptr::null_mut(), wc.instance, core::ptr::null_mut(),
+        );
+        if hwnd.is_null() {
+            std::process::exit(2);
+        }
+        close_ends_title(hwnd as usize);
+        if SendMessageW(hwnd, WM_APP, 0, 0) != 0x5a || SEEN.load(Ordering::SeqCst) != 1 {
+            std::process::exit(4);
+        }
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        let mut msg = [0u8; 48];
+        while GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0) > 0 {
+            DispatchMessageW(&msg);
+            if SEEN.load(Ordering::SeqCst) == 1 && msg[8..12] == WM_CLOSE.to_le_bytes() {
+                std::process::exit(3); // WM_CLOSE was dispatched and the process survived
+            }
+        }
+        std::process::exit(5);
+    }
+
+    #[test]
+    fn close_message_ends_the_title_process() {
+        if std::env::var_os(CHILD).is_some() {
+            unsafe { child() }
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["present::close_tests::close_message_ends_the_title_process", "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .env("TOMBOX_LOG", std::env::temp_dir().join("tombox_close_test.log"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "child exit; stdout: {stdout}");
+        assert!(!stdout.contains("test result"), "child finished normally: {stdout}");
     }
 }
