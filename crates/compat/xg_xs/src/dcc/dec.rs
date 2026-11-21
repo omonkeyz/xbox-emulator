@@ -127,7 +127,7 @@ fn step(c: &mut Coord, y_first: bool) {
     }
 }
 
-fn prev(d: &Dcc, sel: u32, addr: u32, mode: u32) -> Result<u32, i32> {
+pub(crate) fn prev(d: &Dcc, sel: u32, addr: u32, mode: u32) -> Result<u32, i32> {
     match sel {
         0 => neighbor(d, addr, mode),
         1 | 2 => {

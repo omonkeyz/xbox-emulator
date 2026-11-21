@@ -4,23 +4,23 @@ use crate::dcc_oracle::{configs, diff, holes, Con, Rng};
 use crate::layout::E_INVALIDARG;
 use crate::oracle::{oracle, Oracle, SERIAL};
 
-type Lay = unsafe extern "system" fn(*mut u8, *mut u8, *const u8, u32);
-type Conv = unsafe extern "system" fn(*mut u8, *mut u8, *const u8, *const u32, *const u32);
+pub(super) type Lay = unsafe extern "system" fn(*mut u8, *mut u8, *const u8, u32);
+pub(super) type Conv = unsafe extern "system" fn(*mut u8, *mut u8, *const u8, *const u32, *const u32);
 type Wd = unsafe extern "system" fn(*const u8, *const u8) -> u64;
 type Clr = unsafe extern "system" fn(*const u8, *const u8, u8, u8) -> u64;
-type Enc = unsafe extern "system" fn(u32, *const u8, *mut u8, *mut u8, *mut u32, u32, u32, u32, *const u32) -> i32;
-type DecF = unsafe extern "system" fn(u32, *const u8, *const u8, *mut u8, u32, u32, u32, *const u32) -> i32;
+pub(super) type Enc = unsafe extern "system" fn(u32, *const u8, *mut u8, *mut u8, *mut u32, u32, u32, u32, *const u32) -> i32;
+pub(super) type DecF = unsafe extern "system" fn(u32, *const u8, *const u8, *mut u8, u32, u32, u32, *const u32) -> i32;
 
-const P1S: [u32; 5] = [0, 1, 2, 3, 0x8000_0000];
+pub(super) const P1S: [u32; 5] = [0, 1, 2, 3, 0x8000_0000];
 
-fn copy(d: &Dcc) -> Dcc {
+pub(super) fn copy(d: &Dcc) -> Dcc {
     let mut e = Dcc::new();
     e.m.copy_from_slice(&d.m);
     e.b = d.b;
     e
 }
 
-struct Tally {
+pub(super) struct Tally {
     names: Vec<&'static str>,
     cases: Vec<u64>,
     bad: Vec<u64>,
@@ -28,10 +28,10 @@ struct Tally {
 }
 
 impl Tally {
-    fn new() -> Tally {
+    pub(super) fn new() -> Tally {
         Tally { names: Vec::new(), cases: Vec::new(), bad: Vec::new(), errs: Vec::new() }
     }
-    fn idx(&mut self, n: &'static str) -> usize {
+    pub(super) fn idx(&mut self, n: &'static str) -> usize {
         if let Some(i) = self.names.iter().position(|&x| x == n) {
             return i;
         }
@@ -41,7 +41,7 @@ impl Tally {
         self.errs.push(0);
         self.names.len() - 1
     }
-    fn hit(&mut self, n: &'static str, m: Option<String>, ctx: &str) {
+    pub(super) fn hit(&mut self, n: &'static str, m: Option<String>, ctx: &str) {
         let i = self.idx(n);
         self.cases[i] += 1;
         if let Some(m) = m {
@@ -51,14 +51,14 @@ impl Tally {
             }
         }
     }
-    fn err(&mut self, n: &'static str) {
+    pub(super) fn err(&mut self, n: &'static str) {
         let i = self.idx(n);
         self.errs[i] += 1;
     }
-    fn total_bad(&self) -> u64 {
+    pub(super) fn total_bad(&self) -> u64 {
         self.bad.iter().sum()
     }
-    fn print(&self, title: &str) {
+    pub(super) fn print(&self, title: &str) {
         for i in 0..self.names.len() {
             println!("{} {}: {} cases, {} mismatches, {} native E_INVALIDARG (console not run)", title, self.names[i], self.cases[i], self.bad[i], self.errs[i]);
         }
@@ -311,7 +311,7 @@ fn cause(s: &Dcc) -> &'static str {
     }
     "b0 segment never written (console stack bytes)"
 }
-fn patterns(r: &mut Rng, bpe: usize) -> Vec<[u8; 256]> {
+pub(super) fn patterns(r: &mut Rng, bpe: usize) -> Vec<[u8; 256]> {
     let bpe = bpe.max(1).min(16);
     let mut v = Vec::new();
     let mut el = [0u8; 16];
@@ -350,11 +350,11 @@ fn patterns(r: &mut Rng, bpe: usize) -> Vec<[u8; 256]> {
     v
 }
 
-fn valid_metas() -> Vec<u8> {
+pub(super) fn valid_metas() -> Vec<u8> {
     (0..256u32).filter(|&m| valid_meta(m)).map(|m| m as u8).collect()
 }
 
-fn states() -> Vec<((u32, u32, u32, u32, u32), usize)> {
+pub(super) fn states() -> Vec<((u32, u32, u32, u32, u32), usize)> {
     let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
     let mut out: Vec<((u32, u32, u32, u32, u32), usize)> = Vec::new();
     for (f, sw, dim, p0, _) in configs() {
@@ -376,7 +376,7 @@ fn states() -> Vec<((u32, u32, u32, u32, u32), usize)> {
     out
 }
 
-fn encode(o: &Oracle, inp: &[u8; 256], f: u32, sw: u32, dim: u32, p0: u32, p1: u32, bpe: u32) -> Option<([u8; 256], u8)> {
+pub(super) fn encode(o: &Oracle, inp: &[u8; 256], f: u32, sw: u32, dim: u32, p0: u32, p1: u32, bpe: u32) -> Option<([u8; 256], u8)> {
     let enc: Enc = unsafe { core::mem::transmute(o.f("XGEncodeDCC")) };
     let p1 = if bpe < 4 && p1 >= 2 { 0 } else { p1 };
     let prm = [p0, p1, 0, 0];
@@ -390,14 +390,14 @@ fn encode(o: &Oracle, inp: &[u8; 256], f: u32, sw: u32, dim: u32, p0: u32, p1: u
     Some((out, meta))
 }
 
-fn defined(mut s: Dcc) -> Dcc {
+pub(super) fn defined(mut s: Dcc) -> Dcc {
     s.m[0x6a] = 0;
     s.m[0x6b] = 0x80;
     s
 }
 
 #[inline(never)]
-fn smear(v: u8) -> u8 {
+pub(super) fn smear(v: u8) -> u8 {
     let mut a = [0u8; 0x4000];
     for x in a.iter_mut() {
         unsafe { core::ptr::write_volatile(x, v) };

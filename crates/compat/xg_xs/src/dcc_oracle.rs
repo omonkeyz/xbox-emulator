@@ -72,6 +72,12 @@ impl Con {
         }
         d
     }
+    pub(crate) fn call2(&self, rva: usize, a: u32) -> u64 {
+        unsafe {
+            let f: unsafe extern "system" fn(*mut u8, u32) -> u64 = core::mem::transmute(self.h + rva);
+            f(self.p(), a)
+        }
+    }
     pub(crate) fn call1(&self, rva: usize) -> u64 {
         unsafe {
             let f: F1 = core::mem::transmute(self.h + rva);

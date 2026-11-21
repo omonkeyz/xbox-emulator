@@ -692,3 +692,14 @@ elease`, the log shows one install and every interface is emulated.
   - D3D12 has no cross-group blocking primitive and no forward-progress guarantee for spin waits, so a lowering could hang or would only appear to work.
   - No title shader uses them (mnemonics.txt: 0 uses).
 - OPEN, ds_ordered_count: remains a translator refusal. The XML says it adds count_bits(exec) to one of 4 dedicated ordered-count packers in wave-launch order. D3D12 does not expose dispatch order. Atomics would give unique slots but not ordered ones, so the result would only appear to work. 0 uses.
+
+## D3D12.X last slots, verifier notes (2026-11-21)
+- Device 29/44, null ppv: the console still creates the resource and returns its HRESULT (xgs12 0x47761). We forward a null ppv to PC on the heap path, so nothing is created. No title is known to pass a null ppv.
+- Device 29: the console check at xgs12 0x47686 (E_INVALIDARG when [heap+0x58] & 8) is not ported. What sets that heap bit is unknown, and our CreateHeap already rejects flag 0x8.
+- CommandList 85/86: the buffer-predicate record (0x4002d000 {va, offset}) and the advance record (0x4000d100) are read by GPU firmware that is not in any dump. The EQUAL_ZERO operation, the 8-byte step, and AdvancePredicationX re-arming the buffer predicate after a plain SetPredication(NULL) are inferred. The tests pin our model; they do not prove the console's behaviour.
+- CommandList 74: the "PredicationBufferOffset must be zero" rejection exists only in the debug driver (xgs12_d 0x7d7f9). Retail (0x4f710) writes 0 into the record and runs the call. We reject a nonzero offset, and no title is known to pass one.
+
+## RDNA2 instructions held at yellow after the ISA sweep (2026-11-21)
+- s_bfe_u32/i32/u64/i64 with a field width of 32 or more: the translator returns 0 and the sweep reference returns S0. The ISA text is ambiguous, so one rule has to be confirmed (LLVM constant folding, AMD ISA pseudocode) before these go green.
+- v_cvt_norm / v_cvt_pknorm: the translator now rounds exactly with integer maths (tb_nrm). GLSL/Mesa define the conversion as an f32 multiply then round-to-even, which can differ at .5 ties. RDNA2 silicon behaviour is not confirmed.
+- tests/amp.rs: 4 tests fail because the as3/ms3 fixtures carry PSV0 v1 (36 bytes), which has no thread-group size. Regenerate the fixtures with PSV0 v2, or read the size from the FSSM register block. This predates the sweep.

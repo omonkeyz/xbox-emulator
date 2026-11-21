@@ -26,6 +26,7 @@ extern "system" {
     fn SetLastError(code: u32);
 }
 
+pub mod passwordless;
 pub mod pc;
 
 #[link(name = "ntdll")]
@@ -243,3 +244,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_passwordless;

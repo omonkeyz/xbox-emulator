@@ -42,25 +42,25 @@ unsafe fn vt<T>(p: *mut c_void) -> &'static T {
     &**(p as *const *const T)
 }
 
-unsafe fn com_add_ref(p: *mut c_void) -> u32 {
+pub(crate) unsafe fn com_add_ref(p: *mut c_void) -> u32 {
     let v: &[usize; 3] = vt(p);
     let f: Ref = core::mem::transmute(v[1]);
     f(p)
 }
 
-unsafe fn com_release(p: *mut c_void) -> u32 {
+pub(crate) unsafe fn com_release(p: *mut c_void) -> u32 {
     let v: &[usize; 3] = vt(p);
     let f: Ref = core::mem::transmute(v[2]);
     f(p)
 }
 
-unsafe fn com_qi(p: *mut c_void, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+pub(crate) unsafe fn com_qi(p: *mut c_void, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
     let v: &[usize; 3] = vt(p);
     let f: Qi = core::mem::transmute(v[0]);
     f(p, iid, out)
 }
 
-unsafe fn qi_match(this: *mut c_void, iid: *const GUID, out: *mut *mut c_void, ids: &[GUID]) -> HRESULT {
+pub(crate) unsafe fn qi_match(this: *mut c_void, iid: *const GUID, out: *mut *mut c_void, ids: &[GUID]) -> HRESULT {
     if ids.iter().any(|g| *g == *iid) {
         *out = this;
         com_add_ref(this);
@@ -329,6 +329,28 @@ impl Body {
 pub struct MessageBodies {
     pub json: Body,
     pub binary: Body,
+    pub received: crate::msvc::SharedPtr<crate::encoding::XBTP_MESSAGE_BODY>,
+}
+
+pub unsafe fn new_message() -> *mut Message {
+    Box::into_raw(Box::new(Message { vtbl: &MESSAGE_VTBL, refs: AtomicU32::new(1), lock: Mutex::new(MessageBodies::default()) }))
+}
+
+pub unsafe fn message_set_received(m: *mut Message, body: crate::msvc::SharedPtr<crate::encoding::XBTP_MESSAGE_BODY>) -> HRESULT {
+    let mut b = msg_lock(m);
+    if !body.ptr.is_null() {
+        let src = &*body.ptr;
+        b.binary.owned = None;
+        b.binary.ptr = src.binary_body;
+        b.binary.count = src.binary_body_length;
+        b.json.owned = None;
+        b.json.ptr = src.json_body;
+        b.json.count = src.json_body_length;
+    }
+    let mut old = core::mem::replace(&mut b.received, body);
+    drop(b);
+    old.release();
+    S_OK
 }
 
 #[repr(C)]

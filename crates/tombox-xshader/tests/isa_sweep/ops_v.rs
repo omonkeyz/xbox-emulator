@@ -352,6 +352,60 @@ fn sdwa_ops(s: &mut Suite) {
             });
         }
     }
+    sdwa_float_mods(s);
+}
+
+fn sdwa_mod_bits(i: u32, md: u32) -> u32 {
+    ((md & 1) << (20 + 8 * i)) | (((md >> 1) & 1) << (21 + 8 * i))
+}
+
+fn sdwa_float_mods(s: &mut Suite) {
+    let names = ["", "neg", "abs", "neg abs"];
+    for i in 0..2u32 {
+        for sel in 0..=6u32 {
+            for md in 1..=3u32 {
+                let (s0, s1) = if i == 0 { (sel, 4) } else { (4, sel) };
+                let tag = format!("sdwa src{i}_sel={sel} {}", names[md as usize]);
+                for (m, op, g) in [("v_add_f16", 0x32u32, hadd as G2), ("v_sub_f16", 0x33, hsub), ("v_mul_f16", 0x35, hmul)] {
+                    s.add(m, "VOP2", &tag, Class::F16, &[vmov(OUT, v(12))], &[vop2(op, OUT, 249, 11), sdwa(10, 4, 0, s0, false, s1, false) | sdwa_mod_bits(i, md)], &[], &[Cmp::X], move |x| {
+                        let (m0, m1) = if i == 0 { (md, 0) } else { (0, md) };
+                        let a = mods16(sdwa_sel(x.d[0], s0, false), m0 & 2 != 0, m0 & 1 != 0);
+                        let b = mods16(sdwa_sel(x.d[1], s1, false), m1 & 2 != 0, m1 & 1 != 0);
+                        on(g(a, b).filter(|r| !nan16(*r)).map(|r| sdwa_dst(r, x.d[2], 4, 0)).filter(|_| !(nan16(a) || nan16(b))))
+                    });
+                }
+                let (s0, s1) = if i == 0 { (sel, 6) } else { (6, sel) };
+                for (m, op, g) in [("v_add_f32", 0x03u32, fadd as G2), ("v_sub_f32", 0x04, fsub), ("v_mul_f32", 0x08, fmul)] {
+                    s.add(m, "VOP2", &tag, Class::F32, &[], &[vop2(op, OUT, 249, 11), sdwa(10, 6, 0, s0, false, s1, false) | sdwa_mod_bits(i, md)], &[], &[Cmp::F32(0)], move |x| {
+                        let (m0, m1) = if i == 0 { (md, 0) } else { (0, md) };
+                        let a = mods32(sdwa_sel(x.d[0], s0, false), m0 & 2 != 0, m0 & 1 != 0);
+                        let b = mods32(sdwa_sel(x.d[1], s1, false), m1 & 2 != 0, m1 & 1 != 0);
+                        if den32(a) || den32(b) {
+                            return vec![None];
+                        }
+                        on(g(a, b).filter(|r| !den32(*r)))
+                    });
+                }
+            }
+        }
+    }
+    for md in 1..=3u32 {
+        let tag = format!("sdwa src0 {}", names[md as usize]);
+        s.add("v_cvt_f16_f32", "VOP1", &tag, Class::F32, &[vmov(OUT, v(12))], &[vop1(0x0a, OUT, 249), sdwa(10, 4, 0, 6, false, 0, false) | sdwa_mod_bits(0, md)], &[], &[Cmp::X], move |x| {
+            let a = mods32(x.d[0], md & 2 != 0, md & 1 != 0);
+            if nan32(a) || den32(a) {
+                return vec![None];
+            }
+            o(f2h_rne(f(a)))
+        });
+        for sel in [4u32, 5] {
+            let tag = format!("sdwa src0_sel={sel} {}", names[md as usize]);
+            s.add("v_cvt_f32_f16", "VOP1", &tag, Class::F16, &[], &[vop1(0x0b, OUT, 249), sdwa(10, 6, 0, sel, false, 0, false) | sdwa_mod_bits(0, md)], &[], &[Cmp::F32(0)], move |x| {
+                let a = mods16(sdwa_sel(x.d[0], sel, false), md & 2 != 0, md & 1 != 0);
+                on(if nan16(a) { None } else { Some(f32q(h2f(a))) })
+            });
+        }
+    }
 }
 
 fn u1(s: &mut Suite, m: &'static str, op: u32, class: Class, f: fn(u32) -> u32) {

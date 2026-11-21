@@ -808,6 +808,10 @@ unsafe fn tcp_connect(h: *mut u8, addr: *const u8, len: u32, timeout: u32) -> HR
         }
         core::ptr::write_unaligned(sa.as_mut_ptr() as *mut u16, 0x17);
         core::ptr::write_unaligned(sa.as_mut_ptr().add(2) as *mut u16, ROUTER_PORT.to_be());
+        if !crate::offline::sockaddr_is_loopback(sa.as_ptr(), 0x1c) {
+            hr = crate::offline::WSAEHOSTUNREACH_HR;
+            continue;
+        }
         if connect(s, sa.as_ptr(), 0x1c) == -1 {
             hr = hr_last_error();
             continue;
@@ -970,7 +974,9 @@ pub unsafe extern "C" fn XbtpLinkConnectByName(h: *mut u8, name: *const u16, por
     let mut res: *mut ADDRINFOW = null_mut();
     let mut sa = [0u8; 0x80];
     let hr;
-    if GetAddrInfoW(name, null(), &hints, &mut res) != 0 {
+    if matches!(crate::offline::classify_wide(name), crate::offline::HostClass::RemoteName) {
+        hr = crate::offline::WSAHOST_NOT_FOUND_HR;
+    } else if GetAddrInfoW(name, null(), &hints, &mut res) != 0 {
         hr = wsa_hr(WSAGetLastError());
     } else {
         let mut pick: *mut ADDRINFOW = null_mut();

@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 fn built(file: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();

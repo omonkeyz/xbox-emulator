@@ -3874,8 +3874,13 @@ impl<'a> Emitter<'a> {
             if dst_sel == 7 {
                 return Err("SDWA destination select 7 is reserved".into());
             }
-            if sd & 0x3030_0000 != 0 {
-                return Err("SDWA float neg/abs modifiers are unsupported".into());
+            let fsign = match m.rsplit('_').next() {
+                Some("f16") => Some(0x8000u32),
+                Some("f32") => Some(0x8000_0000u32),
+                _ => None,
+            };
+            if sd & 0x3030_0000 != 0 && fsign.is_none() {
+                return Err("SDWA neg/abs modifiers on a non-float instruction".into());
             }
             let mut c = ins.clone();
             c.aux.sdwa = None;
@@ -3885,20 +3890,32 @@ impl<'a> Emitter<'a> {
                 }
                 let sel = (sd >> shift) & 7;
                 let sext = (sd >> (shift + 3)) & 1 != 0;
-                if sel == 6 {
+                let neg = (sd >> (shift + 4)) & 1 != 0;
+                let abs = (sd >> (shift + 5)) & 1 != 0;
+                if sel == 6 && !neg && !abs {
                     continue;
                 }
                 let x = r(&c.src[i])?;
-                let (bits, lsb) = match sel {
-                    0..=3 => (8u32, sel * 8),
-                    4 | 5 => (16, (sel - 4) * 16),
+                let mut e = match sel {
+                    0..=3 | 4 | 5 => {
+                        let (bits, lsb) = if sel <= 3 { (8u32, sel * 8) } else { (16, (sel - 4) * 16) };
+                        if sext {
+                            format!("asuint(asint({x} << {}) >> {})", 32 - bits - lsb, 32 - bits)
+                        } else {
+                            format!("(({x} >> {lsb}) & {:#x}u)", (1u32 << bits) - 1)
+                        }
+                    }
+                    6 => format!("({x})"),
                     _ => return Err(format!("SDWA select {sel} is reserved")),
                 };
-                let e = if sext {
-                    format!("asuint(asint({x} << {}) >> {})", 32 - bits - lsb, 32 - bits)
-                } else {
-                    format!("(({x} >> {lsb}) & {:#x}u)", (1u32 << bits) - 1)
-                };
+                if let Some(sb) = fsign {
+                    if abs {
+                        e = format!("({e} & {:#x}u)", !sb);
+                    }
+                    if neg {
+                        e = format!("({e} ^ {sb:#x}u)");
+                    }
+                }
                 let t = self.tmp;
                 self.tmp += 1;
                 self.line(&format!("uint tb_s{t} = {e};"));

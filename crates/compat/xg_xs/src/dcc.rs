@@ -166,7 +166,9 @@ pub fn encode(count: u32, src: &[u8], dst: &mut [u8], meta: &mut [u8], mut sizes
             return e;
         }
         let mask = d.r32(0x5c);
-        let segs = bits::seg_info(d.r8(0x58));
+        let Some(segs) = bits::seg_info_checked(d.r32(0x58)) else {
+            return E_INVALIDARG;
+        };
         let mut acc = 0u32;
         for k in 0..4 {
             if (mask >> k) & 1 != 0 {

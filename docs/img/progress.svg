@@ -952,7 +952,7 @@
 <rect x="550.00" y="370.00" width="450.00" height="170.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="555.00" y="386.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Device</text>
 </g>
-<text x="4.00" y="571.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">RDNA2 shader instructions translated: 98.97% (771/779)</text>
+<text x="4.00" y="571.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">RDNA2 shader instructions translated: 98.72% (769/779)</text>
 <g><title>VOPC: 190/190 (100%)</title>
 <rect x="1.00" y="581.00" width="17.28" height="18.43" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="18.28" y="581.00" width="17.28" height="18.43" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1409,7 +1409,7 @@
 <rect x="390.24" y="731.03" width="174.58" height="108.97" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="395.24" y="747.03" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">DS</text>
 </g>
-<g><title>SOP2: 51/51 (100%)</title>
+<g><title>SOP2: 49/51 (96%)</title>
 <rect x="565.83" y="581.00" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="583.70" y="581.00" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="601.57" y="581.00" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1459,8 +1459,8 @@
 <rect x="637.30" y="679.95" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="655.17" y="679.95" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="673.04" y="679.95" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="565.83" y="696.45" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="583.70" y="696.45" width="17.87" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="565.83" y="696.45" width="17.87" height="16.49" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="583.70" y="696.45" width="17.87" height="16.49" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="564.83" y="580.00" width="127.09" height="133.94" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="569.83" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SOP2</text>
 </g>

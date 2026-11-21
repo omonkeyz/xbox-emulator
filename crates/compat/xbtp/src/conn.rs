@@ -147,7 +147,7 @@ pub static NP_CHANNEL_VTBL: ChannelVtbl = ChannelVtbl {
     cancel: channel_cancel,
 };
 
-unsafe fn channel_construct(vtbl: &'static ChannelVtbl, handle: usize) -> *mut XbtpChannel {
+pub(crate) unsafe fn channel_construct(vtbl: &'static ChannelVtbl, handle: usize) -> *mut XbtpChannel {
     let ch = cpp_new(core::mem::size_of::<XbtpChannel>()) as *mut XbtpChannel;
     if ch.is_null() {
         return ch;
@@ -169,7 +169,7 @@ pub unsafe fn new_np_channel() -> *mut XbtpChannel {
     channel_construct(&NP_CHANNEL_VTBL, 0)
 }
 
-unsafe fn channel_base_init(ch: *mut XbtpChannel, client: bool) -> HRESULT {
+pub(crate) unsafe fn channel_base_init(ch: *mut XbtpChannel, client: bool) -> HRESULT {
     (*ch).is_client = client as u8;
     (*ch).recv_event = CreateEventW(null_mut(), 1, 0, core::ptr::null());
     if (*ch).recv_event.is_null() {
@@ -236,7 +236,7 @@ pub unsafe fn channel_rearm(ch: *mut XbtpChannel) {
     LeaveCriticalSection(&mut (*ch).recv_cs);
 }
 
-unsafe fn channel_wait_idle(ch: *mut XbtpChannel) {
+pub(crate) unsafe fn channel_wait_idle(ch: *mut XbtpChannel) {
     EnterCriticalSection(&mut (*ch).recv_cs);
     if (*ch).pending != 0 {
         WaitForSingleObject((*ch).recv_event, INFINITE);
@@ -244,7 +244,7 @@ unsafe fn channel_wait_idle(ch: *mut XbtpChannel) {
     LeaveCriticalSection(&mut (*ch).recv_cs);
 }
 
-unsafe fn channel_base_destroy(ch: *mut XbtpChannel) {
+pub(crate) unsafe fn channel_base_destroy(ch: *mut XbtpChannel) {
     DeleteCriticalSection(&mut (*ch).recv_cs);
     DeleteCriticalSection(&mut (*ch).send_cs);
     for h in [(*ch).recv_event, (*ch).read_event, (*ch).send_event] {
@@ -371,7 +371,7 @@ pub unsafe fn channel_next_exchange_id(ch: *mut XbtpChannel) -> i32 {
     }
 }
 
-unsafe extern "C" fn channel_true(_ch: *mut XbtpChannel) -> bool {
+pub(crate) unsafe extern "C" fn channel_true(_ch: *mut XbtpChannel) -> bool {
     true
 }
 
@@ -383,7 +383,7 @@ unsafe extern "C" fn channel_no_address(_ch: *mut XbtpChannel, _out: *mut BSTR) 
     E_NOTIMPL
 }
 
-unsafe extern "C" fn channel_no_detach(_ch: *mut XbtpChannel, _out: *mut usize) -> bool {
+pub(crate) unsafe extern "C" fn channel_no_detach(_ch: *mut XbtpChannel, _out: *mut usize) -> bool {
     false
 }
 
@@ -610,6 +610,13 @@ pub unsafe fn resolve(host: *const u16, port: u32) -> Result<SocketAddress, HRES
     out
 }
 
+pub unsafe fn resolve_offline(host: *const u16, port: u32) -> Result<SocketAddress, HRESULT> {
+    if matches!(crate::offline::classify_wide(host), crate::offline::HostClass::RemoteName) {
+        return Err(crate::offline::WSAHOST_NOT_FOUND_HR);
+    }
+    resolve(host, port)
+}
+
 unsafe fn set_option(s: SOCKET, level: i32, name: i32, value: u32) -> HRESULT {
     if setsockopt(s, level, name, &value as *const u32 as *const u8, 4) == -1 {
         return last_error_hr();
@@ -752,6 +759,22 @@ pub unsafe fn socket_check_ready(s: SOCKET) -> Result<u32, HRESULT> {
     Ok(flags)
 }
 
+fn addr_is_local(a: &SocketAddress) -> bool {
+    let fam = u16::from_le_bytes([a.addr[0], a.addr[1]]);
+    if fam == 0x17 && a.addr[8..24].iter().all(|b| *b == 0) {
+        return true;
+    }
+    unsafe { crate::offline::sockaddr_is_loopback(a.addr.as_ptr(), a.size as usize) }
+}
+
+pub fn loopback_listen_address(port: u32) -> SocketAddress {
+    let mut a = SocketAddress { size: 0x10, addr: [0; 0x1c] };
+    a.addr[0] = 2;
+    a.addr[2..4].copy_from_slice(&(port as u16).to_be_bytes());
+    a.addr[4..8].copy_from_slice(&[127, 0, 0, 1]);
+    a
+}
+
 unsafe fn log_connect_hex(name: BSTR, port: u32, hr: HRESULT) {
     log_error_args(b"Could not connect to %ws %d (0x%X)\0", &[name as usize, port as usize, hr as u32 as usize]);
 }
@@ -760,10 +783,21 @@ pub unsafe fn tcp_client_connect(name: BSTR, port: u32, timeout: u32) -> Result<
     let mut s = INVALID_SOCKET;
     let mut ev: HANDLE = null_mut();
     let res = 'run: {
-        let addr = match resolve(name, port) {
-            Ok(a) => a,
-            Err(hr) => break 'run Err(hr),
+        let addr = match crate::offline::classify_wide(name) {
+            crate::offline::HostClass::RemoteName => break 'run Err(crate::offline::WSAHOST_NOT_FOUND_HR),
+            crate::offline::HostClass::RemoteLiteral => {
+                log_connect_hex(name, port, crate::offline::WSAEHOSTUNREACH_HR);
+                break 'run Err(E_COULD_NOT_CONNECT);
+            }
+            _ => match resolve(name, port) {
+                Ok(a) => a,
+                Err(hr) => break 'run Err(hr),
+            },
         };
+        if !addr_is_local(&addr) {
+            log_connect_hex(name, port, crate::offline::WSAEHOSTUNREACH_HR);
+            break 'run Err(E_COULD_NOT_CONNECT);
+        }
         s = match socket_connect(&addr) {
             Ok(v) => v,
             Err(hr) => break 'run Err(hr),
@@ -898,7 +932,7 @@ pub unsafe extern "C" fn TcpConnection_dtor(this: *mut TcpConnection) {
     (*this).server_name = null_mut();
 }
 
-unsafe extern "C" fn tcp_connection_deleting_dtor(this: *mut c_void, flags: u32) -> *mut c_void {
+pub(crate) unsafe extern "C" fn tcp_connection_deleting_dtor(this: *mut c_void, flags: u32) -> *mut c_void {
     TcpConnection_dtor(this as *mut TcpConnection);
     if flags & 1 != 0 {
         cpp_delete(this);
@@ -942,7 +976,7 @@ pub unsafe extern "C" fn TcpConnection_InitializeClient_sp(name: *const u16, por
     hr
 }
 
-unsafe fn wrap_into<T>(raw: *mut T, out: *mut SharedPtr<T>) {
+pub(crate) unsafe fn wrap_into<T>(raw: *mut T, out: *mut SharedPtr<T>) {
     match SharedPtr::new_virtual(raw) {
         Some(sp) => sp.assign_into(out),
         None => {
@@ -958,7 +992,7 @@ unsafe fn tcp_server_setup(c: *mut TcpConnection, port: u32) -> HRESULT {
     if (*c).socket_event.is_null() {
         return S_OK;
     }
-    let s = match resolve(core::ptr::null(), port).and_then(|a| socket_listen(&a)) {
+    let s = match socket_listen(&loopback_listen_address(port)) {
         Ok(s) => s,
         Err(hr) => {
             log_error_args(b"Failed 0x%X to initialize the server socket\0", &[hr as u32 as usize]);
