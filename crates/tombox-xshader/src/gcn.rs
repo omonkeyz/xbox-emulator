@@ -247,6 +247,31 @@ fn smrd_op(op: u32) -> Result<u32, String> {
     }
 }
 
+/// GFX10 unified MTBUF format IDs, in ID order: `(dfmt, nfmt)`.
+/// Source: LLVM `AMDGPUAsmUtils.cpp`, `DfmtNfmt2UFmtGFX10`
+/// (Apache-2.0 WITH LLVM-exception). The ID is the table index.
+const UFMT_GFX10: [(u8, u8); 78] = [
+    (0, 0), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
+    (2, 0), (2, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 7),
+    (3, 0), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5), (4, 4),
+    (4, 5), (4, 7), (5, 0), (5, 1), (5, 2), (5, 3), (5, 4),
+    (5, 5), (5, 7), (6, 0), (6, 1), (6, 2), (6, 3), (6, 4),
+    (6, 5), (6, 7), (7, 0), (7, 1), (7, 2), (7, 3), (7, 4),
+    (7, 5), (7, 7), (8, 0), (8, 1), (8, 2), (8, 3), (8, 4),
+    (8, 5), (9, 0), (9, 1), (9, 2), (9, 3), (9, 4), (9, 5),
+    (10, 0), (10, 1), (10, 2), (10, 3), (10, 4), (10, 5), (11, 4),
+    (11, 5), (11, 7), (12, 0), (12, 1), (12, 2), (12, 3), (12, 4),
+    (12, 5), (12, 7), (13, 4), (13, 5), (13, 7), (14, 4), (14, 5),
+    (14, 7),
+];
+
+fn mtbuf_format(dfmt: u32, nfmt: u32) -> Option<u32> {
+    UFMT_GFX10
+        .iter()
+        .position(|&(d, n)| d as u32 == dfmt && n as u32 == nfmt)
+        .map(|i| i as u32)
+}
+
 fn is_branch(w: u32) -> bool {
     classify(w) == Enc::Sopp && matches!((w >> 16) & 0x7f, 0x02 | 0x04..=0x09)
 }
@@ -390,7 +415,18 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             let dim = if da != 0 { 5 } else { 1 };
             vec![(w & !(1 << 14)) | dim << 3, ins.words[1]]
         }
-        Enc::Mtbuf => return Err(err("MTBUF (typed buffer) is not supported by the RDNA2 backend yet".into())),
+        Enc::Mtbuf => {
+            if (w >> 15) & 1 != 0 {
+                return Err(err("MTBUF addr64 has no RDNA2 equivalent".into()));
+            }
+            let dfmt = (w >> 19) & 0xf;
+            let nfmt = (w >> 23) & 0x7;
+            let format = mtbuf_format(dfmt, nfmt)
+                .ok_or_else(|| err(format!("MTBUF dfmt={dfmt} nfmt={nfmt} has no RDNA2 unified format")))?;
+            let mut d0 = w & !(0x7f << 19);
+            d0 |= (format & 0x7f) << 19;
+            vec![d0, ins.words[1]]
+        }
         Enc::Flat => return Err(err("FLAT is not supported yet".into())),
         Enc::Unknown => return Err(err("unknown gfx7 encoding".into())),
     })
@@ -716,6 +752,96 @@ mod tests {
         let l = lower(&code, &[]).unwrap();
         assert_eq!(l.code_len, 4);
         assert_eq!(words(&l.isa), [0xbf810000, 0x0000000e, 0xbf810000]);
+    }
+
+    /// gfx7 MTBUF: offset 11-0, offen 12, idxen 13, glc 14, addr64 15,
+    /// op 18-16, dfmt 22-19, nfmt 25-23, encoding 31-26 = 0x3a.
+    fn mtbuf(op: u32, dfmt: u32, nfmt: u32, addr64: bool) -> [u32; 2] {
+        let d0 = 0b111010 << 26
+            | (nfmt & 7) << 23
+            | (dfmt & 0xf) << 19
+            | (op & 7) << 16
+            | (addr64 as u32) << 15
+            | 0x034;
+        [d0, 0x7d00_0000 | (3 << 16) | (2 << 8) | 1]
+    }
+
+    fn lower_mtbuf(op: u32, dfmt: u32, nfmt: u32, addr64: bool) -> Result<(Vec<u32>, Vec<crate::rdna2::Insn>), String> {
+        let words = mtbuf(op, dfmt, nfmt, addr64);
+        let bytes: Vec<u8> = words.iter().flat_map(|d| d.to_le_bytes()).collect();
+        let l = to_rdna2(&bytes)?;
+        let w: Vec<u32> = l.isa.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let d = crate::rdna2::disassemble(&l.isa);
+        Ok((w, d))
+    }
+
+    #[test]
+    fn mtbuf_dfmt_nfmt_becomes_rdna2_unified_format() {
+        // (dfmt=4, nfmt=7) is 32-bit float; ID 0x16 in LLVM's DfmtNfmt2UFmtGFX10.
+        let (w, d) = lower_mtbuf(0, 4, 7, false).unwrap();
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[1], mtbuf(0, 4, 7, false)[1], "dword1 must pass through");
+        assert_eq!((w[0] >> 19) & 0x7f, 0x16, "unified format id");
+        let keep = !(0x7f << 19);
+        assert_eq!(w[0] & keep, mtbuf(0, 4, 7, false)[0] & keep, "only the format field may change");
+        assert_eq!(w[0] & 0xfff, 0x034, "offset must be preserved");
+        assert_eq!(d[0].mnemonic, "tbuffer_load_format_x");
+        assert_eq!(d[0].aux.imm2, 0x16, "the HLSL backend reads this as the unified format");
+    }
+
+    #[test]
+    fn mtbuf_addr_mode_bits_pass_through() {
+        // offen/idxen/glc keep gfx7 positions 12/13/14 in the GFX10 encoding.
+        let mut words = mtbuf(0, 4, 7, false);
+        words[0] |= 0x7000;
+        let bytes: Vec<u8> = words.iter().flat_map(|d| d.to_le_bytes()).collect();
+        let l = to_rdna2(&bytes).unwrap();
+        let w = u32::from_le_bytes(l.isa[0..4].try_into().unwrap());
+        assert_eq!(w & 0x7000, 0x7000);
+        assert_eq!((w >> 19) & 0x7f, 0x16);
+    }
+
+    #[test]
+    fn mtbuf_store_format_xyzw_translates() {
+        let (w, d) = lower_mtbuf(7, 4, 7, false).unwrap();
+        assert_eq!((w[0] >> 19) & 0x7f, 0x16);
+        assert_eq!(d[0].mnemonic, "tbuffer_store_format_xyzw");
+    }
+
+    #[test]
+    fn mtbuf_table_is_the_llvm_order() {
+        // Every (dfmt, nfmt) LLVM accepts maps to its table index, and every
+        // other 4-bit/3-bit pair is rejected rather than silently truncated.
+        let mut seen = 0;
+        for dfmt in 0..16 {
+            for nfmt in 0..8 {
+                match mtbuf_format(dfmt, nfmt) {
+                    Some(id) => {
+                        assert!(id < 78, "dfmt={dfmt} nfmt={nfmt}: id {id} out of range");
+                        assert_eq!(UFMT_GFX10[id as usize], (dfmt as u8, nfmt as u8));
+                        seen += 1;
+                    }
+                    None => assert!(!UFMT_GFX10.iter().any(|&(d, n)| d as u32 == dfmt && n as u32 == nfmt)),
+                }
+            }
+        }
+        assert_eq!(seen, UFMT_GFX10.len(), "no duplicate or unreachable table entries");
+        assert_eq!(mtbuf_format(4, 7), Some(0x16));
+        assert_eq!(mtbuf_format(14, 0), None);
+    }
+
+    #[test]
+    fn mtbuf_addr64_is_rejected() {
+        let e = lower_mtbuf(0, 4, 7, true).unwrap_err();
+        assert!(e.contains("addr64"), "{e}");
+    }
+
+    #[test]
+    fn mtbuf_invalid_format_is_rejected() {
+        // DFMT_RESERVED_15 has no entry in any nfmt.
+        let e = lower_mtbuf(0, 15, 7, false).unwrap_err();
+        assert!(e.contains("dfmt=15 nfmt=7"), "{e}");
+        assert!(e.contains("no RDNA2 unified format"), "{e}");
     }
 
     #[test]
