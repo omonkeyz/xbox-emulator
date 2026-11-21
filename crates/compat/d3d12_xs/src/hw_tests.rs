@@ -1035,3 +1035,187 @@ mod cl_fw_hw;
 
 #[path = "device_place_hw.rs"]
 mod device_place_hw;
+
+const IID_DESCRIPTOR_HEAP: Guid = Guid { d1: 0x8efb_471d, d2: 0x616c, d3: 0x4f49, d4: [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51] };
+const ST_NON_PIXEL_SRV: u32 = 0x40;
+const PC_SET_DESCRIPTOR_HEAPS: usize = 28;
+const PC_SET_COMPUTE_ROOT_TABLE: usize = 31;
+const PC_SET_COMPUTE_ROOT_SRV: usize = 39;
+
+fn transition(res: usize, before: u32, after: u32) -> [u64; 4] {
+    [0, res as u64, 0xffff_ffff | (before as u64) << 32, after as u64]
+}
+
+#[test]
+#[ignore = "needs a D3D12 device; run: cargo test -p d3d12_xs --lib hw_ -- --ignored --test-threads=1 (TOMBOX_HW_ADAPTER=warp for WARP)"]
+fn hw_rgb9e5_typed_uav_texture_is_substituted() {
+    use crate::uav_subst::{f16_to_f32, f32_to_f16, rgb9e5_decode, rgb9e5_encode, rgb9e5_step};
+    const W: usize = 64;
+    const H: usize = 16;
+    let g = gpu();
+    unsafe {
+        let real = g.dev as *mut c_void;
+        let support = crate::uav_subst::host_support1(real, 67).expect("CheckFeatureSupport(FORMAT_SUPPORT, R9G9B9E5)");
+        if support & crate::uav_subst::SUPPORT1_TYPED_UAV != 0 {
+            eprintln!("skipped: this adapter ({}) binds R9G9B9E5 as a typed UAV natively (Support1={support:#x})", if g.warp { "WARP" } else { "hardware" });
+            return;
+        }
+        eprintln!("R9G9B9E5 Support1={support:#x}: no typed UAV on this adapter");
+        let heap: [u32; 5] = [HEAP_DEFAULT, 0, 0, 1, 1];
+        let mut d = [0u8; 0x38];
+        d[0..4].copy_from_slice(&3u32.to_le_bytes());
+        d[0x10..0x18].copy_from_slice(&(W as u64).to_le_bytes());
+        d[0x18..0x1c].copy_from_slice(&(H as u32).to_le_bytes());
+        d[0x1c..0x1e].copy_from_slice(&1u16.to_le_bytes());
+        d[0x1e..0x20].copy_from_slice(&1u16.to_le_bytes());
+        d[0x20..0x24].copy_from_slice(&67u32.to_le_bytes());
+        d[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+        d[0x30..0x34].copy_from_slice(&FLAG_UAV.to_le_bytes());
+        let mut r: *mut c_void = core::ptr::null_mut();
+        let hr = call!(real, 27, (*const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32,
+            heap.as_ptr(), 0, d.as_ptr(), ST_UAV, core::ptr::null(), &IID_RESOURCE, &mut r);
+        assert_eq!(hr, 0x8007_0057u32 as i32, "the host accepted R9G9B9E5 + ALLOW_UAV");
+        let dev = crate::device_wrap::wrap_device(real);
+        let mut tex: *mut c_void = core::ptr::null_mut();
+        let hr = call!(dev, crate::console_slots_dev2::SLOT_COMMITTED_X, (*const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32,
+            heap.as_ptr(), 0, d.as_ptr(), ST_UAV, core::ptr::null(), &IID_RESOURCE, &mut tex);
+        assert!(hr >= 0 && !tex.is_null(), "d3d12_xs CreateCommittedResourceX hr={hr:#010x}");
+        let mut got = [0u8; 0x38];
+        call!(tex, 10, (*mut u8) -> *mut u8, got.as_mut_ptr());
+        assert_eq!(u32::from_le_bytes(got[0x20..0x24].try_into().unwrap()), 10, "host texture is not RGBA16F");
+        assert_eq!(crate::uav_subst::lookup(tex), Some(crate::uav_subst::TABLE[0]));
+
+        let hd: [u32; 4] = [0, 4, 1, 0];
+        let mut dh: *mut c_void = core::ptr::null_mut();
+        assert!(call!(real, 14, (*const u32, *const Guid, *mut *mut c_void) -> i32, hd.as_ptr(), &IID_DESCRIPTOR_HEAP, &mut dh) >= 0);
+        let mut cpu0 = 0usize;
+        call!(dh, 9, (*mut usize) -> *mut usize, &mut cpu0);
+        let mut gpu0 = 0u64;
+        call!(dh, 10, (*mut u64) -> *mut u64, &mut gpu0);
+        let inc = call!(real, 15, (u32) -> u32, 0) as usize;
+        let mut uav = [0u8; 40];
+        uav[0..4].copy_from_slice(&67u32.to_le_bytes());
+        uav[4..8].copy_from_slice(&4u32.to_le_bytes());
+        call!(dev, 19, (*mut c_void, *mut c_void, *const u8, usize) -> (), tex, core::ptr::null_mut(), uav.as_ptr(), cpu0);
+        let mut srv = [0u8; 40];
+        srv[0..4].copy_from_slice(&67u32.to_le_bytes());
+        srv[4..8].copy_from_slice(&4u32.to_le_bytes());
+        srv[8..12].copy_from_slice(&0x1688u32.to_le_bytes());
+        srv[20..24].copy_from_slice(&1u32.to_le_bytes());
+        call!(dev, 18, (*mut c_void, *const u8, usize) -> (), tex, srv.as_ptr(), cpu0 + inc);
+        let mut null_uav = [0u8; 40];
+        null_uav[0..4].copy_from_slice(&10u32.to_le_bytes());
+        null_uav[4..8].copy_from_slice(&4u32.to_le_bytes());
+        call!(real, 19, (*mut c_void, *mut c_void, *const u8, usize) -> (), core::ptr::null_mut(), core::ptr::null_mut(), null_uav.as_ptr(), cpu0 + 2 * inc);
+        let mut null_srv = srv;
+        null_srv[0..4].copy_from_slice(&10u32.to_le_bytes());
+        call!(real, 18, (*mut c_void, *const u8, usize) -> (), core::ptr::null_mut(), null_srv.as_ptr(), cpu0 + 3 * inc);
+
+        let n = W * H;
+        let mut seed = 0x1234_5678u32;
+        let mut next = || { seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); seed };
+        let mut input = vec![[0f32; 4]; n];
+        for (i, t) in input.iter_mut().enumerate() {
+            let rgb = if i < n / 2 {
+                rgb9e5_decode(next())
+            } else {
+                [0; 3].map(|_| {
+                    let u = next();
+                    (2f32.powi((u >> 24) as i32 % 41 - 25) * (1.0 + (u & 0xffff) as f32 / 65536.0)).min(65408.0)
+                })
+            };
+            *t = [rgb[0], rgb[1], rgb[2], 0.25];
+        }
+        input[n / 2] = [0.0, 0.0, 0.0, 0.25];
+        input[n / 2 + 1] = [65408.0, 1.0, 3.0e-7, 0.25];
+        let src = buffer(g.dev, HEAP_UPLOAD, (n * 16) as u64, 0, ST_GENERIC_READ);
+        core::ptr::copy_nonoverlapping(input.as_ptr() as *const u8, src.cpu, n * 16);
+        let out = buffer(g.dev, HEAP_DEFAULT, (n * 16) as u64, FLAG_UAV, ST_UAV);
+        let rb = buffer(g.dev, HEAP_READBACK, (n * 16) as u64, 0, ST_COPY_DEST);
+
+        let rs_decl = "#define RS \"DescriptorTable(UAV(u0)), DescriptorTable(SRV(t0)), SRV(t1), UAV(u1)\"\n\
+            RWTexture2D<float4> tex_out : register(u0);\nTexture2D<float4> tex_in : register(t0);\n\
+            ByteAddressBuffer inp : register(t1);\nRWByteAddressBuffer res : register(u1);\n";
+        let write = format!("{rs_decl}[RootSignature(RS)] [numthreads(8, 8, 1)]\nvoid main(uint3 id : SV_DispatchThreadID) {{ uint i = id.y * {W} + id.x; tex_out[id.xy] = asfloat(inp.Load4(i * 16)); }}\n");
+        let read = format!("{rs_decl}[RootSignature(RS)] [numthreads(8, 8, 1)]\nvoid main(uint3 id : SV_DispatchThreadID) {{ uint i = id.y * {W} + id.x; res.Store4(i * 16, asuint(tex_in.Load(int3(id.xy, 0)))); }}\n");
+        let (rs, pso_w) = compute_pso(g.dev, &write, None);
+        let (_, pso_r) = compute_pso(g.dev, &read, Some(rs));
+        let l = raw_list(g.dev);
+        let heaps = [dh];
+        call!(l, PC_SET_DESCRIPTOR_HEAPS, (u32, *const *mut c_void) -> (), 1, heaps.as_ptr());
+        call!(l, PC_SET_COMPUTE_ROOT_SIGNATURE, (*mut c_void) -> (), rs);
+        call!(l, PC_SET_COMPUTE_ROOT_TABLE, (u32, u64) -> (), 0, gpu0);
+        call!(l, PC_SET_COMPUTE_ROOT_TABLE, (u32, u64) -> (), 1, gpu0 + 3 * inc as u64);
+        call!(l, PC_SET_COMPUTE_ROOT_SRV, (u32, u64) -> (), 2, src.va);
+        call!(l, PC_SET_COMPUTE_ROOT_UAV, (u32, u64) -> (), 3, out.va);
+        call!(l, X_SET_PSO, (*mut c_void) -> (), pso_w);
+        call!(l, X_DISPATCH, (u32, u32, u32) -> (), (W / 8) as u32, (H / 8) as u32, 1);
+        let b = transition(tex as usize, ST_UAV, ST_NON_PIXEL_SRV);
+        call!(l, X_BARRIER, (u32, *const u64) -> (), 1, b.as_ptr());
+        call!(l, PC_SET_COMPUTE_ROOT_TABLE, (u32, u64) -> (), 0, gpu0 + 2 * inc as u64);
+        call!(l, PC_SET_COMPUTE_ROOT_TABLE, (u32, u64) -> (), 1, gpu0 + inc as u64);
+        call!(l, X_SET_PSO, (*mut c_void) -> (), pso_r);
+        call!(l, X_DISPATCH, (u32, u32, u32) -> (), (W / 8) as u32, (H / 8) as u32, 1);
+        let b = transition(out.res, ST_UAV, ST_COPY_SOURCE);
+        call!(l, X_BARRIER, (u32, *const u64) -> (), 1, b.as_ptr());
+        call!(l, X_COPY_BUFFER_REGION, (usize, u64, usize, u64, u64) -> (), rb.res, 0, out.res, 0, (n * 16) as u64);
+        assert!(call!(l, X_CLOSE, () -> i32) >= 0, "compute list failed to close");
+        let f = fence(g.dev);
+        submit(g.a, l, f, 1);
+        assert!(reached(f, 1, Duration::from_secs(5)), "compute work did not finish");
+        let back = core::slice::from_raw_parts(rb.cpu as *const [f32; 4], n);
+        for (i, (want, got)) in input.iter().zip(back).enumerate() {
+            let rgb = [want[0], want[1], want[2]];
+            assert_eq!(got[3], 1.0, "texel {i}: SRV alpha of an RGB9E5 view must read 1.0, got {}", got[3]);
+            if i < n / 2 {
+                assert_eq!(&got[..3], &rgb, "texel {i}: RGB9E5 value not stored exactly");
+                continue;
+            }
+            let q = rgb9e5_decode(rgb9e5_encode(rgb));
+            let step = rgb9e5_step(rgb);
+            for c in 0..3 {
+                let h = f32_to_f16(rgb[c]);
+                let (lo, hi) = (f16_to_f32(h.saturating_sub(1)).min(f16_to_f32(h)), f16_to_f32(h + 1));
+                assert!(got[c] >= lo && got[c] <= hi, "texel {i}.{c}: {} is not an f16 neighbour of {}", got[c], rgb[c]);
+                assert!((got[c] - q[c]).abs() <= step, "texel {i}.{c}: {} vs RGB9E5 {} (quantum {step})", got[c], q[c]);
+            }
+        }
+
+        let pitch = (W * 8).next_multiple_of(256);
+        let refused = buffer(g.dev, HEAP_READBACK, (pitch * H) as u64, 0, ST_COPY_DEST);
+        let ok = buffer(g.dev, HEAP_READBACK, (pitch * H) as u64, 0, ST_COPY_DEST);
+        core::ptr::write_bytes(refused.cpu, 0xcd, pitch * H);
+        let footprint = |res: usize, fmt: u32, row: usize| {
+            let mut loc = [0u8; 0x30];
+            loc[0..8].copy_from_slice(&(res as u64).to_le_bytes());
+            loc[8..12].copy_from_slice(&1u32.to_le_bytes());
+            loc[0x18..0x1c].copy_from_slice(&fmt.to_le_bytes());
+            loc[0x1c..0x20].copy_from_slice(&(W as u32).to_le_bytes());
+            loc[0x20..0x24].copy_from_slice(&(H as u32).to_le_bytes());
+            loc[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
+            loc[0x28..0x2c].copy_from_slice(&(row as u32).to_le_bytes());
+            loc
+        };
+        let mut sub = [0u8; 0x30];
+        sub[0..8].copy_from_slice(&(tex as u64).to_le_bytes());
+        let x = title_list(g.dev);
+        let b = transition(tex as usize, ST_NON_PIXEL_SRV, ST_COPY_SOURCE);
+        call!(x, X_BARRIER, (u32, *const u64) -> (), 1, b.as_ptr());
+        let console = footprint(refused.res, 67, (W * 4).next_multiple_of(256));
+        call!(x, 16, (*const u8, u32, u32, u32, *const u8, *const c_void) -> (), console.as_ptr(), 0, 0, 0, sub.as_ptr(), core::ptr::null());
+        let host = footprint(ok.res, 10, pitch);
+        call!(x, 16, (*const u8, u32, u32, u32, *const u8, *const c_void) -> (), host.as_ptr(), 0, 0, 0, sub.as_ptr(), core::ptr::null());
+        assert!(call!(x, X_CLOSE, () -> i32) >= 0, "copy list failed to close");
+        let f = fence(g.dev);
+        submit(g.a, x, f, 1);
+        assert!(reached(f, 1, Duration::from_secs(5)), "copy work did not finish");
+        assert!(core::slice::from_raw_parts(refused.cpu, pitch * H).iter().all(|&b| b == 0xcd), "the R9G9B9E5-footprint copy was not refused");
+        for (i, got) in back.iter().enumerate() {
+            let at = (i / W) * pitch + (i % W) * 8;
+            let h: Vec<u16> = (0..4).map(|c| core::ptr::read_unaligned(ok.cpu.add(at + 2 * c) as *const u16)).collect();
+            assert_eq!(&h[..3], &[f32_to_f16(got[0]), f32_to_f16(got[1]), f32_to_f16(got[2])], "texel {i}: copied texel differs from the SRV read");
+            assert_eq!(f16_to_f32(h[3]), 0.25, "texel {i}: stored alpha");
+        }
+        eprintln!("{n} texels verified on {}: {} exact RGB9E5, {} within one RGB9E5 quantum", if g.warp { "WARP" } else { "hardware" }, n / 2, n - n / 2);
+    }
+}

@@ -97,6 +97,7 @@ mod bop64;
 mod wait_probe;
 #[cfg(test)]
 mod hw_tests;
+mod uav_subst;
 mod driver_state;
 #[cfg(test)]
 mod driver_unload_tests;
@@ -259,6 +260,7 @@ pub extern "system" fn D3D12XboxCreateDevice(
         let real = unsafe { *pp_device };
         if !real.is_null() {
             dred::watch(real);
+            unsafe { uav_subst::probe(real) };
             let wrapped = device_wrap::wrap_device(real);
             unsafe { *pp_device = wrapped };
             record(M, "D3D12XboxCreateDevice", &format!("host device {real:p} wrapped as {wrapped:p} (hr={hr:#010x})"));
