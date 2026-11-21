@@ -360,6 +360,9 @@ unsafe extern "system" fn get_resource_alloc_info(
         if u16at(b, 28) == 0 { b[28] = 1; } // DepthOrArraySize 0 -> 1
         if u16at(b, 30) == 0 { b[30] = 1; } // MipLevels 0 -> 1
         if u32at(b, 36) == 0 { b[36] = 1; } // SampleDesc.Count 0 -> 1
+        // A texture this host stores in a substitute format (uav_subst.rs) needs the
+        // substitute's size. The probe made at device creation answers for the host.
+        let _ = unsafe { crate::uav_subst::substitute_desc(core::ptr::null_mut(), &mut b[..0x38]) };
         if n < 8 && i == 0 {
             record("d3d12_xs", "GetResourceAllocationInfo",
                 &format!("dim={} align={:#x} w={} h={} depthArr={} mips={} fmt={} sampleCount={} layout={} flags={:#x}",
@@ -508,6 +511,10 @@ unsafe extern "system" fn create_committed_resource(
     // Mask D3D12_RESOURCE_DESC::Flags (offset 0x30) to PC-valid bits: Xbox sets
     // console-only flags (e.g. 0x300000) that PC D3D12 rejects, removing the device.
     let mut desc_copy = [0u8; 0x40];
+    // `pc_desc` is what the host creates; `desc_copy` keeps the title's format for the VA
+    // bookkeeping and title-memory mirroring (they describe console memory).
+    let mut pc_desc = [0u8; 0x40];
+    let mut subst = None;
     let desc_ptr = if pdesc.is_null() {
         pdesc
     } else {
@@ -515,7 +522,9 @@ unsafe extern "system" fn create_committed_resource(
         let flags = u32::from_le_bytes(desc_copy[0x30..0x34].try_into().unwrap());
         const PC_RESOURCE_FLAGS: u32 = 0xFF; // RT|DSV|UAV|DENY_SRV|CROSS_ADAPTER|SIMUL|VIDEO*
         desc_copy[0x30..0x34].copy_from_slice(&crate::xone_tex::committed_flags(flags & PC_RESOURCE_FLAGS).to_le_bytes());
-        desc_copy.as_ptr() as *const u32
+        pc_desc = desc_copy;
+        subst = unsafe { crate::uav_subst::substitute_desc(real, &mut pc_desc[..0x38]) };
+        pc_desc.as_ptr() as *const u32
     };
     let init_state = if pheap.is_null() { init_state } else { crate::xone_tex::committed_state(unsafe { *pheap }, init_state) };
     let init_state = if pdesc.is_null() { init_state } else { crate::xone_barrier::initial_state(unsafe { *pdesc }, init_state) };
@@ -527,7 +536,16 @@ unsafe extern "system" fn create_committed_resource(
         heap_words = crate::device_console_fix::pc_heap_words(heap_words);
         heap_words.as_ptr()
     };
+    if subst.is_some() && (pheap.is_null() || !crate::uav_subst::heap_is_gpu_only(heap_words[0], heap_words[1])) {
+        crate::uav_subst::note_cpu_heap("CreateCommittedResource", &desc_copy);
+        subst = None;
+        pc_desc = desc_copy;
+    }
     let hr = unsafe { f(real, pheap, heap_flags, desc_ptr, init_state, pclear, use_riid, ppv) };
+    if let (true, Some(s)) = (hr >= 0 && !ppv.is_null(), subst) {
+        crate::uav_subst::note_substituted("CreateCommittedResource", s, &desc_copy);
+        unsafe { crate::uav_subst::register(real, *ppv, s) };
+    }
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
     }
@@ -542,7 +560,7 @@ unsafe extern "system" fn create_committed_resource(
             None if heap_type == 1 && crate::gpu_va::is_texture_desc(&xdesc) => crate::gpu_va::note_committed_texture(res, xdesc),
             None => {}
         }
-        unsafe { crate::rtcap::register(*ppv, &desc_copy[..0x38], init_state) };
+        unsafe { crate::rtcap::register(*ppv, &pc_desc[..0x38], init_state) };
         if crate::rtcap::enabled() && desc_copy[0] == 1 && !pheap.is_null() {
             let width = u64::from_le_bytes(desc_copy[0x10..0x18].try_into().unwrap());
             unsafe { crate::bindtrace::note_buffer(*ppv, width, *pheap) };
@@ -1495,21 +1513,33 @@ unsafe extern "system" fn create_placed_resource(
     let flags = u32::from_le_bytes(d[0x30..0x34].try_into().unwrap());
     d[0x30..0x34].copy_from_slice(&(flags & 0xFF).to_le_bytes());
     let init_state = crate::xone_barrier::initial_state(u32::from_le_bytes(d[0..4].try_into().unwrap()), init_state);
+    let mut pc = d.clone();
+    let mut subst = unsafe { crate::uav_subst::substitute_desc(real, &mut pc) };
+    if subst.is_some() && !unsafe { crate::uav_subst::heap_object_is_gpu_only(heap) } {
+        crate::uav_subst::note_cpu_heap("CreatePlacedResource", &d);
+        subst = None;
+        pc.copy_from_slice(&d);
+    }
     let da: [u8; 0x38] = d[..0x38].try_into().unwrap();
     let mut hr = match (d[0], ppv.is_null()) {
         (1, false) => unsafe { crate::placed_offset::place_in_heap(real, heap, offset, &da, init_state, pclear, ppv) },
         _ => None,
     }
-    .unwrap_or_else(|| unsafe { f(real, heap, offset, d.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) });
+    .unwrap_or_else(|| unsafe { f(real, heap, offset, pc.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) });
     if hr < 0 && d[0] >= 2 && offset % 0x1000 == 0 && offset % 0x1_0000 != 0 && u64::from_le_bytes(d[8..16].try_into().unwrap()) == 0 {
-        let mut small = d.clone();
+        let mut small = pc.clone();
         small[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
         hr = unsafe { f(real, heap, offset, small.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) };
         if hr >= 0 {
-            d = small;
+            d[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
+            pc = small;
         }
     }
     if hr >= 0 && !ppv.is_null() {
+        if let Some(s) = subst {
+            crate::uav_subst::note_substituted("CreatePlacedResource", s, &d);
+            unsafe { crate::uav_subst::register(real, *ppv, s) };
+        }
         crate::map_x::ensure_patched(unsafe { *ppv });
         unsafe { crate::gpu_va::note_resource(real, *ppv, &d, init_state, None) };
     }
@@ -1518,7 +1548,7 @@ unsafe extern "system" fn create_placed_resource(
         unsafe { crate::bindtrace::note_buffer(*ppv, width, crate::bindtrace::heap_type_of(heap as usize)) };
     }
     if hr >= 0 && !ppv.is_null() && d[0] == 3 {
-        unsafe { crate::rtcap::register(*ppv, &d[..0x38], init_state) };
+        unsafe { crate::rtcap::register(*ppv, &pc[..0x38], init_state) };
     }
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     if hr < 0 || N.fetch_add(1, Ordering::Relaxed) < 4 {
@@ -1555,12 +1585,24 @@ unsafe extern "system" fn create_placed_resource_x(
     let f: unsafe extern "system" fn(*mut c_void, *const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32 =
         unsafe { core::mem::transmute(*real_vtbl(real).add(27)) };
     let xbox_size = crate::gpu_va::xbox_texture_size(&orig);
-    let made = unsafe { crate::placed_offset::create(real, va, &d, xbox_size, init_state, pclear, ppv) }
-        .or_else(|| unsafe { crate::alias::create_placed_x(real, va, &d, xbox_size, init_state, pclear, ppv) });
+    let mut pc = d;
+    let subst = unsafe { crate::uav_subst::substitute_desc(real, &mut pc) };
+    // A substituted texture is larger than the title's address range, so it cannot share a heap
+    // span with the title's neighbouring placements; it always gets its own committed resource.
+    let made = if subst.is_some() {
+        None
+    } else {
+        unsafe { crate::placed_offset::create(real, va, &d, xbox_size, init_state, pclear, ppv) }
+            .or_else(|| unsafe { crate::alias::create_placed_x(real, va, &d, xbox_size, init_state, pclear, ppv) })
+    };
     let hr = match &made {
         Some(m) => m.hr,
-        None => unsafe { f(real, heap.as_ptr(), 0, d.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) },
+        None => unsafe { f(real, heap.as_ptr(), 0, pc.as_ptr(), init_state, pclear, &IID_ID3D12RESOURCE, ppv) },
     };
+    if let (true, Some(s)) = (hr >= 0, subst) {
+        crate::uav_subst::note_substituted("CreatePlacedResourceX", s, &orig);
+        unsafe { crate::uav_subst::register(real, *ppv, s) };
+    }
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     if hr < 0 || n < 12 {
@@ -1581,7 +1623,7 @@ unsafe extern "system" fn create_placed_resource_x(
         unsafe { crate::gpu_va::note_resource(real, res, &d, init_state, Some(va)) };
         crate::placed::register(res, crate::placed::Placed { va, desc: orig, init_state });
         if flags & 0x7 != 0 {
-            unsafe { crate::rtcap::register(res, &d[..0x38], init_state) };
+            unsafe { crate::rtcap::register(res, &pc[..0x38], init_state) };
             static RT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
             if RT.fetch_add(1, Ordering::Relaxed) < 300 {
                 record("d3d12_xs", "CreatePlacedResourceX", &format!(

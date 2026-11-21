@@ -385,6 +385,7 @@ pub fn apply(real_list: *mut c_void) {
             crate::console_slots_cl2::install_cmdlist(&XBOX_VT, &console_defaults);
             crate::cl2_state::install(&XBOX_VT, &console_defaults);
             crate::placed_offset::install_cmdlist(&XBOX_VT);
+            crate::uav_subst::install_cmdlist(&XBOX_VT);
             crate::list_split::install(&XBOX_VT);
             crate::title_heap::install(&XBOX_VT);
             crate::console_slots_mesh::install_cmdlist(&XBOX_VT);

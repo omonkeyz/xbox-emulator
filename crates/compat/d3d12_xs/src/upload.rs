@@ -303,6 +303,8 @@ struct Tracked {
     watch: Vec<u64>,
     pend: Vec<u64>,
     hot: u64,
+    /// The PC texture holds a substitute format (uav_subst.rs): texels are widened while de-tiling.
+    subst: Option<crate::uav_subst::Subst>,
 }
 
 struct Uploader {
@@ -530,10 +532,12 @@ unsafe fn adopt(up: &mut Uploader, res: *mut c_void, p: Placed) -> Result<Tracke
         return Err("GetCopyableFootprints failed".into());
     }
     let fps: Vec<Footprint> = (0..nsubs as usize).map(|i| Footprint { raw: raw[i], rows: rows[i], row_size: row_sizes[i] }).collect();
-    if fps.iter().any(|f| f.row_size % layout.bpe as u64 != 0) {
-        return Err(format!("row size not a multiple of bytes-per-element {}", layout.bpe));
+    let subst = crate::uav_subst::lookup(res).filter(|s| p.format() == s.console && layout.bpe as usize == s.console_bpe());
+    let host_bpe = subst.map_or(layout.bpe as u64, |s| s.host_bpe() as u64);
+    if fps.iter().any(|f| f.row_size % host_bpe != 0) {
+        return Err(format!("row size not a multiple of bytes-per-element {host_bpe}"));
     }
-    Ok(Tracked { res: res as usize, p, layout, fps, total_bytes: total, hashes: vec![None; nsubs as usize], partial: vec![0; nsubs as usize], zero: vec![false; nsubs as usize], watch: vec![0; nsubs as usize], pend: vec![up.pumps + PENDING_PUMPS; nsubs as usize], hot: up.pumps + PENDING_PUMPS })
+    Ok(Tracked { res: res as usize, p, layout, fps, total_bytes: total, hashes: vec![None; nsubs as usize], partial: vec![0; nsubs as usize], zero: vec![false; nsubs as usize], watch: vec![0; nsubs as usize], pend: vec![up.pumps + PENDING_PUMPS; nsubs as usize], hot: up.pumps + PENDING_PUMPS, subst })
 }
 
 struct Staged {
@@ -551,6 +555,7 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
     let now = up.pumps;
     let t = &mut up.tracked[idx];
     let bpe = t.layout.bpe as usize;
+    let host_bpe = t.subst.map_or(bpe, |s| s.host_bpe());
     let mut changed: Vec<(u32, Arc<SubMap>, u64, Option<Arc<Vec<u8>>>)> = Vec::new();
     let mut unreadable = 0;
     let want: Vec<usize> = (0..t.fps.len()).filter(|&s| fresh_only != t.hashes[s].is_some()).collect();
@@ -564,7 +569,7 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
     let Some(whole) = whole else { return None };
     for sub in want.into_iter().map(|s| s as u32) {
         let fp = t.fps[sub as usize];
-        let (w_e, h_e) = ((fp.row_size / bpe as u64) as u32, fp.rows);
+        let (w_e, h_e) = ((fp.row_size / host_bpe as u64) as u32, fp.rows);
         let ck = std::time::Instant::now();
         let map = t.layout.submap(sub, w_e, h_e);
         stage_time(1, ck);
@@ -666,7 +671,7 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         let dst0 = data.add(fp.offset() as usize);
         let pitch = fp.row_pitch() as usize;
         let src0 = match &snap { Some(v) => v.as_ptr().wrapping_sub(map.lo), None => base };
-        detile_rows(dst0, pitch, src0, &map.offs, map.w_e as usize, map.h_e as usize, bpe);
+        detile_rows(dst0, pitch, src0, &map.offs, map.w_e as usize, map.h_e as usize, bpe, t.subst);
         t.hashes[sub as usize] = Some(h);
         t.watch[sub as usize] = now + WATCH_PUMPS;
         t.hot = t.hot.max(now + WATCH_PUMPS);
@@ -716,20 +721,33 @@ fn pool_give(pool: &mut Vec<(u64, usize)>, pool_bytes: &mut u64, size: u64, buf:
     true
 }
 
-unsafe fn detile_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>, bpe: usize) {
+/// `bpe` is the console element size; with `subst` each element is widened to the host format.
+unsafe fn detile_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>, bpe: usize, subst: Option<crate::uav_subst::Subst>) {
     for y in rows {
         let row = (dst0 + y * pitch) as *mut u8;
-        for (x, &o) in offs[y * w_e..(y + 1) * w_e].iter().enumerate() {
-            core::ptr::copy_nonoverlapping((src0 as *const u8).wrapping_add(o as usize), row.add(x * bpe), bpe);
+        let row_offs = &offs[y * w_e..(y + 1) * w_e];
+        match subst {
+            None => {
+                for (x, &o) in row_offs.iter().enumerate() {
+                    core::ptr::copy_nonoverlapping((src0 as *const u8).wrapping_add(o as usize), row.add(x * bpe), bpe);
+                }
+            }
+            Some(s) => {
+                let hb = s.host_bpe();
+                for (x, &o) in row_offs.iter().enumerate() {
+                    let src = core::slice::from_raw_parts((src0 as *const u8).wrapping_add(o as usize), bpe);
+                    s.widen(src, core::slice::from_raw_parts_mut(row.add(x * hb), hb));
+                }
+            }
         }
     }
 }
 
-unsafe fn detile_rows(dst0: *mut u8, pitch: usize, src0: *const u8, offs: &[u32], w_e: usize, h_e: usize, bpe: usize) {
+unsafe fn detile_rows(dst0: *mut u8, pitch: usize, src0: *const u8, offs: &[u32], w_e: usize, h_e: usize, bpe: usize, subst: Option<crate::uav_subst::Subst>) {
     let (d, s) = (dst0 as usize, src0 as usize);
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
     if w_e * h_e * bpe < PARALLEL_DETILE_BYTES || workers == 1 || h_e < 2 {
-        detile_span(d, pitch, s, offs, w_e, 0..h_e, bpe);
+        detile_span(d, pitch, s, offs, w_e, 0..h_e, bpe, subst);
         return;
     }
     let chunk = h_e.div_ceil(workers);
@@ -737,10 +755,10 @@ unsafe fn detile_rows(dst0: *mut u8, pitch: usize, src0: *const u8, offs: &[u32]
         for k in 1..workers {
             let r = (k * chunk).min(h_e)..((k + 1) * chunk).min(h_e);
             if !r.is_empty() {
-                sc.spawn(move || unsafe { detile_span(d, pitch, s, offs, w_e, r, bpe) });
+                sc.spawn(move || unsafe { detile_span(d, pitch, s, offs, w_e, r, bpe, subst) });
             }
         }
-        detile_span(d, pitch, s, offs, w_e, 0..chunk.min(h_e), bpe);
+        detile_span(d, pitch, s, offs, w_e, 0..chunk.min(h_e), bpe, subst);
     });
 }
 
@@ -1116,12 +1134,33 @@ mod zero_watch_tests {
         let mut a = vec![0u8; pitch * h];
         let mut b = vec![0u8; pitch * h];
         unsafe {
-            detile_rows(a.as_mut_ptr(), pitch, src.as_ptr(), &offs, w, h, bpe);
-            detile_span(b.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe);
+            detile_rows(a.as_mut_ptr(), pitch, src.as_ptr(), &offs, w, h, bpe, None);
+            detile_span(b.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe, None);
         }
         assert!(w * h * bpe >= PARALLEL_DETILE_BYTES);
         assert_eq!(a, b);
         assert_eq!(&a[pitch * 3 + 8..pitch * 3 + 12], &src[offs[3 * w + 2] as usize..offs[3 * w + 2] as usize + 4]);
+    }
+
+    #[test]
+    fn substituted_texels_are_widened_while_detiling() {
+        let s = crate::uav_subst::TABLE[0];
+        let (w, h, pitch) = (512usize, 640usize, 512 * 8 + 256);
+        let texels: Vec<u32> = (0..w * h).map(|i| (i as u32).wrapping_mul(2654435761) ^ 0x5a5a_5a5a).collect();
+        let src: Vec<u8> = texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+        let offs: Vec<u32> = (0..w * h).map(|i| (((i * 40503) % (w * h)) * 4) as u32).collect();
+        let mut a = vec![0u8; pitch * h];
+        let mut b = vec![0u8; pitch * h];
+        unsafe {
+            detile_rows(a.as_mut_ptr(), pitch, src.as_ptr(), &offs, w, h, 4, Some(s));
+            detile_span(b.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, 4, Some(s));
+        }
+        assert_eq!(a, b);
+        for (x, y) in [(0usize, 0usize), (7, 3), (511, 639), (200, 100)] {
+            let t = texels[offs[y * w + x] as usize / 4];
+            let got = u64::from_le_bytes(a[y * pitch + x * 8..y * pitch + x * 8 + 8].try_into().unwrap());
+            assert_eq!(got, crate::uav_subst::rgb9e5_to_rgba16f(t), "texel ({x},{y})");
+        }
     }
 
     #[test]
@@ -1174,7 +1213,7 @@ mod detile_speed_tests {
         let mut dst = vec![0u8; pitch * h];
         let t = std::time::Instant::now();
         for _ in 0..10 {
-            unsafe { detile_span(dst.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe) };
+            unsafe { detile_span(dst.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe, None) };
         }
         let per = t.elapsed().as_secs_f64() * 100.0;
         eprintln!("single-thread detile of 1 MB: {per:.2} ms");
