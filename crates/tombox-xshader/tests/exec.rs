@@ -1046,6 +1046,14 @@ fn vector_vop2() {
     for &(a, k, b) in &[(2.0f32, 3.0f32, 1.0f32), (0.5, -4.0, 0.25), (100.0, 1000.0, 0.0)] {
         vc(&mut c, "v_fmamk_f16", &[(1, 0x1111_0000 | f2h(a)), (2, f2h(b))], &[vop2(0x37, 10, v(1), 2), f2h(k)], &[10], &[D16 | f2h(a * k + b)]);
     }
+    // GFX10 VOP2 0x36..0x38 are fused: (1 + 3*2^-10)^2 - 1 keeps the 9*2^-20 product bits that a
+    // separately rounded f16 product (MAD) would drop.
+    let (p3, m1) = (0x3c03u32, f2h(-1.0));
+    let fused = D16 | f2h(h2f(p3) * h2f(p3) - 1.0);
+    vc(&mut c, "v_fmac_f16", &[(10, D16 | m1), (1, p3), (2, p3)], &[vop2(0x36, 10, v(1), 2)], &[10], &[fused]);
+    vc(&mut c, "v_fmac_f16", &[(10, D16 | m1), (1, p3), (2, p3)], &vop3(0x136, 10, [v(1), v(2), 0]), &[10], &[fused]);
+    vc(&mut c, "v_fmamk_f16", &[(1, p3), (2, m1)], &[vop2(0x37, 10, v(1), 2), p3], &[10], &[fused]);
+    vc(&mut c, "v_fmaak_f16", &[(1, p3), (2, p3)], &[vop2(0x38, 10, v(1), 2), m1], &[10], &[fused]);
     for &(a, e, r) in &[(1.5f32, 3i32, 12.0f32), (1.0, -1, 0.5), (1.0, 100, f32::INFINITY), (1.0, -100, 0.0), (-3.0, 0x1_0002, -12.0)] {
         vc(&mut c, "v_ldexp_f16", &[(1, f2h(a)), (2, e as u32)], &[vop2(0x3b, 10, v(1), 2)], &[10], &[D16 | f2h(r)]);
     }
