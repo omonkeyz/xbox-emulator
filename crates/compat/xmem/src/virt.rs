@@ -322,6 +322,40 @@ mod tests {
     }
 
     #[test]
+    fn stale_pfn_in_batch_preserves_both_existing_views() {
+        let base = XMemVirtualAlloc(core::ptr::null_mut(), 2 * XMEM_PAGE, MEM_RESERVE | XMEM_64K_PAGES, 0, PAGE_READWRITE) as usize;
+        assert_ne!(base, 0);
+        let mut addrs = [base as *mut c_void, (base + XMEM_PAGE) as *mut c_void];
+        let mut n = 3;
+        let mut pfns = [0u64; 3];
+        unsafe {
+            assert_eq!(XMemAllocatePhysicalPages(XMEM_64K_PAGES as u64, &mut n, pfns.as_mut_ptr()), 1);
+            assert_eq!(XMemMapPhysicalPages(addrs[0], 2, pfns.as_mut_ptr()), addrs[0]);
+            *(addrs[0] as *mut u32) = 11;
+            *(addrs[1] as *mut u32) = 22;
+            assert_eq!(XMemFreePhysicalPages(1, &mut pfns[2]), 1);
+            let mut replacement = [pfns[1], pfns[2]];
+            for scatter in [false, true] {
+                if scatter {
+                    assert_eq!(XMemMapPhysicalPagesScatter(addrs.as_mut_ptr(), 2, replacement.as_mut_ptr()), 0);
+                } else {
+                    assert!(XMemMapPhysicalPages(addrs[0], 2, replacement.as_mut_ptr()).is_null());
+                }
+                let error = GetLastError();
+                for (address, expected) in addrs.iter().zip([11, 22]) {
+                    let mut info = XMemBasicInformation::default();
+                    XMemVirtualQuery(GetCurrentProcess(), *address, &mut info);
+                    assert_eq!(info.state, MEM_COMMIT);
+                    assert_eq!(*(*address as *const u32), expected);
+                }
+                assert_eq!(error, ERROR_INVALID_PARAMETER);
+            }
+            assert_eq!(crate::phys::release_region(base, 0), Some(1));
+            assert_eq!(XMemFreePhysicalPages(2, pfns.as_mut_ptr()), 1);
+        }
+    }
+
+    #[test]
     fn owned_region_mixes_commit_and_physical_pages() {
         let va = XMemVirtualAlloc(core::ptr::null_mut(), 4 * XMEM_PAGE, MEM_RESERVE | XMEM_64K_PAGES, 0, PAGE_READWRITE) as usize;
         let mut n = 1usize;

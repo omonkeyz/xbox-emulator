@@ -412,10 +412,14 @@ unsafe fn try_map_page(s: &mut State, va: usize, pfn: Option<u64>) -> bool {
 }
 
 pub fn map(pages: &[(usize, Option<u64>)]) -> bool {
-    if let (Some(lo), Some(hi)) = (pages.iter().map(|p| p.0 & !(PAGE - 1)).min(), pages.iter().map(|p| p.0 & !(PAGE - 1)).max()) {
-        crate::epoch::bump_range(lo, hi + PAGE);
-    }
-    let ok = with(|s| {
+    let Some(lo) = pages.iter().map(|p| p.0 & !(PAGE - 1)).min() else { return true };
+    let hi = pages.iter().map(|p| p.0 & !(PAGE - 1)).max().unwrap().saturating_add(PAGE);
+    let result = with(|s| {
+        // Validate under the mapping lock before releasing any existing view.
+        if pages.iter().filter_map(|p| p.1).any(|pfn| s.backing(pfn).is_none()) {
+            return None;
+        }
+        crate::epoch::bump_range(lo, hi);
         let mut ok = true;
         unsafe { runs::release_covered(s, pages) };
         for (i, j) in runs::groups(s, pages) {
@@ -428,11 +432,13 @@ pub fn map(pages: &[(usize, Option<u64>)]) -> bool {
                 }
             }
         }
-        ok
+        Some(ok)
     });
-    if let (Some(lo), Some(hi)) = (pages.iter().map(|p| p.0 & !(PAGE - 1)).min(), pages.iter().map(|p| p.0 & !(PAGE - 1)).max()) {
-        crate::epoch::bump_range(lo, hi + PAGE);
-    }
+    let Some(ok) = result else {
+        unsafe { SetLastError(ERROR_INVALID_PARAMETER) };
+        return false;
+    };
+    crate::epoch::bump_range(lo, hi);
     for &(va, pfn) in pages {
         if pfn.is_some() {
             crate::write_note::committed(va & !(PAGE - 1), PAGE);
