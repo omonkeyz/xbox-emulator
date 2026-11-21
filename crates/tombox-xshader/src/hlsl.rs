@@ -2308,11 +2308,6 @@ impl<'a> Emitter<'a> {
                 }
                 cur = active;
             }
-            if open && self.is_ms() && self.loop_depth == 0 && ins.enc == Enc::Sopp && ins.op == 0x0a {
-                self.line("}");
-                open = false;
-                cur.clear();
-            }
             for o in ins.src.iter().chain(ins.dst.iter()) {
                 self.touch(o);
             }
