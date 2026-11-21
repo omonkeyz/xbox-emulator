@@ -16,6 +16,7 @@ extern "system" {
 }
 
 pub const KIND_GAMEPAD: u32 = 0x0004_0000;
+const KIND_KEYBOARD: u32 = 0x0000_0010;
 const STATUS_CONNECTED: u32 = 0x1;
 const STATUS_INPUT_ENABLED: u32 = 0x2;
 const S_OK: i32 = 0;
@@ -183,6 +184,9 @@ pub fn parse_command(line: &str) -> Result<Option<Cmd>, String> {
 }
 
 static STATE: Mutex<PadState> = Mutex::new(PadState { buttons: 0, axes: [0.0; 6] });
+static HOST: Mutex<PadState> = Mutex::new(PadState { buttons: 0, axes: [0.0; 6] });
+static SCRIPT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TITLE_READS_KEYBOARD: AtomicBool = AtomicBool::new(false);
 static SEQ: AtomicU64 = AtomicU64::new(1);
 static HIST: Mutex<history::History> = Mutex::new(history::History::new());
 static POLLS: AtomicU64 = AtomicU64::new(0);
@@ -191,6 +195,7 @@ static ORIG: [AtomicUsize; 24] = [const { AtomicUsize::new(0) }; 24];
 static REAL_VTBL: AtomicUsize = AtomicUsize::new(0);
 static ORIG_CREATE: AtomicUsize = AtomicUsize::new(0);
 static LOG_N: AtomicU32 = AtomicU32::new(0);
+static HOST_LOG_N: AtomicU32 = AtomicU32::new(0);
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -250,8 +255,85 @@ fn log_limited(func: &str, detail: &str) {
     }
 }
 
-fn snapshot() -> PadState {
-    *STATE.lock().unwrap_or_else(|e| e.into_inner())
+pub fn published() -> PadState {
+    let script = *STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let host = *HOST.lock().unwrap_or_else(|e| e.into_inner());
+    crate::pad_host::merge(script, SCRIPT_ACTIVE.load(Ordering::SeqCst), host)
+}
+
+fn published_with(script: &PadState) -> PadState {
+    let host = *HOST.lock().unwrap_or_else(|e| e.into_inner());
+    crate::pad_host::merge(*script, SCRIPT_ACTIVE.load(Ordering::SeqCst), host)
+}
+
+fn record_published() {
+    let g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let state = published_with(&g).to_bytes();
+    HIST.lock().unwrap_or_else(|e| e.into_inner()).push(history::Entry { seq, ts: now_us(), state });
+}
+
+pub(crate) fn set_host(s: PadState) {
+    let changed = {
+        let mut g = HOST.lock().unwrap_or_else(|e| e.into_inner());
+        let c = *g != s;
+        *g = s;
+        c
+    };
+    if changed {
+        record_published();
+        let n = HOST_LOG_N.fetch_add(1, Ordering::Relaxed);
+        if n < 20 || n % 5000 == 0 {
+            log("host", &format!("host -> buttons={:#06x} lt={:.2} rt={:.2} lx={:.2} ly={:.2} rx={:.2} ry={:.2}{} (#{n})",
+                s.buttons, s.axes[0], s.axes[1], s.axes[2], s.axes[3], s.axes[4], s.axes[5],
+                if published() == s { "" } else { ", masked by the scripted pad" }));
+        }
+    }
+}
+
+pub(crate) fn host_connect(on: bool, why: &str) {
+    if SCRIPT_ACTIVE.load(Ordering::SeqCst) || CONNECTED.load(Ordering::SeqCst) == on {
+        return;
+    }
+    log("host", &format!("{why} -> virtual pad {}", if on { "plugged in" } else { "unplugged" }));
+    set_connected(on);
+}
+
+fn set_script_active(on: bool) {
+    if SCRIPT_ACTIVE.swap(on, Ordering::SeqCst) != on {
+        record_published();
+    }
+}
+
+pub(crate) fn title_reads_keyboard() -> bool {
+    TITLE_READS_KEYBOARD.load(Ordering::SeqCst)
+}
+
+fn note_reading_kind(api: &str, kind: u32) {
+    if kind & KIND_KEYBOARD != 0 && !TITLE_READS_KEYBOARD.swap(true, Ordering::SeqCst) {
+        log(api, &format!("title asks for keyboard readings (kind={kind:#x}); the host keyboard reaches it through GameInput"));
+    }
+}
+
+pub(crate) fn host_has_gamepad() -> bool {
+    let (real, f) = (REAL_THIS.load(Ordering::SeqCst), orig(4));
+    if real == 0 || f == 0 {
+        return false;
+    }
+    unsafe {
+        let f: unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> i32 = core::mem::transmute(f);
+        let mut r: *mut c_void = core::ptr::null_mut();
+        if f(real as *mut c_void, KIND_GAMEPAD, core::ptr::null_mut(), &mut r) < 0 || r.is_null() {
+            return false;
+        }
+        let release: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(*(*(r as *const *const usize)).add(2));
+        release(r);
+        true
+    }
+}
+
+pub fn virtual_device() -> *mut c_void {
+    vdev()
 }
 
 fn update(what: &str, f: impl FnOnce(&mut PadState)) {
@@ -259,7 +341,7 @@ fn update(what: &str, f: impl FnOnce(&mut PadState)) {
         let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut g);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-        HIST.lock().unwrap_or_else(|e| e.into_inner()).push(history::Entry { seq, ts: now_us(), state: g.to_bytes() });
+        HIST.lock().unwrap_or_else(|e| e.into_inner()).push(history::Entry { seq, ts: now_us(), state: published_with(&g).to_bytes() });
         *g
     };
     log("state", &format!("{what} -> buttons={:#06x} lt={:.2} rt={:.2} lx={:.2} ly={:.2} rx={:.2} ry={:.2}",
@@ -297,6 +379,7 @@ unsafe fn init_device() {
     b[0x40..0x60].copy_from_slice(&DEVICE_ID);
     b[0x60..0x64].copy_from_slice(&1u32.to_le_bytes());
     b[0x68..0x6C].copy_from_slice(&KIND_GAMEPAD.to_le_bytes());
+    b[0x6C..0x70].copy_from_slice(&0x3u32.to_le_bytes());
     let vt = &mut *core::ptr::addr_of_mut!(DEVICE_VTBL);
     for s in vt.iter_mut() {
         *s = ret_notimpl as usize;
@@ -307,9 +390,7 @@ unsafe fn init_device() {
     vt[3] = dev_info as usize;
     vt[4] = dev_status as usize;
     vt[5] = dev_battery as usize;
-    for i in [7usize, 8, 10, 11, 12, 13] {
-        vt[i] = ret_zero as usize;
-    }
+    crate::gameinput_ext::install_pad_feedback(vt.as_mut_ptr());
     (*core::ptr::addr_of_mut!(DEVICE)).vtbl = vt.as_ptr();
 }
 
@@ -405,7 +486,7 @@ fn new_reading() -> *mut c_void {
     let (seq, state) = {
         let g = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let seq = SEQ.load(Ordering::SeqCst);
-        let state = g.to_bytes();
+        let state = published_with(&g).to_bytes();
         let mut h = HIST.lock().unwrap_or_else(|e| e.into_inner());
         if h.len() == 0 {
             h.push(history::Entry { seq, ts: now_us(), state });
@@ -529,6 +610,7 @@ type DeviceCb = unsafe extern "system" fn(u64, *mut c_void, *mut c_void, u64, u3
 
 unsafe extern "system" fn gi_current(this: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
     host::count(4);
+    note_reading_kind("GetCurrentReading", kind);
     if out.is_null() {
         return 0x8000_4003u32 as i32;
     }
@@ -559,6 +641,7 @@ unsafe extern "system" fn gi_current(this: *mut c_void, kind: u32, device: *mut 
 
 unsafe extern "system" fn gi_next(this: *mut c_void, reference: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
     host::count(5);
+    note_reading_kind("GetNextReading", kind);
     if device == vdev() || is_reading(reference) {
         return virtual_neighbour(true, reference, kind, out);
     }
@@ -568,6 +651,7 @@ unsafe extern "system" fn gi_next(this: *mut c_void, reference: *mut c_void, kin
 
 unsafe extern "system" fn gi_prev(this: *mut c_void, reference: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
     host::count(6);
+    note_reading_kind("GetPreviousReading", kind);
     if device == vdev() || is_reading(reference) {
         return virtual_neighbour(false, reference, kind, out);
     }
@@ -715,6 +799,7 @@ unsafe extern "system" fn create_hook(out: *mut *mut c_void) -> i32 {
     if hr >= 0 && !out.is_null() && !(*out).is_null() {
         patch_object(*out);
         start_channel();
+        crate::pad_host::start();
     } else {
         log("GameInputCreate", &format!("real GameInputCreate failed hr={hr:#x}"));
     }
@@ -932,6 +1017,7 @@ fn channel_loop() {
                 .collect())
             .unwrap_or_default();
         files.sort();
+        set_script_active(!files.is_empty());
         for f in files {
             let text = std::fs::read_to_string(&f).unwrap_or_default();
             let fname = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -951,6 +1037,7 @@ fn channel_loop() {
             let _ = std::fs::remove_file(&f);
             log("cmd", &format!("{fname}: done (readings served so far: {})", POLLS.load(Ordering::SeqCst)));
         }
+        set_script_active(false);
         std::thread::sleep(Duration::from_millis(15));
     }
 }
@@ -958,6 +1045,28 @@ fn channel_loop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_state_reaches_readings_and_their_history() {
+        let mut s = PadState::default();
+        s.buttons = 0x4;
+        s.axes[2] = 0.5;
+        let before = SEQ.load(Ordering::SeqCst);
+        set_host(s);
+        let r = new_reading() as *mut Reading;
+        let (seq, state) = unsafe { ((*r).seq, (*r).state) };
+        unsafe { drop(Box::from_raw(r)) };
+        let step = HIST.lock().unwrap_or_else(|e| e.into_inner()).next(before, now_us());
+        set_host(PadState::default());
+        assert_eq!(state, s.to_bytes());
+        match step {
+            history::Step::Found(e) => {
+                assert_eq!(e.state, s.to_bytes());
+                assert!(e.seq > before && e.seq <= seq);
+            }
+            other => panic!("host change not in the reading history: {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_press_with_default_and_explicit_ms() {
