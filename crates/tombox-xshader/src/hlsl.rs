@@ -94,7 +94,20 @@ float tb_cubesc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az 
 float tb_cubetc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return -y; if (ay >= ax) return y < 0.0 ? -z : z; return -y; }
 float tb_cubeid(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return z < 0.0 ? 5.0 : 4.0; if (ay >= ax) return y < 0.0 ? 3.0 : 2.0; return x < 0.0 ? 1.0 : 0.0; }
 float3 tb_cube_dir(float s, float t, float face) { float u = (s - 1.5) * 2.0, v = (t - 1.5) * 2.0; int f = (int)round(face); if (f == 0) return float3(1.0, -v, -u); if (f == 1) return float3(-1.0, -v, u); if (f == 2) return float3(u, 1.0, v); if (f == 3) return float3(u, -1.0, -v); if (f == 4) return float3(u, -v, 1.0); return float3(-u, -v, -1.0); }
-int tb_nrm(float v, uint k) { uint b = asuint(v); uint a = b & 0x7fffffffu; if (a < 0x30000000u) return 0; uint sh = 150u - (a >> 23); uint64_t p = (uint64_t)((a & 0x7fffffu) | 0x800000u) * (uint64_t)k; uint64_t q = p >> sh; uint64_t rem = p - (q << sh); uint64_t hf = ((uint64_t)1) << (sh - 1u); if (rem > hf || (rem == hf && (q & 1u) != 0u)) q += 1u; int r = (int)(uint)q; return (b >> 31) != 0u ? -r : r; }
+int tb_nrm(float v, uint k) {
+    // |v| <= 1 and k fits in 16 bits. Split the 24-by-16-bit product at bit 16.
+    uint bits = asuint(v);
+    // The high part has at most 24 bits, so shifting by 25 already rounds to zero.
+    uint shift = min(127u + 23u - 16u - ((bits >> 23) & 0xffu), 25u);
+    uint mantissa = (bits & 0x7fffffu) | 0x800000u;
+    uint low = (mantissa & 0xffffu) * k;
+    uint high = (mantissa >> 16) * k + (low >> 16);
+    uint halfway = 1u << (shift - 1u);
+    uint q = (high + halfway) >> shift;
+    // Adding halfway rounded up. At an exact tie, choose the even neighbor.
+    if ((high & ((1u << shift) - 1u)) == halfway && (low & 0xffffu) == 0u) q &= ~1u;
+    return (bits >> 31) != 0u ? -(int)q : (int)q;
+}
 float tb_rev(float x) { return (abs(x) < 0.5) ? x : x - round(x); }
 float tb_ldexp32(float x, int e) { int k = clamp(e, -330, 330); return (float)((double)x * asdouble(0u, (uint)(k + 1023) << 20)); }
 float tb_rto(double s) { float f = (float)s; if ((double)f != s) { uint u = asuint(f); if (abs((double)f) > abs(s)) u -= 1u; f = asfloat(u | 1u); } return f; }

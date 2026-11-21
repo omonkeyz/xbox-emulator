@@ -247,6 +247,60 @@ mod fxc {
     }
 }
 
+#[cfg(all(test, windows))]
+#[test]
+fn fxc_compiles_sm51_pixel_exports() {
+    use tombox_xshader::meta::{RootParam, RootParamKind, RootRange, RootSig, SigElement};
+    use tombox_xshader::ShaderExtract;
+
+    let sig = |name: &str, sysval, comp_type, mask| SigElement {
+        name: name.into(), index: 0, sysval, comp_type, register: 0, mask, rw_mask: 0,
+    };
+    for normalize in [false, true] {
+        let mut words = vec![
+            0xf408_0004u32, 0xfa00_0000, // s_load_dwordx4 s[0:3], s[8:9], 0 (CBV descriptor)
+            0xbf8c_c07f,                 // s_waitcnt lgkmcnt(0)
+            0xf420_0100, 0xfa00_0000,    // s_buffer_load_dword s4, s[0:3], 0
+            0xbf8c_c07f,                 // s_waitcnt lgkmcnt(0)
+            0x7e00_0204,                 // v_mov_b32 v0, s4
+        ];
+        if normalize {
+            words.extend([0xd769_0000, 0x0002_0100]); // v_cvt_pknorm_u16_f32 v0, v0, v0
+        }
+        words.extend([0xf800_1801, 0, 0xbf81_0000]); // exp mrt0.x, s_endpgm
+        let isa: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let cbv = RootRange { range_type: 2, num: 1, base_register: 0, space: 1, offset_in_table: 0 };
+        let ex = ShaderExtract {
+            stage: Stage::Pixel,
+            shader_model: (6, 0),
+            bitcode_stripped: true,
+            fssm: vec![],
+            entry: Some("main".into()),
+            isa_data: isa.clone(),
+            isa,
+            isa_offset_in_fssm: 0,
+            isa_preamble: [0; 4],
+            has_input_sig: true,
+            has_output_sig: true,
+            has_psv0: false,
+            has_root_sig: true,
+            input_sig: vec![sig("SV_Position", 1, 3, 15)],
+            output_sig: vec![sig("SV_Target", 64, 1, 1)],
+            resources: vec![],
+            gs_info: None,
+            root_sig: Some(RootSig {
+                version: 2,
+                flags: 0,
+                num_static_samplers: 0,
+                params: vec![RootParam { visibility: 0, kind: RootParamKind::Table(vec![cbv]) }],
+            }),
+        };
+        let t = hlsl::translate(&ex).unwrap();
+        assert_eq!(t.profile, "ps_5_1");
+        fxc::compile(&t.hlsl, t.profile).unwrap();
+    }
+}
+
 /// Compile with `fxc.exe` in a child process that is killed after `limit` seconds: an
 /// in-process D3DCompile cannot be cancelled, and some generated shaders take minutes.
 /// Returns Ok(seconds) or Err(reason).

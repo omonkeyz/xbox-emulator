@@ -1242,6 +1242,10 @@ fn vector_vop3() {
         vc(&mut c, "v_cvt_pknorm_i16_f16", &[(1, f2h(a)), (2, f2h(b))], &vop3(0x312, 10, [v(1), v(2), 0]), &[10], &[ri]);
         vc(&mut c, "v_cvt_pknorm_u16_f16", &[(1, f2h(a)), (2, f2h(b))], &vop3(0x313, 10, [v(1), v(2), 0]), &[10], &[ru]);
     }
+    // Adjacent f32 inputs straddle 1.5 after exact scaling. A float multiply rounds the lower product to 1.5.
+    for (m, op, bits) in [("v_cvt_pknorm_i16_f32", 0x368, 0x3840_0180), ("v_cvt_pknorm_u16_f32", 0x369, 0x37c0_00c0)] {
+        vc(&mut c, m, &[(1, bits), (2, bits + 1)], &vop3(op, 10, [v(1), v(2), 0]), &[10], &[0x0002_0001]);
+    }
     let pk = |lo: f32, hi: f32| f2h(lo) | (f2h(hi) << 16);
     for &((a0, a1), (b0, b1)) in &[((1.0f32, 2.0f32), (3.0f32, 0.5f32)), ((-1.0, 65504.0), (1.0, 65504.0)), ((0.25, -0.25), (0.125, 8.0))] {
         vc(&mut c, "v_pk_add_f16", &[(1, pk(a0, a1)), (2, pk(b0, b1))], &vop3p(0x0f, 10, [v(1), v(2), 0], 0, 3, 0, 0), &[10], &[pk(a0 + b0, a1 + b1)]);
