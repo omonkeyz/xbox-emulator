@@ -12,9 +12,9 @@
    "pct": 95.0
   },
   "rdna2_instructions": {
-   "done": 573,
+   "done": 676,
    "total": 721,
-   "pct": 79.47
+   "pct": 93.76
   },
   "shaders_translated": {
    "done": 105506,

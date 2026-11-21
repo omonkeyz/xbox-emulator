@@ -8,7 +8,7 @@
 |---|---|---|
 | All imported system functions covered | 671/671 | reached |
 | All Direct3D 12.x methods covered | 190/200 | open |
-| All RDNA2 instructions verified | 573/721 | open |
+| All RDNA2 instructions verified | 676/721 | open |
 | All shader stages translated | 6/8 | open |
 | Full title shader sweep translated | 105506/105506 | reached |
 | All Xbox console libraries covered | 2076/2141 | open |
