@@ -187,11 +187,14 @@ pub fn reduced(hlsl: &str) -> String {
 pub struct Fma {
     pub preserve: bool,
     pub any: bool,
+    /// Where the fast helper is off, use the 64-bit integer helper and not the f64 one:
+    /// for devices without 64-bit float shader operations.
+    pub int: bool,
 }
 
 pub fn key(final_hlsl: &str, profile: &str, fma: Fma, extra: &str) -> u128 {
     let r = reduced(final_hlsl);
-    let flags = [fma.preserve as u8, fma.any as u8];
+    let flags = [fma.preserve as u8, fma.any as u8, fma.int as u8];
     let parts: [&[u8]; 7] = [&FORMAT.to_le_bytes(), profile.as_bytes(), crate::dxc::COMPILE_FLAVOR.as_bytes(), &flags, crate::dxc::identity().as_bytes(), extra.as_bytes(), r.as_bytes()];
     let a = fnv(0xcbf2_9ce4_8422_2325, &parts);
     let b = fnv(0x84222325_cbf29ce4 ^ 0x9e37_79b9_7f4a_7c15, &parts);

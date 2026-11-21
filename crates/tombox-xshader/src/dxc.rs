@@ -131,7 +131,13 @@ pub fn compile_with(hlsl: &str, profile: &str, extra: &[&str]) -> Result<Vec<u8>
 }
 
 pub fn compile_fma(hlsl: &str, profile: &str, fma: crate::shader_cache::Fma, extra: &[&str]) -> Result<Vec<u8>, String> {
-    let with = |on: bool| -> Vec<&str> { if on { extra.iter().copied().chain(["-D", "TB_FAST_FMA"]).collect() } else { extra.to_vec() } };
+    let with = |on: bool| -> Vec<&str> {
+        match (on, fma.int) {
+            (true, _) => extra.iter().copied().chain(["-D", "TB_FAST_FMA"]).collect(),
+            (false, true) => extra.iter().copied().chain(["-D", "TB_INT_FMA"]).collect(),
+            (false, false) => extra.to_vec(),
+        }
+    };
     let minor = profile.rsplit('_').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
     if minor < 2 {
         return compile_args(hlsl, profile, &[], &with(fma.any));

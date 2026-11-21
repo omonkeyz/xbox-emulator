@@ -364,7 +364,8 @@ fn fma_mode() -> tombox_xshader::shader_cache::Fma {
         record("d3d12_xs", "shader_xlat", &format!(
             "fma probe ({}, {:.0} ms, {}): fast hardware fma for denorm-preserve shaders {}, for denorm-any shaders {} [{}]; cache {}",
             p.adapter, t0.elapsed().as_secs_f64() * 1000.0, if p.cached { "cached result" } else { "measured" },
-            if p.fma.preserve { "ON" } else { "off (exact f64 path)" }, if p.fma.any { "ON" } else { "off (exact f64 path)" }, p.detail,
+            if p.fma.preserve { "ON" } else if p.fma.int { "off (exact integer path)" } else { "off (exact f64 path)" },
+            if p.fma.any { "ON" } else if p.fma.int { "off (exact integer path)" } else { "off (exact f64 path)" }, p.detail,
             tombox_xshader::shader_cache::pack_path().display()));
         p.fma
     })
