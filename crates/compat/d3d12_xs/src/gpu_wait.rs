@@ -581,6 +581,9 @@ unsafe fn run_steps(queue: *mut c_void, steps: &[Step], lists: &[*mut c_void], e
 mod tests {
     use super::*;
 
+    /// Serialises the tests that share the global condition-fence pool.
+    static COND_POOL_TEST: Mutex<()> = Mutex::new(());
+
     #[test]
     fn comparison_functions_map_like_the_debug_umd() {
         assert_eq!(wait_reg_mem_function(FUNC_LESS), 1);
