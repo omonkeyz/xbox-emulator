@@ -1,10 +1,17 @@
+#[cfg(windows)]
 use std::collections::{BTreeMap, HashSet};
+#[cfg(windows)]
 use std::process::ExitCode;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(windows)]
 use std::sync::Mutex;
+#[cfg(windows)]
 use tombox_xshader::uearchive::{find_archives, lz4_block};
+#[cfg(windows)]
 use tombox_xshader::{dxc, extract, hlsl, runtime_hlsl, Stage};
 
+#[cfg(windows)]
 fn fnv1a(b: &[u8]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for &x in b {
@@ -14,6 +21,7 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
+#[cfg(windows)]
 fn stage_name(s: &Stage) -> &'static str {
     match s {
         Stage::Vertex => "VS",
@@ -28,6 +36,7 @@ fn stage_name(s: &Stage) -> &'static str {
     }
 }
 
+#[cfg(windows)]
 fn parse_src_name(name: &str) -> Option<(u64, [u8; 8])> {
     let stem = name.strip_suffix(".xbox")?;
     let (h, f) = stem.split_once('_')?;
@@ -42,6 +51,7 @@ fn parse_src_name(name: &str) -> Option<(u64, [u8; 8])> {
     Some((hash, rt))
 }
 
+#[cfg(windows)]
 fn containers(data: &[u8], seen: &mut HashSet<u64>, out: &mut Vec<(Vec<u8>, [u8; 8])>) -> usize {
     let mut found = 0;
     let mut p = 0usize;
@@ -66,10 +76,12 @@ fn containers(data: &[u8], seen: &mut HashSet<u64>, out: &mut Vec<(Vec<u8>, [u8;
     found
 }
 
+#[cfg(windows)]
 fn default_src_dir() -> std::path::PathBuf {
     tombox_xshader::shader_cache::src_dir("FortniteClient-XSX-Shipping")
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 struct Tally {
     by_stage: BTreeMap<String, [usize; 5]>,
@@ -78,6 +90,12 @@ struct Tally {
     compile_ms: u128,
 }
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("xprecompile needs Windows");
+}
+
+#[cfg(windows)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut inputs: Vec<String> = Vec::new();

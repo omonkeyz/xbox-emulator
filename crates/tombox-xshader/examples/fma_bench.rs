@@ -1,7 +1,12 @@
-use std::time::Instant;
-use tombox_xshader::{dxc, extract, hlsl};
-
+#[cfg(not(windows))]
 fn main() {
+    eprintln!("fma_bench needs Windows");
+}
+
+#[cfg(windows)]
+fn main() {
+    use std::time::Instant;
+    use tombox_xshader::{dxc, extract, hlsl};
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("usage: fma_bench <shader.dxbc|.xbox>... [--variant file.hlsl] [--save dir]");

@@ -1,13 +1,19 @@
+#[cfg(windows)]
 #[path = "../../tools/xreplay/src/d3d.rs"]
 #[allow(dead_code)]
 mod d3d;
 
+#[cfg(windows)]
 use core::ffi::c_void;
+#[cfg(windows)]
 use d3d::Gpu;
+#[cfg(windows)]
 use tombox_xshader::dxc;
 
+#[cfg(windows)]
 const GROUP: u32 = 256;
 
+#[cfg(windows)]
 fn xs(s: &mut u64) -> u64 {
     *s ^= *s << 13;
     *s ^= *s >> 7;
@@ -15,10 +21,12 @@ fn xs(s: &mut u64) -> u64 {
     *s
 }
 
+#[cfg(windows)]
 fn f(b: u32) -> f32 {
     f32::from_bits(b)
 }
 
+#[cfg(windows)]
 fn gen(n: usize, seed: u64, nan: bool) -> Vec<[u32; 3]> {
     let mut s = seed;
     let mut v = Vec::with_capacity(n);
@@ -98,6 +106,7 @@ fn gen(n: usize, seed: u64, nan: bool) -> Vec<[u32; 3]> {
     v
 }
 
+#[cfg(windows)]
 fn shader(a: &str, b: &str) -> String {
     let a = a.replacen("float tb_fma(", "float tb_fma_a(", 1);
     let b = b.replacen("float tb_fma(", "float tb_fma_b(", 1);
@@ -106,6 +115,7 @@ fn shader(a: &str, b: &str) -> String {
     )
 }
 
+#[cfg(windows)]
 unsafe fn run(g: &mut Gpu, code: &[u8], cases: &[[u32; 3]]) -> Result<Vec<[u32; 2]>, String> {
     let n = cases.len();
     let obase = (n * 12) as u64;
@@ -150,6 +160,12 @@ unsafe fn run(g: &mut Gpu, code: &[u8], cases: &[[u32; 3]]) -> Result<Vec<[u32; 
     Ok(out[obase as usize..].chunks(8).map(|c| [u32::from_le_bytes(c[0..4].try_into().unwrap()), u32::from_le_bytes(c[4..8].try_into().unwrap())]).collect())
 }
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("fma_gpu_diff needs Windows");
+}
+
+#[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
