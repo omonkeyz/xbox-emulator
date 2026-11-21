@@ -118,7 +118,7 @@ fn pack(v: &str, bits: u32, num: Num) -> Result<String, String> {
         Num::Uint if bits == 32 => v.to_string(),
         Num::Uint => format!("min({v}, {mx:#x}u)"),
         Num::Sint if bits == 32 => v.to_string(),
-        Num::Sint => format!("(asuint(clamp(asint({v}), {}, {})) & {mx:#x}u)", -(1i64 << (bits - 1)), (1i64 << (bits - 1)) - 1),
+        Num::Sint => super::sat_int(&format!("asint({v})"), bits),
         Num::Float if bits == 32 => v.to_string(),
         Num::Float if bits == 16 => format!("(f32tof16(asfloat({v})) & 0xffffu)"),
         other => return Err(format!("tbuffer store to a {bits}-bit {other:?} component is not lowered")),
