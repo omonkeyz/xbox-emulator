@@ -1,6 +1,6 @@
 {
  "rdna2_verified": {
-  "source": "emulator crates/tombox-xshader/tests/exec.rs: each opcode translated, compiled with DXC and executed on D3D12 WARP with known inputs; outputs compared against values computed from the RDNA2 ISA definitions; tests/exec_vop/vopc.rs vopc_{f16,f32,f64,i32,u32}: every v_cmp/v_cmpx condition as e32, e64 (abs/neg), SGPR destination, masked lanes and inline constants; vopc_{i16,u16,i64,u64,class_f16}: the 16/64-bit integer and class_f16 compares (OPSEL, inline/literal and SGPR-pair sources)",
+  "source": "emulator crates/tombox-xshader/tests/exec.rs: each opcode translated, compiled with DXC and executed on D3D12 WARP with known inputs; outputs compared against values computed from the RDNA2 ISA definitions; tests/exec_vop/vopc.rs vopc_{f16,f32,f64,i32,u32}: every v_cmp/v_cmpx condition as e32, e64 (abs/neg), SGPR destination, masked lanes and inline constants; vopc_{i16,u16,i64,u64,class_f16}: the 16/64-bit integer and class_f16 compares (OPSEL, inline/literal and SGPR-pair sources); tests/exec_mem: flat_global (FLAT/global byte, short, d16_hi and dword loads/stores in three address forms)",
   "evidence": "v_permlane16_b32 and v_permlanex16_b32 are verified on real hardware (RTX 5060, wave32) with TOMBOX_EXEC_HW=1: tests/exec_vop/lanes.rs permlane_lanes, 128 of 128 32-lane cases bit-exact against the ISA model; WARP runs 4-lane waves so it cannot execute them",
   "updated": "2026-11-21",
   "mnemonics": [
@@ -520,7 +520,19 @@
    "v_cmpx_ne_u16",
    "v_cmpx_ge_u16",
    "v_cmp_class_f16",
-   "v_cmpx_class_f16"
+   "v_cmpx_class_f16",
+   "flat_load_ubyte",
+   "flat_load_sbyte",
+   "flat_load_ushort",
+   "flat_load_sshort",
+   "flat_store_byte",
+   "flat_store_byte_d16_hi",
+   "flat_store_short",
+   "flat_store_short_d16_hi",
+   "flat_store_dword",
+   "flat_store_dwordx2",
+   "flat_store_dwordx4",
+   "flat_store_dwordx3"
   ]
  },
  "updated": "2026-11-21",
