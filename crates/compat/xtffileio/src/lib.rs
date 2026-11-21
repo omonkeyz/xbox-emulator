@@ -8,7 +8,6 @@ pub mod msg;
 pub mod paths;
 pub mod transfer;
 
-#[cfg(fileio_b)]
 pub mod fileio_b;
 
 #[cfg(test)]
@@ -18,7 +17,7 @@ use com::*;
 use core::ffi::c_void;
 
 pub fn operation_table() -> Vec<(u32, OperationFn)> {
-    let mut v: Vec<(u32, OperationFn)> = vec![
+    vec![
         (6, handlers::create_directory_handler),
         (5, handlers::delete_file_handler),
         (2, handlers::get_file_attributes_handler),
@@ -34,10 +33,7 @@ pub fn operation_table() -> Vec<(u32, OperationFn)> {
         (0xe, handlers::application_operations_end_handler),
         (0xf, handlers::package_mount_hold_handler),
         (0x10, handlers::get_storage_device_free_space_handler),
-    ];
-    #[cfg(fileio_b)]
-    v.extend_from_slice(&[
-        (0x11, fileio_b::stream_operation_handler as OperationFn),
+        (0x11, fileio_b::stream_operation_handler),
         (0x19, fileio_b::transfer_files_supported),
         (0x1a, fileio_b::calculate_incremental_changes),
         (0x1b, fileio_b::transfer_files_to_console),
@@ -45,8 +41,7 @@ pub fn operation_table() -> Vec<(u32, OperationFn)> {
         (0x1e, fileio_b::transfer_files_to_console_no_json),
         (0x1f, fileio_b::transfer_files_from_console_no_json),
         (0x1d, fileio_b::get_last_direct_protocol_error),
-    ]);
-    v
+    ]
 }
 
 static BOOT_MOVES: std::sync::Once = std::sync::Once::new();

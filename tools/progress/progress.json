@@ -2867,6 +2867,9 @@
   "tests": []
  },
  "console_pending": {
+  "xtffileio.dll": [
+   "#4"
+  ],
   "xg_xs.dll": [
    "XGDecodeDCC"
   ],

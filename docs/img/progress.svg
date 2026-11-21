@@ -2895,7 +2895,8 @@
 <text x="902.47" y="1795.10" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">xt</text>
 </g>
 <g><title>xtffileio.dll: 0/2 covered; not imported by an analysed title</title>
-<rect x="924.10" y="1780.10" width="23.63" height="30.80" fill="#6e7681"/>
+<rect x="924.10" y="1780.10" width="11.82" height="30.80" fill="#e3b341"/>
+<rect x="935.92" y="1780.10" width="11.82" height="30.80" fill="#6e7681"/>
 <rect x="923.10" y="1779.10" width="25.63" height="32.80" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="928.10" y="1795.10" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">xt</text>
 </g>

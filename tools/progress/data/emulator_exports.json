@@ -3898,11 +3898,11 @@
  "xtffileio.dll": {
   "file": "crates/compat/xtffileio/src/lib.rs",
   "functions": {
-   "#4": "missing",
+   "#4": "implemented",
    "XtfCreateFileIOClient": "missing"
   },
   "notes": {
-   "#4": "XbtpServerEntryPoint (console 0x214c0): checks extension GUID 8a8b4d4c-6da2-4fc1-b78c-3e4515cdf8ed and IID_XBTP_EXTENSION_METADATA_IMPL, XbtpCreateExtensionMetadata, 23 AddFunction calls in console order. Implemented as XtfOrdinal_4 with the 15 fileio-a handlers; not exported yet because the 8 fileio-b handlers (0x11 stream, 0x19-0x1f transfer) are not in src/fileio_b.rs yet; flips to implemented when both agents are done",
+   "#4": "XbtpServerEntryPoint (console 0x214c0): validates the file I/O extension and metadata GUIDs, registers all 23 operations in console order, and returns the queried XBTP metadata interface.",
    "XtfCreateFileIOClient": "client-side factory (console 0x5d70) for the host-side XtfFileIO client object; not part of the fileio-a/fileio-b server task, not ported"
   }
  },

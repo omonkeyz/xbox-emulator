@@ -274,11 +274,12 @@ fn entry_point_checks_guids_and_registers_handlers() {
         let count: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT = core::mem::transmute(vt::<MetadataVtbl>(p).get_handler_count);
         let mut n = 0u32;
         assert_eq!(count(p, &mut n), S_OK);
-        assert_eq!(n as usize, crate::operation_table().len());
+        assert_eq!(n, 23);
         release(p);
     }
     let ids: Vec<u32> = crate::operation_table().iter().map(|e| e.0).collect();
-    assert_eq!(&ids[..15], &[6, 5, 2, 1, 4, 7, 3, 0xa, 0xb, 9, 0xc, 0xd, 0xe, 0xf, 0x10]);
+    assert_eq!(ids, [6, 5, 2, 1, 4, 7, 3, 0xa, 0xb, 9, 0xc, 0xd, 0xe, 0xf, 0x10,
+                     0x11, 0x19, 0x1a, 0x1b, 0x1c, 0x1e, 0x1f, 0x1d]);
 }
 
 #[test]

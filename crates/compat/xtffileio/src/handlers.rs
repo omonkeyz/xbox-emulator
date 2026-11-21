@@ -204,6 +204,9 @@ pub unsafe extern "system" fn package_mount_hold_handler(session: usize, request
             let s = session as *mut c_void;
             hr = if s.is_null() { E_INVALIDARG } else { (vt::<SessionVtbl>(s).send_more_message)(s, msg.0) };
         }
+        if hr >= 0 {
+            hr = HR_FILE_NOT_FOUND;
+        }
     }
     reply_result(hr, response)
 }
