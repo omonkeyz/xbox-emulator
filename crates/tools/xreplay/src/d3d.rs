@@ -85,7 +85,16 @@ impl Gpu {
         }
         let create: unsafe extern "system" fn(*mut c_void, u32, *const Guid, *mut *mut c_void) -> i32 = core::mem::transmute(p);
         let mut device: *mut c_void = core::ptr::null_mut();
-        hr_ok(create(core::ptr::null_mut(), 0xc100, &IID_DEVICE, &mut device), "D3D12CreateDevice")?;
+        // Feature level 12_1 first, then whatever the device reaches. vkd3d-proton reports
+        // a lower level for Mesa's llvmpipe, which is still usable here.
+        let mut hr = -1;
+        for level in [0xc100, 0xc000, 0xb100, 0xb000] {
+            hr = create(core::ptr::null_mut(), level, &IID_DEVICE, &mut device);
+            if hr >= 0 {
+                break;
+            }
+        }
+        hr_ok(hr, "D3D12CreateDevice")?;
         let qd: [u32; 4] = [0, 0, 0, 0];
         let mut queue: *mut c_void = core::ptr::null_mut();
         hr_ok(vcall!(device, 8, fn(*const u32, *const Guid, *mut *mut c_void) -> i32, qd.as_ptr(), &IID_QUEUE, &mut queue), "CreateCommandQueue")?;
