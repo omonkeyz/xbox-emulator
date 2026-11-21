@@ -58,6 +58,7 @@ Counted live by `tools/progress/gen.py`; full table with evidence in [docs/MILES
 - [docs/BLOCKERS.md](docs/BLOCKERS.md) — standing walls
 - [docs/LIBRARY_MAP.md](docs/LIBRARY_MAP.md) — per-library, per-function status (generated)
 - [docs/LIBRARY_DISCOVERY.md](docs/LIBRARY_DISCOVERY.md) — what the dumps contain
+- [docs/RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md) — other public projects and what can be reused from them
 
 ## Credit
 
