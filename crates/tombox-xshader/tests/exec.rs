@@ -705,7 +705,7 @@ fn bfe64(a: u64, b: u32, signed: bool) -> u64 {
     if w == 0 {
         return 0;
     }
-    let x = a >> o;
+    let x = if signed { ((a as i64) >> o) as u64 } else { a >> o };
     if w >= 64 {
         return x;
     }
