@@ -84,7 +84,14 @@ fn thunk_table(pe: &PeFile, table_rva: u32, into: &mut Vec<ImportEntry>, notes: 
             notes.push(format!("import thunk table at rva {table_rva:#x} hit the {MAX_FUNCS_PER_DLL} cap"));
             break;
         }
-        let entry_rva = table_rva + (idx as u32) * 8;
+        // `idx` is capped at MAX_FUNCS_PER_DLL so `idx * 8` cannot overflow, but
+        // a near-u32::MAX table RVA can push the sum past the RVA space. Treat
+        // that as the end of the table rather than panicking (overflow-checks are
+        // on in every profile).
+        let Some(entry_rva) = table_rva.checked_add((idx as u32) * 8) else {
+            notes.push(format!("import thunk table at rva {table_rva:#x} overflows the RVA space"));
+            break;
+        };
         let off = match pe.rva_to_offset(entry_rva) {
             Ok(o) => o,
             Err(_) => {
@@ -109,7 +116,7 @@ fn thunk_table(pe: &PeFile, table_rva: u32, into: &mut Vec<ImportEntry>, notes: 
                 .ok()
                 .and_then(|o| pe.reader().u16_at(o, "import hint").ok())
                 .unwrap_or(0);
-            let name = cstr_rva(pe, hint_rva + 2).unwrap_or_default();
+            let name = cstr_rva(pe, hint_rva.saturating_add(2)).unwrap_or_default();
             into.push(ImportEntry::ByName { hint, name });
         }
         idx += 1;
@@ -128,7 +135,10 @@ pub fn parse_imports(pe: &PeFile, notes: &mut Vec<String>) -> Option<Imports> {
             notes.push(format!("import descriptor table hit the {MAX_DLLS} cap"));
             break;
         }
-        let desc_rva = dir.virtual_address + (i as u32) * 20;
+        let Some(desc_rva) = dir.virtual_address.checked_add((i as u32) * 20) else {
+            notes.push("import descriptor table RVA overflowed the RVA space".into());
+            break;
+        };
         let off = match pe.rva_to_offset(desc_rva) {
             Ok(o) => o,
             Err(_) => {
@@ -179,7 +189,9 @@ pub fn parse_delay_imports(pe: &PeFile, notes: &mut Vec<String>) -> Option<Delay
         if i >= MAX_DLLS {
             break;
         }
-        let desc_rva = dir.virtual_address + (i as u32) * 32;
+        let Some(desc_rva) = dir.virtual_address.checked_add((i as u32) * 32) else {
+            break;
+        };
         let off = pe.rva_to_offset(desc_rva).ok()?;
         let r = pe.reader();
         let attributes = r.u32_at(off, "DELAY.Attributes").ok()?;
@@ -248,7 +260,12 @@ pub fn parse_exports(pe: &PeFile, notes: &mut Vec<String>) -> Option<ExportTable
     let mut named_indices = vec![false; n_funcs];
 
     for k in 0..n_names {
-        let name_ptr_off = match pe.rva_to_offset(addr_names_rva + (k as u32) * 4) {
+        // Every per-entry RVA is computed with checked arithmetic: the strides
+        // (k * 4, k * 2) cannot overflow given the caps on n_names, but a
+        // near-u32::MAX table base can, and overflow-checks are on in all
+        // profiles. A base that overflows is unreachable data, so stop.
+        let Some(name_ptr_rva) = addr_names_rva.checked_add((k as u32) * 4) else { break };
+        let name_ptr_off = match pe.rva_to_offset(name_ptr_rva) {
             Ok(o) => o,
             Err(_) => break,
         };
@@ -257,21 +274,25 @@ pub fn parse_exports(pe: &PeFile, notes: &mut Vec<String>) -> Option<ExportTable
             Err(_) => break,
         };
         let name = cstr_rva(pe, str_rva).unwrap_or_default();
-        let ord_off = match pe.rva_to_offset(addr_ords_rva + (k as u32) * 2) {
+        let Some(ord_ptr_rva) = addr_ords_rva.checked_add((k as u32) * 2) else { break };
+        let ord_off = match pe.rva_to_offset(ord_ptr_rva) {
             Ok(o) => o,
             Err(_) => break,
         };
         let ord_index = r.u16_at(ord_off, "EXPORT ordinal").unwrap_or(0) as u32;
-        let ordinal = ordinal_base + ord_index;
+        let ordinal = ordinal_base.saturating_add(ord_index);
         if (ord_index as usize) < named_indices.len() {
             named_indices[ord_index as usize] = true;
         }
-        // Check forwarder.
-        if let Ok(func_off) = pe.rva_to_offset(addr_funcs_rva + ord_index * 4) {
-            if let Ok(func_rva) = r.u32_at(func_off, "EXPORT func rva") {
-                if func_rva >= exp_lo && func_rva < exp_hi {
-                    let target = cstr_rva(pe, func_rva).unwrap_or_default();
-                    forwarders.push((name.clone(), target));
+        // Check forwarder. The EAT index (ord_index * 4) is bounded by u16, so
+        // only the base add can overflow; a bogus base just means "no forwarder".
+        if let Some(func_rva_ptr) = addr_funcs_rva.checked_add(ord_index * 4) {
+            if let Ok(func_off) = pe.rva_to_offset(func_rva_ptr) {
+                if let Ok(func_rva) = r.u32_at(func_off, "EXPORT func rva") {
+                    if func_rva >= exp_lo && func_rva < exp_hi {
+                        let target = cstr_rva(pe, func_rva).unwrap_or_default();
+                        forwarders.push((name.clone(), target));
+                    }
                 }
             }
         }
@@ -283,10 +304,15 @@ pub fn parse_exports(pe: &PeFile, notes: &mut Vec<String>) -> Option<ExportTable
         if named_indices.get(idx).copied().unwrap_or(false) {
             continue;
         }
-        if let Ok(func_off) = pe.rva_to_offset(addr_funcs_rva + (idx as u32) * 4) {
+        // `idx * 4` is bounded by the n_funcs cap; guard the base add so a
+        // near-u32::MAX AddressOfFunctions cannot overflow (and panic) here.
+        let Some(func_rva_ptr) = addr_funcs_rva.checked_add((idx as u32) * 4) else {
+            continue;
+        };
+        if let Ok(func_off) = pe.rva_to_offset(func_rva_ptr) {
             if let Ok(func_rva) = r.u32_at(func_off, "EXPORT func rva") {
                 if func_rva != 0 {
-                    unnamed_ordinals.push(ordinal_base + idx as u32);
+                    unnamed_ordinals.push(ordinal_base.saturating_add(idx as u32));
                 }
             }
         }
