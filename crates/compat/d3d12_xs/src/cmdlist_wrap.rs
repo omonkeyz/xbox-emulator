@@ -279,6 +279,20 @@ unsafe extern "system" fn copy_resource_owned(this: *mut c_void, dst: *mut c_voi
     f(this, dst, src)
 }
 
+/// Read the active union member of an x64 D3D12_TEXTURE_COPY_LOCATION for the trace.
+unsafe fn copy_location_fields(location: *const u8) -> String {
+    let word = |offset| unsafe { location.add(offset).cast::<u32>().read_unaligned() };
+    match word(8) {
+        0 => format!("type=0 sub={}", word(16)),
+        1 => {
+            let offset = unsafe { location.add(16).cast::<u64>().read_unaligned() };
+            format!("type=1 off={offset:#x} fmt={} {}x{}x{} pitch={}",
+                    word(24), word(28), word(32), word(36), word(40))
+        }
+        kind => format!("type={kind}"),
+    }
+}
+
 /// Xbox slot 83 = CopyTextureRegion with one extra trailing argument.
 ///
 /// Evidence: `FD3D12TextureBase::UpdateTexture` (EXE+0xc7cc5f) and
@@ -295,18 +309,18 @@ unsafe extern "system" fn copy_texture_region_x(
         record("d3d12_xs", "CopyTextureRegionX", "null copy location - ignored");
         return;
     }
-    let q = |p: *const u8, o: usize| core::ptr::read_unaligned(p.add(o) as *const u64);
-    let d = |p: *const u8, o: usize| core::ptr::read_unaligned(p.add(o) as *const u32);
+    let dst_resource = dst.cast::<u64>().read_unaligned();
+    let src_resource = src.cast::<u64>().read_unaligned();
     if n < 6 || flags != 0 {
         record("d3d12_xs", "CopyTextureRegionX", &format!(
-            "#{n} dst{{res={:#x} type={} sub={}}} at ({x},{y},{z}) src{{res={:#x} type={} off={:#x} fmt={} {}x{}x{} pitch={}}} box={src_box:p} flags={flags:#x}",
-            q(dst, 0), d(dst, 8), d(dst, 16), q(src, 0), d(src, 8), q(src, 16), d(src, 24), d(src, 28), d(src, 32), d(src, 36), d(src, 40)));
+            "#{n} dst{{res={dst_resource:#x} {}}} at ({x},{y},{z}) src{{res={src_resource:#x} {}}} box={src_box:p} flags={flags:#x}",
+            copy_location_fields(dst), copy_location_fields(src)));
     }
-    if q(dst, 0) == 0 || q(src, 0) == 0 {
+    if dst_resource == 0 || src_resource == 0 {
         record("d3d12_xs", "CopyTextureRegionX", "null resource in copy location - ignored");
         return;
     }
-    crate::placed::note_gpu_write(q(dst, 0) as *mut c_void);
+    crate::placed::note_gpu_write(dst_resource as *mut c_void);
     let f: unsafe extern "system" fn(*mut c_void, *const u8, u32, u32, u32, *const u8, *const c_void) =
         core::mem::transmute(*REAL_VT_PTR.add(16));
     f(this, dst, x, y, z, src, src_box);
@@ -327,7 +341,18 @@ unsafe extern "system" fn copy_resource_x(this: *mut c_void, dst: *mut c_void, s
 
 #[cfg(test)]
 mod tests {
-    use super::map_slot;
+    use super::{copy_location_fields, map_slot};
+
+    #[test]
+    fn copy_trace_selects_the_active_location_fields() {
+        let describe = |words: &[u32]| unsafe { copy_location_fields(words.as_ptr().cast()) };
+        // The x64 resource and type occupy four DWORDs before the active member.
+        let subresource = [0, 0, 0, 0, 7];
+        assert_eq!(describe(&subresource), "type=0 sub=7");
+        let footprint = [0, 0, 1, 0, 0x200, 1, 28, 16, 8, 2, 256, 0];
+        assert_eq!(describe(&footprint), "type=1 off=0x100000200 fmt=28 16x8x2 pitch=256");
+        assert_eq!(describe(&[0, 0, 9]), "type=9");
+    }
 
     #[test]
     fn xbox_cmdlist_slot_map() {
