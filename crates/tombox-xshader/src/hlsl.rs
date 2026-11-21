@@ -476,7 +476,10 @@ bool tb_cmp_class64(uint lo, uint hi, uint mask) { uint e = (hi >> 20) & 0x7ffu;
 
 fn hi64(o: &Opnd) -> Opnd {
     match o {
-        Opnd::Vgpr(n) => Opnd::Vgpr(n + 1),
+        // v255 has no upper half. A 64-bit operation also carries 32-bit operands, which
+        // may be v255 (`v_cvt_f64_i32 v[5:6], v255`), so this must not overflow: touching
+        // the result is a no-op and reading or writing it is refused.
+        Opnd::Vgpr(n) => n.checked_add(1).map_or(Opnd::Raw(512), Opnd::Vgpr),
         other => hi(other),
     }
 }
@@ -3338,6 +3341,12 @@ impl<'a> Emitter<'a> {
                     }
                     self.line("// (descriptor fetch from root table — resolved statically)");
                     return Ok(());
+                }
+                // Only s_buffer_load_dword..dwordx16 (8..=12) are lowered below. Scratch
+                // loads, stores, atomics and the remaining cache ops are refused here; the
+                // shift would otherwise overflow for them.
+                if !(8..=12).contains(&ins.op) {
+                    return Err("unsupported SMEM op".into());
                 }
                 let n = 1u32 << (ins.op - 8);
                 let base = sreg_num(&d.ok_or("no dst")?).ok_or("bad dst")?;
