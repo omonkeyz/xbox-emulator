@@ -217,3 +217,29 @@ fn texel_type_follows_the_use_of_the_loaded_value() {
     assert!(t.hlsl.contains("Texture2D<float4> tex0 : register(t0);"), "{}", t.hlsl);
     assert!(t.hlsl.contains("float4 t0 = tex0.Load("), "{}", t.hlsl);
 }
+
+/// The same shader must always translate to the same HLSL: the runtime's compiled-shader
+/// cache is keyed by the HLSL text. The loop-flag declarations came from iterating a
+/// `HashMap`, and every `HashMap` gets its own random seed, so repeated translations in one
+/// process differ when a shader has several loops.
+#[test]
+fn loops_translate_deterministically() {
+    let mut words = Vec::new();
+    for s in 0..6u32 {
+        words.extend([
+            0xbe80_0384 | s << 16,     // s_mov_b32 s<s>, 4
+            0x8080_8100 | s << 16 | s, // s_sub_u32 s<s>, s<s>, 1
+            0xbf07_8000 | s,           // s_cmp_lg_u32 s<s>, 0
+            0xbf85_fffd,               // s_cbranch_scc1 back to the s_sub_u32
+        ]);
+    }
+    words.push(S_ENDPGM);
+    let mut ex = shader(Stage::Compute, &words, vec![], vec![], None);
+    ex.isa_preamble = [0, 1, 1, 1];
+    (ex.has_input_sig, ex.has_output_sig) = (false, false);
+    let first = translate(&ex).expect("translate").hlsl;
+    assert_eq!(first.matches("do {").count(), 6, "{first}");
+    for _ in 0..16 {
+        assert!(translate(&ex).expect("translate").hlsl == first, "translation differs between runs");
+    }
+}

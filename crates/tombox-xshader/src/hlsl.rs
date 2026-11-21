@@ -2230,7 +2230,11 @@ impl<'a> Emitter<'a> {
             back.remove(&b);
             target.insert(b, closing);
         }
-        let loops: Vec<(usize, usize)> = heads.iter().map(|(&l, &b)| (l, b)).collect();
+        // Sorted: `heads` is a HashMap, and the order of `loops` decides the order of the
+        // emitted flag declarations. Iteration order would make the HLSL (and with it the
+        // compiled-shader cache key) differ between runs.
+        let mut loops: Vec<(usize, usize)> = heads.iter().map(|(&l, &b)| (l, b)).collect();
+        loops.sort_unstable();
         for &(l1, b1) in &loops {
             for &(l2, b2) in &loops {
                 let disjoint = b1 < l2 || b2 < l1;

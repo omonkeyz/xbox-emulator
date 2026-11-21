@@ -26,13 +26,19 @@ impl Emitter<'_> {
         let d = ins.dst.first().copied();
         let (a, v0, v1) = (ins.src[0], ins.src[1], ins.src[2]);
         let counter = matches!(m.as_str(), "ds_append" | "ds_consume");
-        let addr = if counter {
-            format!("((m0 & 0xffffu) + {off:#x}u)")
+        // GDS M0 = { base[31:16], size[15:0] }, both in bytes (RDNA2 ISA 3.7, 10.5). The
+        // address relative to the base must lie below the size: out of range is a GDS address
+        // range error (3.11), with the LDS rule (10.4.3 applies LDS text to GDS): writes are
+        // discarded and reads return zero (3.6).
+        let rel = if counter {
+            format!("{off:#x}u")
         } else {
             self.touch(&a);
-            format!("((m0 & 0xffffu) + ({}) + {off:#x}u)", r(&a)?)
+            format!("({}) + {off:#x}u", r(&a)?)
         };
-        self.line(&format!("uint t{t}a = {addr} & ~3u; bool t{t}k = (exec_lo & 1u) != 0u && t{t}a < {limit}u; uint t{t} = 0u;"));
+        self.line(&format!(
+            "uint t{t}r = {rel}; uint t{t}a = ((m0 >> 16) + t{t}r) & ~3u; bool t{t}k = (exec_lo & 1u) != 0u && t{t}r < (m0 & 0xffffu) && t{t}a < {limit}u; uint t{t} = 0u;"
+        ));
         let rtn = m.contains("_rtn") || counter || m == "ds_read_b32";
         let op = m.replace("_rtn", "");
         self.touch(&v0);

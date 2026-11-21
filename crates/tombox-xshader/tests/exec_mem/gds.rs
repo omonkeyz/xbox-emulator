@@ -102,7 +102,13 @@ fn init() -> Vec<u32> {
 }
 
 const BASE: u32 = 0x100;
+const SIZE: u32 = 0x1000;
 const OFF: u32 = 8;
+
+/// GDS M0: { base[31:16], size[15:0] } in bytes (RDNA2 ISA 3.7, 10.5).
+fn m0(base: u32, size: u32) -> u32 {
+    base << 16 | size
+}
 
 fn slot(t: u32) -> usize {
     ((BASE + t * 4 + OFF) / 4) as usize
@@ -143,7 +149,7 @@ fn ds_gds_atomics() {
                 continue;
             }
             let code = if rtn { op + 0x20 } else { op };
-            let words = prog(BASE, &gds_op(code, OFF, 1, 2, 4, 10), &[10]);
+            let words = prog(m0(BASE, SIZE), &gds_op(code, OFF, 1, 2, 4, 10), &[10]);
             let name = if rtn { m.replacen("_u32", "_rtn_u32", 1).replacen("_i32", "_rtn_i32", 1).replacen("_b32", "_rtn_b32", 1) } else { m.to_string() };
             let isa: Vec<u8> = gds_op(code, OFF, 1, 2, 4, 10).iter().flat_map(|w| w.to_le_bytes()).collect();
             let dec = tombox_xshader::rdna2::disassemble(&isa)[0].mnemonic.clone();
@@ -198,7 +204,7 @@ fn ds_gds_atomics() {
 #[test]
 fn ds_gds_shared_counters() {
     let g0 = init();
-    let add = prog(0, &gds_op(0x00, 0x40, 13, 2, 0, 0), &[]);
+    let add = prog(m0(0, SIZE), &gds_op(0x00, 0x40, 13, 2, 0, 0), &[]);
     let add = {
         let mut w = vec![vop1(1, 13, ic(0))];
         w.extend_from_slice(&add);
@@ -210,7 +216,7 @@ fn ds_gds_shared_counters() {
     for (op, delta) in [(0x3eu32, 1u32), (0x3d, 0xffff_ffff)] {
         let isa: Vec<u8> = gds_op(op, 0x20, 0, 0, 0, 10).iter().flat_map(|w| w.to_le_bytes()).collect();
         let name = tombox_xshader::rdna2::disassemble(&isa)[0].mnemonic.clone();
-        let words = prog(0x200, &gds_op(op, 0x20, 0, 0, 0, 10), &[10]);
+        let words = prog(m0(0x200, SIZE), &gds_op(op, 0x20, 0, 0, 0, 10), &[10]);
         let (mem, gds) = exec_gds(&words, &g0).unwrap();
         let s = (0x220 / 4) as usize;
         assert_eq!(gds[s], g0[s].wrapping_add(delta.wrapping_mul(T)), "{name}");
@@ -221,18 +227,26 @@ fn ds_gds_shared_counters() {
         assert_eq!(got, want, "{name}");
     }
     let lim = TB_GDS_TITLE_DWORDS * 4;
-    let words = prog(lim - OFF, &gds_op(0x2d, OFF, 1, 2, 0, 10), &[10]);
+    let words = prog(m0(lim - OFF, SIZE), &gds_op(0x2d, OFF, 1, 2, 0, 10), &[10]);
     let (mem, gds) = exec_gds(&words, &g0).unwrap();
     assert!(mem[..T as usize].iter().all(|&v| v == 0));
     assert_eq!(gds, g0);
-    let words = prog(BASE, &gds_op(0x2d, OFF, 1, 2, 0, 10), &[10]);
+    let words = prog(m0(BASE, SIZE), &gds_op(0x2d, OFF, 1, 2, 0, 10), &[10]);
     let (mem, gds) = exec_gds(&words, &g0).unwrap();
     for t in 0..T {
         assert_eq!((gds[slot(t)], mem[t as usize]), (dv(t), g0[slot(t)]));
     }
+    // M0.size bounds the address relative to the base: lanes 32.. are out of range, so their
+    // writes are dropped and they read zero (ISA 3.6, 3.11, 10.4.3).
+    let words = prog(m0(BASE, OFF + 32 * 4), &gds_op(0x2d, OFF, 1, 2, 0, 10), &[10]);
+    let (mem, gds) = exec_gds(&words, &g0).unwrap();
+    for t in 0..T {
+        let want = if t < 32 { (dv(t), g0[slot(t)]) } else { (g0[slot(t)], 0) };
+        assert_eq!((gds[slot(t)], mem[t as usize]), want, "lane {t}");
+    }
     let mut rd = gds_op(0x36, OFF, 1, 0, 0, 10).to_vec();
     rd.extend_from_slice(&gds_op(0x0d, OFF + 0x400, 1, 2, 0, 0));
-    let (mem, gds) = exec_gds(&prog(BASE, &rd, &[10]), &g0).unwrap();
+    let (mem, gds) = exec_gds(&prog(m0(BASE, SIZE), &rd, &[10]), &g0).unwrap();
     for t in 0..T {
         assert_eq!(mem[t as usize], g0[slot(t)]);
     }
