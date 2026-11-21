@@ -29,6 +29,7 @@ pub mod gdk_store;
 pub mod gdk;
 pub mod gamepad;
 pub mod host_input;
+pub mod pad_host;
 pub mod gameinput_ext;
 pub mod online;
 pub mod os_host;

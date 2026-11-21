@@ -21,6 +21,7 @@ if ($lines.Count -eq 0) {
   Write-Host "usage: pad.ps1 'press down' 'press a' | pad.ps1 'press a; wait 500; press b' | pad.ps1 -File script.txt [-Wait]"
   Write-Host "verbs: press|tap <btn>[+<btn>] [ms], hold <btn> <ms>, down <btn>, up <btn>, stick L|R <x> <y> [ms], trigger LT|RT <0..1> [ms], wait <ms>, release, connect, disconnect (the pad plugs itself in on the first command)"
   Write-Host "buttons: A B X Y menu view up down left right LB RB LS RS LT RT LS_up LS_down LS_left LS_right RS_up RS_down RS_left RS_right"
+  Write-Host "host input (a real XInput pad, keyboard WASD/arrows/Space... while the title window is focused) feeds the same pad; a running script, or a scripted 'down' not yet released, masks it (compat-common pad_host.rs)"
   exit 1
 }
 
