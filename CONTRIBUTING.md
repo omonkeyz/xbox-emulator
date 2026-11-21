@@ -41,6 +41,8 @@ cargo test -p <crate>
 
 Some crates also need third-party SDKs (the DirectX Agility SDK, DXC, libopus). Their `build.rs` says which.
 
+From an x64 Visual Studio Developer PowerShell with Rust on `PATH`, run `.\tools\verify\run_xaudio_guest.ps1` to test the title launcher. It builds a guest that calls the emulator's GCXAudioExt DLL and prints the Xbox audio processor mask. It checks the guest output and Windows exit event on two launches, then checks a child that deliberately exits with code 37.
+
 ## Licence
 
 Contributions are accepted under the project licence: MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
