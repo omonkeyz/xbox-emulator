@@ -549,9 +549,30 @@ unsafe extern "system" fn create_committed_resource(
         heap_words = crate::device_console_fix::pc_heap_words(heap_words);
         heap_words.as_ptr()
     };
+    let depth_uav = if pdesc.is_null() { crate::depth_uav::Plan::None } else { crate::depth_uav::plan(&desc_copy[..0x38]) };
+    let title_state = init_state;
+    let init_state = if depth_uav == crate::depth_uav::Plan::None {
+        init_state
+    } else {
+        let d = crate::depth_uav::depth_desc(desc_copy[..0x38].try_into().unwrap());
+        desc_copy[..0x38].copy_from_slice(&d);
+        crate::depth_uav::d_real(init_state)
+    };
     let hr = unsafe { f(real, pheap, heap_flags, desc_ptr, init_state, pclear, use_riid, ppv) };
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
+        let res = unsafe { *ppv };
+        crate::depth_uav::forget(res as usize);
+        match &depth_uav {
+            crate::depth_uav::Plan::Pair(fm) => {
+                let d: [u8; 0x38] = desc_copy[..0x38].try_into().unwrap();
+                if let Err(e) = unsafe { crate::depth_uav::register(real, res, &d, &heap_words, title_state, *fm) } {
+                    crate::depth_uav::refuse(res as usize, &e);
+                }
+            }
+            crate::depth_uav::Plan::Refuse(why) => crate::depth_uav::refuse(res as usize, why),
+            crate::depth_uav::Plan::None => {}
+        }
     }
     if hr >= 0 && !ppv.is_null() && !pdesc.is_null() {
         let heap_type = if pheap.is_null() { 0 } else { unsafe { *pheap } };
@@ -1902,6 +1923,7 @@ pub(crate) fn vtable() -> *const usize {
         crate::cmdlist_validate::hook_device(&mut v);
         crate::title_heap::hook_device(&mut v);
         crate::console_slots_mesh::install_device(&mut v);
+        crate::depth_uav::hook_device(&mut v);
         crate::ecl_probe::install_device(&mut v);
         crate::cbv_raw::hook_device(&mut v);
         Box::leak(v.into_boxed_slice()).as_ptr() as usize

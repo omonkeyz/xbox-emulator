@@ -1531,6 +1531,10 @@ unsafe fn apply_bindings(list: *mut c_void, s: &ListState) {
     }
 }
 
+pub(crate) fn active_queries(list: *mut c_void) -> usize {
+    with(list, |s| if s.suspended { 0 } else { s.queries.len() })
+}
+
 pub(crate) unsafe fn reapply(list: *mut c_void) {
     let s = with(list, |s| s.clone());
     unsafe {

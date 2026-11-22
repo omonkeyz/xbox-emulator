@@ -41,6 +41,16 @@ pub(crate) unsafe fn real_method(slot: usize) -> usize {
     unsafe { *REAL_VT_PTR.add(slot) }
 }
 
+pub(crate) unsafe fn pc_method(list: *mut c_void, slot: usize) -> usize {
+    let vt = unsafe { *(list as *const *const usize) };
+    let xbox = XBOX_VT.as_ptr() as *const usize;
+    if vt == xbox && !unsafe { REAL_VT_PTR }.is_null() {
+        unsafe { *REAL_VT_PTR.add(slot) }
+    } else {
+        unsafe { *vt.add(slot) }
+    }
+}
+
 pub(crate) fn vt_get(i: usize) -> usize {
     XBOX_VT[i].load(Ordering::Relaxed)
 }
@@ -403,6 +413,7 @@ pub fn apply(real_list: *mut c_void) {
             crate::cl_console_fix::install_family_tail(&XBOX_VT);
             crate::resolve_x::install(&XBOX_VT);
             crate::dred_marks::install(&XBOX_VT);
+            crate::depth_uav::install_cmdlist(&XBOX_VT);
             crate::pso_async::install(&XBOX_VT);
             crate::cbv_raw::install_draw_check(&XBOX_VT);
             XBOX_VT[CONSOLE_NULL_SLOT].store(0, Ordering::Relaxed);
