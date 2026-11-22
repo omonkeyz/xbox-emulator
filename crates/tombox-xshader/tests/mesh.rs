@@ -388,10 +388,14 @@ fn bytecode(b: &[u8]) -> Vec<u8> {
     v
 }
 
+// Concurrent WARP mesh render tests intermittently exit with an access violation.
+static WARP_RENDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 unsafe fn render(words: &[u32], groups: u32) -> Result<[u32; 4], String> {
     let t = translate(&ms(words, mesh_info(128, 128, 128, 2), pos_param_outs()))?;
     let msb = dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("{e}\n{}", t.hlsl))?;
     let psb = dxc::compile(PS, "ps_6_5")?;
+    let _warp = std::env::var_os("TOMBOX_EXEC_HW").is_none().then(|| WARP_RENDER.lock().unwrap_or_else(|e| e.into_inner()));
     let (mut gpu, kind) = mesh_gpu();
     eprintln!("mesh render on {kind}");
     let d3d12 = LoadLibraryA(b"d3d12.dll\0".as_ptr());
