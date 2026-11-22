@@ -1355,6 +1355,40 @@ fn bytes_of(b: &[u32]) -> Vec<u8> {
 }
 
 #[test]
+fn mubuf_scalar_byte_offset() {
+    let mut cases = Vec::new();
+    let source = bytes_of(&BUF);
+    for (scalar, vector, immediate, offen) in [(5, 0, 0, false), (0, 4, 2, true), (8, 3, 2, true)] {
+        let offset = (scalar + vector + immediate) as usize;
+        let mut pre = Prog::new();
+        pre.sv(12, scalar).vv(1, vector).vv(4, 0xab);
+        let with_soffset = |opcode| {
+            let mut words = mubuf(opcode, immediate, offen, false, false, 1, 4);
+            words[1] = (words[1] & 0x00ff_ffff) | (12 << 24);
+            words
+        };
+        cases.push(BufCase {
+            m: "buffer_load_ubyte",
+            pre: pre.w.clone(),
+            op: with_soffset(0x08),
+            rt: vec![u32::from(source[offset])],
+            mem: vec![],
+        });
+        let word = offset / 4;
+        let shift = (offset % 4) * 8;
+        let expected = (BUF[word] & !(0xff << shift)) | (0xab << shift);
+        cases.push(BufCase {
+            m: "buffer_store_byte",
+            pre: pre.w,
+            op: with_soffset(0x18),
+            rt: vec![],
+            mem: vec![(word, expected), (word ^ 1, BUF[word ^ 1])],
+        });
+    }
+    run_buf_cases("mubuf_soffset", &cases);
+}
+
+#[test]
 fn buffer_mubuf() {
     let mut cs = Vec::new();
     let by = bytes_of(&BUF);
