@@ -1,4 +1,4 @@
-use super::{d64, f, hi64, name, r, Emitter};
+use super::{d64, f, f16_inline_val, hi64, name, r, Emitter};
 use crate::rdna2::{Enc, Insn, Opnd};
 use std::collections::BTreeSet;
 
@@ -429,7 +429,7 @@ impl Emitter<'_> {
     fn hval(&self, ins: &Insn, i: usize, sel: Option<u32>) -> Result<String, String> {
         let o = ins.src.get(i).ok_or("missing operand")?;
         let base = match o {
-            Opnd::ConstF32(_) => f(o)?,
+            Opnd::ConstF32(x) => f16_inline_val(*x, sel.unwrap_or_else(|| hsel(ins, i)) == 2),
             Opnd::Literal(v) => format!("f16tof32({:#x}u)", v & 0xffff),
             _ => {
                 let hi = sel.unwrap_or_else(|| hsel(ins, i)) == 2;

@@ -260,6 +260,22 @@ fn sat_int(e: &str, bits: u32) -> String {
     format!("(min(asuint(max({e}, -{h})) + {h:#x}u, {:#x}u) ^ {h:#x}u)", (h << 1) - 1)
 }
 
+fn f16_inline(x: f32) -> u32 {
+    if (x - 0.159_154_94).abs() < 1e-7 {
+        return 0x3118;
+    }
+    let b = x.to_bits();
+    ((b >> 16) & 0x8000) | ((((b >> 23) & 0xff) - 112) << 10)
+}
+
+fn f16_inline_val(x: f32, hi: bool) -> String {
+    match (hi, f16_inline(x)) {
+        (true, _) => "0.0".into(),
+        (false, 0x3118) => "f16tof32(0x3118u)".into(),
+        _ => format!("({x:?})"),
+    }
+}
+
 /// Scalar register number of an operand (SGPRs, plus vcc_lo/vcc_hi = 106/107, which SMEM
 /// loads can target directly: `s_buffer_load_dwordx2 vcc_lo, ...`).
 fn sreg_num(o: &Opnd) -> Option<u8> {
@@ -2161,6 +2177,9 @@ impl<'a> Emitter<'a> {
                     // A dynamic SOFFSET register indexes the buffer at run time: size the
                     // cbuffer declaration to the D3D12 maximum (64 KiB = 4096 vec4).
                     let dynamic = (ins.raw.get(1).copied().unwrap_or(0) >> 25) != 0x7d;
+                    if !dynamic && ins.aux.imm < 0 {
+                        return Err(format!("s_buffer_load at {:#x}: negative offset without SOFFSET", ins.offset));
+                    }
                     let end = if dynamic { 4096 * 4 } else { ins.aux.imm as u32 / 4 + n };
                     let mut out: Vec<(u32, Res)> = Vec::new();
                     // A scalar load reads whatever buffer the descriptor names. From the CBV
@@ -3590,10 +3609,10 @@ impl<'a> Emitter<'a> {
                     Some(Res::Buf(slot, is_uav)) => {
                         // Structured buffer read by byte offset (see `tb_sbw_*`).
                         let nm = if is_uav { "ubuf" } else { "sbuf" };
-                        let dynamic = if soff != 0x7d { format!(" + {}", ssrc_name(soff)?) } else { String::new() };
+                        let dynamic = if soff != 0x7d { format!(" + ({} & ~3u)", ssrc_name(soff)?) } else { String::new() };
                         let t = self.tmp;
                         self.tmp += 1;
-                        self.line(&format!("uint t{t} = {:#x}u{dynamic};", ins.aux.imm as u32));
+                        self.line(&format!("uint t{t} = {:#x}u{dynamic};", ins.aux.imm as u32 & !3));
                         for k in 0..n {
                             self.line(&format!("uint t{t}_{k} = tb_sbw_{nm}{slot}(t{t} + {}u);", 4 * k));
                         }
@@ -3607,11 +3626,10 @@ impl<'a> Emitter<'a> {
                     _ => return Err("unresolved constant buffer".into()),
                 };
                 if soff != 0x7d {
-                    // Dynamic byte offset = imm + SGPR[soffset].
                     let so = ssrc_name(soff)?;
                     let t = self.tmp;
                     self.tmp += 1;
-                    self.line(&format!("uint t{t} = ({:#x}u + {so}) >> 2;", ins.aux.imm as u32));
+                    self.line(&format!("uint t{t} = ({:#x}u + ({so} & ~3u)) >> 2;", ins.aux.imm as u32 & !3));
                     // Read all words before writing (the offset register may be a destination).
                     for k in 0..n {
                         self.line(&format!("uint t{t}_{k} = cb{slot}[((t{t} + {k}u) >> 2) & 4095u][(t{t} + {k}u) & 3u];"));
@@ -4241,7 +4259,7 @@ impl<'a> Emitter<'a> {
         let h16 = |o: &Opnd| -> Result<String, String> {
             let hi_sel = ins.enc == Enc::Vop3 && s.iter().position(|x| std::ptr::eq(x, o)).map_or(false, |i| (ins.raw[0] >> (11 + i)) & 1 != 0);
             let mut e = match o {
-                Opnd::ConstF32(_) => f(o)?,
+                Opnd::ConstF32(x) => f16_inline_val(*x, hi_sel),
                 _ if hi_sel => format!("f16tof32(({}) >> 16)", r(o)?),
                 _ => format!("f16tof32(({}) & 0xffffu)", r(o)?),
             };
@@ -4486,7 +4504,10 @@ impl<'a> Emitter<'a> {
             let mut u = Vec::new();
             let mut i = Vec::new();
             for k in 0..n {
-                let x = r(&s[k])?;
+                let x = match &s[k] {
+                    Opnd::ConstF32(x) if m.ends_with("_f16") => format!("{:#x}u", f16_inline(*x)),
+                    o => r(o)?,
+                };
                 if (opsel >> k) & 1 != 0 {
                     u.push(format!("(({x}) >> 16)"));
                     i.push(format!("(asint({x}) >> 16)"));
@@ -4887,7 +4908,7 @@ impl<'a> Emitter<'a> {
             "v_min3_f32" => Some(format!("min(min({}, {}), {})", fa()?, fb()?, fc()?)),
             "v_max3_f32" => Some(format!("max(max({}, {}), {})", fa()?, fb()?, fc()?)),
             "v_med3_f32" => Some(format!(
-                "max(min({0}, {1}), min(max({0}, {1}), {2}))",
+                "((tb_nan({0}) || tb_nan({1}) || tb_nan({2})) ? min(min({0}, {1}), {2}) : max(min({0}, {1}), min(max({0}, {1}), {2})))",
                 fa()?,
                 fb()?,
                 fc()?
@@ -4898,7 +4919,10 @@ impl<'a> Emitter<'a> {
             "v_cvt_f32_ubyte1" => Some(format!("(float)(({a} >> 8) & 0xffu)")),
             "v_cvt_f32_ubyte2" => Some(format!("(float)(({a} >> 16) & 0xffu)")),
             "v_cvt_f32_ubyte3" => Some(format!("(float)(({a} >> 24) & 0xffu)")),
-            "v_cvt_f32_f16" => Some(format!("f16tof32({a})")),
+            "v_cvt_f32_f16" => Some(match &s[0] {
+                Opnd::ConstF32(x) => f16_inline_val(*x, false),
+                _ => format!("f16tof32({a})"),
+            }),
             "v_fract_f32" => Some(format!("tb_fract({})", fa()?)),
             "v_trunc_f32" => Some(format!("tb_trunc({})", fa()?)),
             "v_ceil_f32" => Some(format!("tb_ceil({})", fa()?)),
