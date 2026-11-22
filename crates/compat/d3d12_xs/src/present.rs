@@ -177,17 +177,90 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, w: usize, l: isize) 
     DefWindowProcW(h, msg, w, l)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientRectMode {
+    Window,
+    BackBuffer,
+}
+
+fn parse_client_rect_mode(val: Option<&str>) -> Result<ClientRectMode, String> {
+    match val.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("window") => Ok(ClientRectMode::Window),
+        Some("backbuffer") => Ok(ClientRectMode::BackBuffer),
+        Some(other) => Err(format!("invalid client_rect={other:?} (expected 'window' or 'backbuffer'); using 'window'")),
+    }
+}
+
+fn configured_client_rect_mode() -> ClientRectMode {
+    static MODE: std::sync::OnceLock<ClientRectMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let raw = compat_common::cfg("client_rect");
+        match parse_client_rect_mode(raw.as_deref()) {
+            Ok(m) => m,
+            Err(msg) => {
+                record("d3d12_xs", "window", &msg);
+                ClientRectMode::Window
+            }
+        }
+    })
+}
+
 static TITLE_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static TITLE_HWND: AtomicUsize = AtomicUsize::new(0);
+static OUTPUT_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn output_size() -> Option<(i32, i32)> {
+    let v = OUTPUT_SIZE.load(Ordering::Relaxed);
+    (v != 0).then(|| ((v >> 32) as i32, v as u32 as i32))
+}
+
+unsafe extern "system" fn title_get_client_rect(h: *mut c_void, r: *mut [i32; 4]) -> i32 {
+    let ok = GetClientRect(h, r);
+    if ok != 0 && !r.is_null() && h as usize == TITLE_HWND.load(Ordering::Relaxed) {
+        if let Some((w, hgt)) = output_size() {
+            *r = [0, 0, w, hgt];
+        }
+    }
+    ok
+}
+
+fn scale_point(x: i32, y: i32, client: (i32, i32), out: (i32, i32)) -> (i32, i32) {
+    let sx = if client.0 > 0 { (x as i64 * out.0 as i64 / client.0 as i64) as i32 } else { x };
+    let sy = if client.1 > 0 { (y as i64 * out.1 as i64 / client.1 as i64) as i32 } else { y };
+    (sx, sy)
+}
+
+fn translate_message(msg: u32, w: usize, l: isize, client: (i32, i32), out: (i32, i32)) -> isize {
+    const WM_SIZE: u32 = 0x0005;
+    const SIZE_MINIMIZED: usize = 1;
+    match msg {
+        WM_SIZE if w != SIZE_MINIMIZED => ((out.1 as isize & 0xffff) << 16) | (out.0 as isize & 0xffff),
+        0x0200..=0x020e if msg != 0x020a && msg != 0x020e => {
+            let (x, y) = ((l & 0xffff) as i16 as i32, ((l >> 16) & 0xffff) as i16 as i32);
+            let (x, y) = scale_point(x, y, client, out);
+            (((y as isize) & 0xffff) << 16) | ((x as isize) & 0xffff)
+        }
+        _ => l,
+    }
+}
 
 unsafe extern "system" fn title_wndproc(h: *mut c_void, msg: u32, w: usize, l: isize) -> isize {
     if msg == WM_CLOSE {
         end_title_on_close();
     }
-    CallWindowProcW(TITLE_WNDPROC.load(std::sync::atomic::Ordering::Relaxed), h, msg, w, l)
+    let mut l = l;
+    if let Some(out) = output_size() {
+        if (msg == 0x0005 || (0x0200..=0x020e).contains(&msg)) && h as usize == TITLE_HWND.load(Ordering::Relaxed) {
+            let mut r = [0i32; 4];
+            GetClientRect(h, &mut r);
+            l = translate_message(msg, w, l, (r[2] - r[0], r[3] - r[1]), out);
+        }
+    }
+    CallWindowProcW(TITLE_WNDPROC.load(Ordering::Relaxed), h, msg, w, l)
 }
 
 unsafe fn close_ends_title(hwnd: usize) {
-    if TITLE_WNDPROC.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+    if TITLE_WNDPROC.load(Ordering::Relaxed) != 0 {
         return;
     }
     const GWLP_WNDPROC: i32 = -4;
@@ -196,7 +269,24 @@ unsafe fn close_ends_title(hwnd: usize) {
         record("d3d12_xs", "window", "could not hook the title window's close button");
         return;
     }
-    TITLE_WNDPROC.store(prev, std::sync::atomic::Ordering::Relaxed);
+    TITLE_WNDPROC.store(prev, Ordering::Relaxed);
+}
+
+unsafe fn fix_output_size(hwnd: usize, width: u64, height: u32) {
+    OUTPUT_SIZE.store((width << 32) | height as u64, Ordering::Relaxed);
+    TITLE_HWND.store(hwnd, Ordering::Relaxed);
+    const GWLP_WNDPROC: i32 = -4;
+    if TITLE_WNDPROC.load(Ordering::Relaxed) == 0 {
+        let prev = SetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC, title_wndproc as *const () as isize);
+        if prev != 0 {
+            TITLE_WNDPROC.store(prev, Ordering::Relaxed);
+        }
+    }
+    let user32 = LoadLibraryA(b"user32.dll\0".as_ptr());
+    let real = GetProcAddress(user32, b"GetClientRect\0".as_ptr()) as usize;
+    let n = compat_common::iat::redirect_main_module(real, title_get_client_rect as *const () as usize);
+    record("d3d12_xs", "window", &format!(
+        "client_rect=backbuffer: title window reports {width}x{height} ({n} GetClientRect import slot(s); WM_SIZE and mouse coordinates translated)"));
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -336,6 +426,9 @@ unsafe fn init(queue: *mut c_void, src: *mut c_void) -> Result<State, String> {
     let own = std::env::var("TOMBOX_OWN_WINDOW").map(|v| v == "1").unwrap_or(false);
     let mut hwnd = if own { 0 } else { find_title_window() };
     if hwnd != 0 {
+        if configured_client_rect_mode() == ClientRectMode::BackBuffer {
+            fix_output_size(hwnd, width, height);
+        }
         (cw, ch) = fit_window_to_aspect(hwnd, width, height);
         close_ends_title(hwnd);
         let mut cls = [0u16; 128];
@@ -1053,5 +1146,55 @@ mod close_tests {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.code(), Some(0), "child exit; stdout: {stdout}");
         assert!(!stdout.contains("test result"), "child finished normally: {stdout}");
+    }
+}
+
+#[cfg(test)]
+mod output_size_tests {
+    use super::*;
+
+    fn lp(x: i32, y: i32) -> isize {
+        (((y as isize) & 0xffff) << 16) | ((x as isize) & 0xffff)
+    }
+
+    #[test]
+    fn client_rect_config_validates_values() {
+        assert_eq!(parse_client_rect_mode(None).unwrap(), ClientRectMode::Window);
+        assert_eq!(parse_client_rect_mode(Some("")).unwrap(), ClientRectMode::Window);
+        assert_eq!(parse_client_rect_mode(Some("window")).unwrap(), ClientRectMode::Window);
+        assert_eq!(parse_client_rect_mode(Some("WINDOW")).unwrap(), ClientRectMode::Window);
+        assert_eq!(parse_client_rect_mode(Some("backbuffer")).unwrap(), ClientRectMode::BackBuffer);
+        assert_eq!(parse_client_rect_mode(Some(" BackBuffer ")).unwrap(), ClientRectMode::BackBuffer);
+        let err = parse_client_rect_mode(Some("stretched")).unwrap_err();
+        assert!(err.contains("client_rect"), "{err}");
+    }
+
+    #[test]
+    fn wm_size_reports_the_output_size_unless_minimized() {
+        let (client, out) = ((1600, 874), (1904, 1041));
+        assert_eq!(translate_message(0x0005, 0, lp(1600, 874), client, out), lp(1904, 1041));
+        assert_eq!(translate_message(0x0005, 2, lp(1920, 1009), client, out), lp(1904, 1041), "maximized");
+        assert_eq!(translate_message(0x0005, 1, 0, client, out), 0, "minimized stays 0x0");
+    }
+
+    #[test]
+    fn client_mouse_coordinates_scale_to_the_output() {
+        let (client, out) = ((1600, 874), (1904, 1041));
+        assert_eq!(translate_message(0x0200, 0, lp(800, 437), client, out), lp(952, 520));
+        assert_eq!(translate_message(0x0201, 0, lp(1599, 873), client, out), lp(1902, 1039));
+        assert_eq!(translate_message(0x0200, 0, lp(-16, -8), client, out), lp(-19, -9));
+    }
+
+    #[test]
+    fn wheel_and_other_messages_are_untouched() {
+        let (client, out) = ((1600, 874), (1904, 1041));
+        for msg in [0x020a, 0x020e, 0x0100, 0x0010] {
+            assert_eq!(translate_message(msg, 0, lp(100, 200), client, out), lp(100, 200), "msg {msg:#x}");
+        }
+    }
+
+    #[test]
+    fn zero_client_area_leaves_coordinates() {
+        assert_eq!(scale_point(5, 7, (0, 0), (1904, 1041)), (5, 7));
     }
 }
