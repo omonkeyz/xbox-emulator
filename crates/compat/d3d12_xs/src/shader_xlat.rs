@@ -223,16 +223,13 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], edit: Option
         let dir = std::env::temp_dir().join("tombox_shaders");
         let inflight = dir.join(format!("inflight_{hash:016x}.dxbc"));
         let fma = fma_mode();
-        let k = tombox_xshader::shader_cache::key(&t.hlsl, &profile, fma, "");
-        let hit = tombox_xshader::shader_cache::contains(k);
-        if !hit {
+        let r = tombox_xshader::shader_cache::compile_cached_with(&t.hlsl, &profile, fma, &[], || {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&inflight, blob);
-        }
-        let r = tombox_xshader::shader_cache::compile_cached(&t.hlsl, &profile, fma, &[]);
-        if !hit {
+            let compiled = tombox_xshader::dxc::compile_fma(&t.hlsl, &profile, fma, &[]);
             let _ = std::fs::remove_file(&inflight);
-        }
+            compiled
+        });
         return match r {
             Ok(c) => {
                 note_timing(xlat_ms, c.lookup_ms, c.dxc_ms, c.source == tombox_xshader::shader_cache::Source::Pack);
