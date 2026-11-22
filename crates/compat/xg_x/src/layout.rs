@@ -334,6 +334,7 @@ pub struct Plane {
     pub offset: u64,
     pub align: u64,
     pub bpe: u32,
+    pub usage: u32,
     pub mips: Vec<Mip>,
 }
 
@@ -533,7 +534,7 @@ fn plain(d: &Desc, fi: Fi, hw: usize) -> Option<Plane> {
         balign = balign.max(a);
         prevp = pw;
     }
-    Some(Plane { size: acc, offset: 0, align: balign, bpe: bpe as u32, mips })
+    Some(Plane { size: acc, offset: 0, align: balign, bpe: bpe as u32, usage: 1, mips })
 }
 
 fn empty(d: &Desc, zero: bool) -> Layout {
@@ -552,11 +553,118 @@ pub fn is_depth_stencil_planar(dxgi: u32) -> bool {
     ROWS.get(dxgi as usize).is_some_and(|r| r[4] == 1 && r[5] != 0 && r[6] != 0)
 }
 
+pub fn htile_plane(d: &Desc) -> Plane {
+    let da = d.depth_or_array.max(1) as u64;
+    let (pw, ph) = if da > 1 {
+        (al(d.width, 512), al(d.height as u64, 512))
+    } else {
+        (al(d.width, 128), al(d.height as u64, 64))
+    };
+    let slice_size = al(pw * ph / 16, 0x4000);
+    let htile_size = slice_size * da;
+    let m = Mip {
+        size: htile_size,
+        offset: 0,
+        slice: slice_size,
+        pitch_pixels: pw as u32,
+        pitch_bytes: 0,
+        align: 0x800,
+        padded_w: pw as u32,
+        padded_h: ph as u32,
+        padded_d: da as u32,
+        width: d.width as u32,
+        height: d.height,
+        depth: da as u32,
+        samples: 1,
+        mode: 0,
+        q48: 0,
+        q50: 0,
+        thick: 1,
+        kind: 0,
+        macro_w: pw as u32,
+        macro_h: ph as u32,
+    };
+    Plane {
+        size: htile_size,
+        offset: 0,
+        align: 0x800,
+        bpe: 0,
+        usage: 4,
+        mips: vec![m],
+    }
+}
+
+pub fn is_depth_format(dxgi: u32) -> bool {
+    matches!(dxgi, 19..=22 | 39..=41 | 44..=47 | 53..=56 | 118..=120)
+}
+
 pub fn compute_depth_msaa(d: &Desc) -> Option<Layout> {
-    if d.samples <= 1 || d.dimension != 3 || d.mips != 1 || !is_depth_stencil_planar(d.dxgi) {
+    if d.dimension != 3 || d.mips != 1 || !is_depth_stencil_planar(d.dxgi) {
         return None;
     }
-    compute_with(d, true)
+    let hw = hw_index();
+    let Kind::Planar(f4, f8, _) = fmt_info(d.dxgi, d.dimension, false)? else { return None };
+    let mut planes: Vec<Option<Plane>> = Vec::new();
+    let htile = htile_plane(d);
+    let mut acc = htile.size;
+    let mut align = htile.align;
+    planes.push(Some(htile));
+
+    let mut depth_plane_opt = None;
+    for (i, pf) in [f4, f8].into_iter().enumerate() {
+        if pf == 0 {
+            planes.push(None);
+            continue;
+        }
+        let mut pd = *d;
+        pd.dxgi = pf;
+        let Kind::Plain(fi) = fmt_info(pf, d.dimension, true)? else { return None };
+        let mut p = plain(&pd, fi, hw)?;
+        p.usage = if i == 0 { 7 } else { 8 };
+        acc = al(acc, p.align);
+        p.offset = acc;
+        acc += p.size;
+        align = align.max(p.align);
+        if i == 0 {
+            depth_plane_opt = Some((Format { bpe: p.bpe, block: fi.padw as u32 }, p.mips.clone()));
+        }
+        planes.push(Some(p));
+    }
+    let mut l = empty(d, false);
+    l.size = acc;
+    l.align = align;
+    if let Some((fmt, mips)) = depth_plane_opt {
+        l.fmt = fmt;
+        l.mips = mips;
+    }
+    l.planes = planes;
+    Some(l)
+}
+
+pub fn compute_depth(d: &Desc) -> Option<Layout> {
+    if d.dimension != 3 || d.mips != 1 || !is_depth_format(d.dxgi) {
+        return None;
+    }
+    if is_depth_stencil_planar(d.dxgi) {
+        return compute_depth_msaa(d);
+    }
+    let hw = hw_index();
+    let Kind::Plain(fi) = fmt_info(d.dxgi, d.dimension, false)? else { return None };
+    let mut p = plain(d, fi, hw)?;
+    p.usage = 7;
+    let htile = htile_plane(d);
+    let mut acc = htile.size;
+    let align = htile.align.max(p.align);
+    acc = al(acc, p.align);
+    p.offset = acc;
+    acc += p.size;
+    let mut l = empty(d, false);
+    l.size = acc;
+    l.align = align;
+    l.fmt = Format { bpe: p.bpe, block: fi.padw as u32 };
+    l.mips = p.mips.clone();
+    l.planes = vec![Some(htile), Some(p)];
+    Some(l)
 }
 
 fn compute_with(d: &Desc, msaa_planes: bool) -> Option<Layout> {
@@ -603,6 +711,11 @@ fn compute_with(d: &Desc, msaa_planes: bool) -> Option<Layout> {
                 }
                 let Kind::Plain(fi) = fmt_info(pf, d.dimension, true)? else { return None };
                 let mut p = plain(&pd, fi, hw)?;
+                if video {
+                    p.usage = if i == 0 { 5 } else { 6 };
+                } else {
+                    p.usage = if i == 0 { 7 } else { 8 };
+                }
                 if planes.iter().all(|p| p.is_none()) {
                     block = fi.padw as u32;
                 }
@@ -712,16 +825,14 @@ pub fn write_layout(l: &Layout, out: &mut [u8]) {
     put64(out, 0, l.size);
     put64(out, 8, l.align);
     if !l.planes.is_empty() {
-        let nm = l.planes.iter().flatten().map(|p| p.mips.len()).max().unwrap_or(0);
+        let active_planes: Vec<&Plane> = l.planes.iter().flatten().collect();
+        let nm = active_planes.iter().map(|p| p.mips.len()).max().unwrap_or(0);
         put32(out, 0x10, nm as u32);
-        put32(out, 0x14, 2);
-        put32(out, 0x18, 5);
-        for (i, p) in l.planes.iter().enumerate() {
-            if let Some(p) = p {
-                write_plane(out, 0x20 + i * PLANE_PITCH, (p.size, p.offset, p.align, p.bpe), &p.mips);
-            }
+        put32(out, 0x14, active_planes.len() as u32);
+        for (i, p) in active_planes.iter().enumerate() {
+            put32(out, 0x18 + i * PLANE_PITCH, p.usage);
+            write_plane(out, 0x20 + i * PLANE_PITCH, (p.size, p.offset, p.align, p.bpe), &p.mips);
         }
-        put32(out, 0x20 + PLANE_STRIDE, 6);
         return;
     }
     put32(out, 0x10, l.mips.len() as u32);
