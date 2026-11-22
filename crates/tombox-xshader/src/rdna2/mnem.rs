@@ -319,7 +319,8 @@ pub fn mubuf(op: u32) -> Option<&'static str> {
     Some(match op {
         0x00 => "buffer_load_format_x", 0x01 => "buffer_load_format_xy",
         0x02 => "buffer_load_format_xyz", 0x03 => "buffer_load_format_xyzw",
-        0x04 => "buffer_store_format_x", 0x07 => "buffer_store_format_xyzw",
+        0x04 => "buffer_store_format_x", 0x05 => "buffer_store_format_xy",
+        0x06 => "buffer_store_format_xyz", 0x07 => "buffer_store_format_xyzw",
         0x08 => "buffer_load_ubyte", 0x09 => "buffer_load_sbyte", 0x0a => "buffer_load_ushort",
         0x0b => "buffer_load_sshort", 0x0c => "buffer_load_dword", 0x0d => "buffer_load_dwordx2",
         0x0e => "buffer_load_dwordx4", 0x0f => "buffer_load_dwordx3", 0x18 => "buffer_store_byte",
@@ -399,7 +400,7 @@ pub fn lookup(enc: Enc, op: u32) -> Option<&'static str> {
             0x18 => Some("ds_gws_sema_release_all"), 0x19 => Some("ds_gws_init"), 0x1a => Some("ds_gws_sema_v"),
             0x1b => Some("ds_gws_sema_br"), 0x1c => Some("ds_gws_sema_p"), 0x1d => Some("ds_gws_barrier"),
             0x3d => Some("ds_consume"), 0x3e => Some("ds_append"), 0x3f => Some("ds_ordered_count"),
-            0x1e => Some("ds_write_b8"), 0x1f => Some("ds_write_b16"),
+            0x1e => Some("ds_write_b8"), 0x1f => Some("ds_write_b16"), 0xa1 => Some("ds_write_b16_d16_hi"),
             0x39 => Some("ds_read_i8"), 0x3a => Some("ds_read_u8"), 0x3b => Some("ds_read_i16"), 0x3c => Some("ds_read_u16"),
             _ => None,
         },

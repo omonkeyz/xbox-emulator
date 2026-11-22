@@ -1547,6 +1547,25 @@ fn buffer_mubuf() {
     for &idx in &[0u32, 2, 5] {
         cs.push(BufCase { m: "buffer_store_format_x", pre: pre(idx, 0xc0ff_ee00, 0), op: mubuf(0x04, 0, false, true, false, 1, 4), rt: vec![], mem: vec![(idx as usize, 0xc0ff_ee00), ((idx as usize + 1) % 8, BUF[(idx as usize + 1) % 8])] });
     }
+    let pre_u4 = |idx: u32, x: u32, y: u32, z: u32| {
+        let mut p = Prog::new();
+        p.vv(1, idx).vv(4, x).vv(5, y).vv(6, z).raw(&[vop2(0x25, 4, ic(0), 4)]);
+        p.w
+    };
+    cs.push(BufCase {
+        m: "buffer_store_format_xy",
+        pre: pre_u4(0, 0x1122_3344, 0x5566_7788, 0x99aa_bbcc),
+        op: mubuf(0x05, 0, false, true, false, 1, 4),
+        rt: vec![],
+        mem: vec![(0, 0x1122_3344), (1, 0x5566_7788), (2, 0), (3, 0), (4, BUF[4])],
+    });
+    cs.push(BufCase {
+        m: "buffer_store_format_xyz",
+        pre: pre_u4(1, 0xdead_0001, 0xbeef_0002, 0xcafe_0003),
+        op: mubuf(0x06, 0, false, true, false, 1, 4),
+        rt: vec![],
+        mem: vec![(0, BUF[0]), (4, 0xdead_0001), (5, 0xbeef_0002), (6, 0xcafe_0003), (7, 0)],
+    });
     type At = fn(u32, u32, u32) -> u32;
     let atoms: [(&'static str, u32, At); 9] = [
         ("buffer_atomic_sub", 0x33, |m, s, _| m.wrapping_sub(s)),

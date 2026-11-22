@@ -122,6 +122,22 @@ fn ds_lds_compute() {
             cs.push(cc("ds_write_b16", w, b.clone(), &[10], &move |t| vec![f(dv(nb(t)))]));
             cs.push(cc(m, r, b, &[10], &move |t| vec![f(dv(nb(t)))]));
         }
+        let base_off = off & !3;
+        for half_off in [base_off, base_off + 2] {
+            let w_init = ds(0x0d, base_off, 1, 4, 0, 0);
+            let w_hi = ds(0xa1, half_off, 1, 2, 0, 0);
+            let r_full = ds(0x36, base_off, 3, 0, 0, 10);
+            let mut b = w_init.to_vec();
+            b.extend_from_slice(&w_hi);
+            b.extend_from_slice(&r_full);
+            let hi_shift = (half_off & 2) * 8;
+            cs.push(cc("ds_write_b16_d16_hi", w_hi, b, &[10], &move |t| {
+                let n = nb(t);
+                let orig = ev(n);
+                let hi = dv(n) >> 16;
+                vec![(orig & !(0xffffu32 << hi_shift)) | (hi << hi_shift)]
+            }));
+        }
     }
     type At = fn(u32, u32) -> u32;
     let atoms: [(&'static str, &'static str, u32, At); 6] = [
