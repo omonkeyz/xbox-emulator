@@ -156,3 +156,40 @@ pub unsafe fn query_connected_standby_ex(session: Obj, in_standby: *mut i32, ins
 pub unsafe fn query_connected_standby(session: Obj, in_standby: *mut i32, instant_on: *mut i32) -> HRESULT {
     query_connected_standby_ex(session, in_standby, instant_on, &mut 0)
 }
+
+// ConsoleControlClient::GetConfigSettings (19041 RVA 0x1f60), after opening the session.
+pub unsafe fn get_config_settings(session: Obj, callback: Obj) -> HRESULT {
+    if callback.is_null() {
+        return E_INVALIDARG;
+    }
+    let result = (|| {
+        use xtfmsg::com::{array, slot};
+        use crate::op::{Bstr, get_string};
+
+        let reply = request_status(session, crate::OP_GET_ALL_SETTINGS)?;
+        let mut settings = Com::null();
+        check(json::get_object(reply.get(), wide("SettingsArrayObject").as_ptr(), settings.put()))?;
+        let mut entries = Com::null();
+        check(json::get_array(settings.get(), wide("AllSettings").as_ptr(), entries.put()))?;
+        let mut count = 0;
+        let mut hr = array::get_count(entries.get(), &mut count);
+        check(hr)?;
+        let visit: unsafe extern "system" fn(Obj, *const [*const u16; 2]) -> HRESULT =
+            core::mem::transmute(slot(callback, 3));
+        for index in 0..count {
+            let mut entry = Com::null();
+            check(array::get_object(entries.get(), index, entry.put()))?;
+            let mut name = Bstr::null();
+            let mut value = Bstr::null();
+            // Missing strings reach the callback as null pointers on the console.
+            get_string(entry.get(), "SettingName", &mut name);
+            get_string(entry.get(), "SettingValue", &mut value);
+            hr = visit(callback, &[name.ptr(), value.ptr()]);
+            if hr != S_OK {
+                break;
+            }
+        }
+        Ok(hr)
+    })();
+    result.unwrap_or_else(|hr| hr)
+}

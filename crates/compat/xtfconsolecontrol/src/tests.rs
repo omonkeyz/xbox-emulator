@@ -861,3 +861,32 @@ fn config_set_validates_keys_and_distinguishes_transport_from_operation_errors()
         assert_eq!(prior.text().as_deref(), Some("previous"));
     }
 }
+
+#[test]
+fn config_settings_callback_receives_ordered_pairs_and_can_stop_enumeration() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    #[repr(C)]
+    struct Visitor {
+        table: *const usize,
+        rows: Vec<(String, Option<String>)>,
+        stop_after: usize,
+    }
+    unsafe extern "system" fn visit(obj: Obj, pair: *const [*const u16; 2]) -> HRESULT {
+        let visitor = &mut *obj.cast::<Visitor>();
+        let [name, value] = *pair;
+        visitor.rows.push((from_wide(name), (!value.is_null()).then(|| from_wide(value))));
+        i32::from(visitor.rows.len() == visitor.stop_after)
+    }
+    let _g = guard();
+    unsafe {
+        let data = r#"{"SettingsArrayObject":{"AllSettings":[{"SettingName":"first","SettingValue":"one"},{"SettingName":"second"},{"SettingName":"third","SettingValue":"three"}]}}"#;
+        let raw = client_session(S_OK, S_OK, 0, Some(data));
+        let session = Com(as_obj(raw));
+        assert_eq!(client::get_config_settings(session.get(), core::ptr::null_mut()), E_INVALIDARG);
+        let table = [0, 0, 0, visit as *const () as usize];
+        let mut visitor = Visitor { table: table.as_ptr(), rows: Vec::new(), stop_after: 2 };
+        assert_eq!(client::get_config_settings(session.get(), (&mut visitor as *mut Visitor).cast()), 1);
+        assert_eq!(visitor.rows, [("first".into(), Some("one".into())), ("second".into(), None)]);
+        assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_GET_ALL_SETTINGS);
+    }
+}
