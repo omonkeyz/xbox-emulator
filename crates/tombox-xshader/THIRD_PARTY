@@ -1,0 +1,3 @@
+The PS09 shader binding metadata reader and its synthetic tests come from
+it_komarov in TomBox (MIT OR Apache-2.0).
+https://github.com/drycheetah84/TomBox/commit/9a2527b

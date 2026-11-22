@@ -10,7 +10,7 @@ use tombox_xshader::{extract, parse_root_signature, Stage};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: {} <shader.dxbc> [--root-signature f] [--hlsl-out f] [--isa-out f] [--fssm-out f]", args[0]);
+        eprintln!("usage: {} <shader.dxbc> [--pso-cache archive] [--pso-offset bytes] [--root-signature f] [--hlsl-out f] [--isa-out f] [--fssm-out f]", args[0]);
         return ExitCode::FAILURE;
     }
     let path = &args[1];
@@ -18,6 +18,8 @@ fn main() -> ExitCode {
     let mut fssm_out = None;
     let mut hlsl_out: Option<String> = None;
     let mut root_signature = None;
+    let mut pso_cache = None;
+    let mut pso_offset = None;
     let mut i = 2;
     while i < args.len() {
         if i + 1 == args.len() {
@@ -28,6 +30,19 @@ fn main() -> ExitCode {
             "--isa-out" => isa_out = Some(args[i + 1].clone()),
             "--fssm-out" => fssm_out = Some(args[i + 1].clone()),
             "--hlsl-out" => hlsl_out = Some(args[i + 1].clone()),
+            "--pso-cache" => pso_cache = Some(&args[i + 1]),
+            "--pso-offset" => {
+                let value = &args[i + 1];
+                let offset = match value.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16),
+                    None => value.parse(),
+                };
+                let Ok(offset) = offset else {
+                    eprintln!("invalid PSO cache offset {value}");
+                    return ExitCode::FAILURE;
+                };
+                pso_offset = Some(offset);
+            }
             "--root-signature" => root_signature = Some(&args[i + 1]),
             other => eprintln!("warning: ignoring unknown arg {other}"),
         }
@@ -41,6 +56,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(path) = pso_cache {
+        use tombox_xshader::psocache::{shader_hash, PsoCache};
+        let Some(hash) = shader_hash(&blob) else {
+            eprintln!("shader has no HASH chunk for PSO lookup");
+            return ExitCode::FAILURE;
+        };
+        let cache = std::fs::File::open(path)
+            .and_then(|mut file| PsoCache::read(&mut file, pso_offset.unwrap_or(0)));
+        match cache {
+            Ok(cache) => println!("PSO binding layouts: {:#x?}", cache.bindings(&hash)),
+            Err(e) => {
+                eprintln!("cannot read PSO cache {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if pso_offset.is_some() {
+        eprintln!("--pso-offset requires --pso-cache");
+        return ExitCode::FAILURE;
+    }
 
     let mut ex = match extract(&blob) {
         Ok(ex) => ex,

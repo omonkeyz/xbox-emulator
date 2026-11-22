@@ -17,6 +17,7 @@ pub mod hlsl;
 #[cfg(windows)]
 pub mod dxc;
 pub mod meta;
+pub mod psocache;
 pub mod dxil_meta;
 pub mod decls;
 pub mod uearchive;
