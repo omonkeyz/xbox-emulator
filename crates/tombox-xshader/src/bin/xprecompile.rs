@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::io::{BufRead, BufReader, Read};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -170,13 +171,33 @@ fn main() -> ExitCode {
     }
     let mut seen: HashSet<u64> = work.iter().filter(|(_, rt)| *rt == [0; 8]).map(|(b, _)| fnv1a(b)).collect();
     for f in &inputs {
-        let data = match std::fs::read(f) {
-            Ok(d) => d,
+        let mut input = match std::fs::File::open(f).map(BufReader::new) {
+            Ok(reader) => reader,
             Err(e) => {
-                eprintln!("cannot read {f}: {e}");
+                eprintln!("cannot open {f}: {e}");
                 continue;
             }
         };
+        if input.fill_buf().is_ok_and(|header| header.starts_with(b"9FPR")) {
+            let before = work.len();
+            let result = tombox_xshader::rpf::scan(input, |record| {
+                if seen.insert(fnv1a(record.dxbc)) {
+                    work.push((record.dxbc.to_vec(), [0; 8]));
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                eprintln!("cannot scan RPF9 archive {f}: {e}");
+                return ExitCode::FAILURE;
+            }
+            eprintln!("{f}: RPF9, {} new unique shaders", work.len() - before);
+            continue;
+        }
+        let mut data = Vec::new();
+        if let Err(e) = input.read_to_end(&mut data) {
+            eprintln!("cannot read {f}: {e}");
+            continue;
+        }
         let archives = find_archives(&data);
         let before = work.len();
         let mut found = 0;
