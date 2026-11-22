@@ -250,3 +250,49 @@ pub unsafe fn get_all_settings(session: Obj, out: *mut *mut [BSTR; 2], len: *mut
     })();
     result.unwrap_or_else(|hr| hr)
 }
+
+#[repr(C)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: *const u16,
+}
+
+// GetRunningProcesses (19041 RVA 0x6560), after opening the session for the parsed address.
+pub unsafe fn get_running_processes(session: Obj, callback: Obj) -> HRESULT {
+    use crate::op::{get_string, Bstr};
+    use xtfmsg::com::{array, slot};
+    use xtfmsg::msg::get_json_u32;
+
+    if callback.is_null() {
+        return E_POINTER;
+    }
+    let result = (|| {
+        let reply = request_status(session, crate::OP_GET_RUNNING_PROCESSES)?;
+        let mut processes = Com::null();
+        check(json::get_array(reply.get(), wide("Processes").as_ptr(), processes.put()))?;
+        let mut count = 0;
+        let mut hr = array::get_count(processes.get(), &mut count);
+        check(hr)?;
+        let visit: unsafe extern "system" fn(Obj, *const ProcessInfo) -> HRESULT =
+            core::mem::transmute(slot(callback, 3));
+        for index in 0..count {
+            let mut entry = Com::null();
+            check(array::get_object(processes.get(), index, entry.put()))?;
+            let mut name = Bstr::null();
+            if get_string(entry.get(), "ProcessName", &mut name) < 0 || name.is_null() || *name.ptr() == 0 {
+                let fallback = Bstr::from_str("<unknown>");
+                if !fallback.is_null() {
+                    name = fallback;
+                }
+            }
+            let mut pid = 0;
+            if get_json_u32(entry.get(), wide("ProcessId").as_ptr(), &mut pid) < 0 {
+                pid = 0;
+            }
+            hr = visit(callback, &ProcessInfo { pid, name: name.ptr() });
+            check(hr)?;
+        }
+        Ok(hr)
+    })();
+    result.unwrap_or_else(|hr| hr)
+}

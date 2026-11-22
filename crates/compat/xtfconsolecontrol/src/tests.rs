@@ -924,3 +924,32 @@ fn get_all_settings_transfers_bstrs_and_publishes_only_complete_arrays() {
         }
     }
 }
+
+#[test]
+fn running_process_callback_uses_fallbacks_and_stops_on_failure_only() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    #[repr(C)]
+    struct Visitor {
+        table: *const usize,
+        rows: Vec<(u32, String)>,
+        fail_after: usize,
+    }
+    unsafe extern "system" fn visit(obj: Obj, info: *const client::ProcessInfo) -> HRESULT {
+        let visitor = &mut *obj.cast::<Visitor>();
+        visitor.rows.push(((*info).pid, from_wide((*info).name)));
+        if visitor.rows.len() == visitor.fail_after { E_FAIL } else { 1 }
+    }
+    let _g = guard();
+    unsafe {
+        for (fail_after, status, count) in [(2, E_FAIL, 2), (4, 1, 3)] {
+            let data = r#"{"Processes":[{"ProcessName":"game","ProcessId":475},{"ProcessName":""},{}]}"#;
+            let raw = client_session(S_OK, S_OK, 0, Some(data));
+            let session = Com(as_obj(raw));
+            let table = [0, 0, 0, visit as *const () as usize];
+            let mut visitor = Visitor { table: table.as_ptr(), rows: Vec::new(), fail_after };
+            assert_eq!(client::get_running_processes(session.get(), (&mut visitor as *mut Visitor).cast()), status);
+            assert_eq!(visitor.rows, [(475, "game".into()), (0, "<unknown>".into()), (0, "<unknown>".into())][..count]);
+            assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_GET_RUNNING_PROCESSES);
+        }
+    }
+}
