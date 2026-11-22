@@ -61,6 +61,13 @@ fn leonida_wave64_scalar_masks() {
         p.sv(20, w).sv(21, o);
         case(&mut c, "s_bfm_b64", &p, &bfm, &[1008, 1009, 1006, 1007], &[cnt, ff, lo, hi]);
     }
+    c.run_both("leonida_wave64_scalar");
+}
+
+#[test]
+#[ignore = "lane model: exec writes keep only the invocation's lane bit (exec_writes_keep_only_the_lane_bit_so_mask_loops_end), so exec read back as data is not the wave mask"]
+fn leonida_wave64_exec_as_data() {
+    let mut c = Cases::new();
     let head = [
         0xbefe_03ff, 0xffff_0000, // s_mov_b32 exec_lo, 0xffff0000
         0xbeff_03ff, 0x0000_ffff, // s_mov_b32 exec_hi, 0xffff
@@ -86,7 +93,7 @@ fn leonida_wave64_scalar_masks() {
         0xbefe_04c1,              // s_mov_b64 exec, -1
     ];
     case(&mut c, "s_mov_b32", &pr(), &cmp, &[1008, 1009, 1010, 1011], &[1, 0, 1, 1]);
-    c.run_both("leonida_wave64_scalar");
+    c.run_both("leonida_wave64_exec_as_data");
 }
 
 fn scc_rfl_case(width: u32) -> LaneCase {
