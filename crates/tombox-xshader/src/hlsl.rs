@@ -1,17 +1,17 @@
-//! RDNA2 → HLSL translator (stage 3 of the shader pipeline).
+//! RDNA2 â†’ HLSL translator (stage 3 of the shader pipeline).
 //!
 //! Model: one HLSL invocation == one RDNA2 *lane*. Every VGPR/SGPR is a `uint` holding the
 //! raw 32-bit pattern (floats via asfloat/asuint), so no type inference is needed. Lane
 //! masks (exec, vcc, compare results in SGPRs) are represented by their bit for *this*
 //! lane (0/1). Descriptor-table pointers in user SGPRs are tracked symbolically: an
 //! `s_load_dwordxN` from a never-written SGPR is a descriptor fetch from a root table, and
-//! the way the descriptor is consumed (s_buffer_load → CBV, MIMG resource → SRV, MIMG
-//! sampler → sampler) classifies the table. Slots map 1:1 to HLSL registers because the
+//! the way the descriptor is consumed (s_buffer_load â†’ CBV, MIMG resource â†’ SRV, MIMG
+//! sampler â†’ sampler) classifies the table. Slots map 1:1 to HLSL registers because the
 //! title's root signature (UE layout) uses one SRV/CBV/sampler table per stage from
 //! register 0.
 //!
 //! Scope: forward-only control flow (no loops yet). Anything not understood returns `Err`
-//! naming the instruction — the caller must fall back; nothing is guessed.
+//! naming the instruction â€” the caller must fall back; nothing is guessed.
 
 use crate::meta::SigElement;
 use crate::rdna2::{disassemble, Enc, Insn, Opnd};
@@ -30,6 +30,7 @@ mod mesh;
 mod amp;
 mod global;
 mod centroid;
+mod image_bindings;
 
 pub struct Translated {
     pub hlsl: String,
@@ -80,7 +81,7 @@ enum Res {
 
 const XYZW: [&str; 4] = ["x", "y", "z", "w"];
 
-/// RDNA2 cube-map helpers. v_cube{ma,sc,tc,id}_f32 follow the ISA definition (major axis ×2,
+/// RDNA2 cube-map helpers. v_cube{ma,sc,tc,id}_f32 follow the ISA definition (major axis Ã—2,
 /// face-local S/T, face index 0..5 = +X,-X,+Y,-Y,+Z,-Z). Hardware cube sampling takes
 /// (s, t, face) with s,t = sc/|ma| + 1.5 (so each is in [1, 2]); `tb_cube_dir` inverts that
 /// to the direction vector HLSL TextureCube sampling expects.
@@ -274,6 +275,7 @@ fn semantic(e: &SigElement) -> String {
 
 struct Emitter<'a> {
     ex: &'a ShaderExtract,
+    image_layouts: &'a [crate::psocache::BindingLayout],
     insns: Vec<Insn>,
     res: HashMap<usize, Vec<Res>>, // per-instruction resolved resources
     cb_size: BTreeMap<u32, u32>,   // slot -> dwords
@@ -863,13 +865,19 @@ fn dst16(m: &str) -> bool {
 }
 
 pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
-    match translate_with(ex, None, BTreeSet::new()) {
-        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
+    translate_with_image_layouts(ex, &[])
+}
+
+/// Apply PS09 layout metadata to image and sampler descriptor-table accesses.
+/// Other resource classes retain the normal root-signature translation.
+pub fn translate_with_image_layouts(ex: &ShaderExtract, layouts: &[crate::psocache::BindingLayout]) -> Result<Translated, String> {
+    match translate_with(ex, layouts, None, BTreeSet::new()) {
+        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, layouts, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
         r => r,
     }
 }
 
-fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {
+fn translate_with(ex: &ShaderExtract, image_layouts: &[crate::psocache::BindingLayout], user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {
     let (profile, is_ps) = match ex.stage {
         Stage::Vertex => ("vs_5_0", false),
         Stage::Pixel => ("ps_5_0", true),
@@ -890,6 +898,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
     }
     let mut em = Emitter {
         loop_depth: 0,
+        image_layouts,
         ex,
         insns,
         res: HashMap::new(),
@@ -929,7 +938,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
         body: String::new(),
         tmp: 0,
         // PS attribute slot k = the k-th input *register* that carries an interpolant and is
-        // read. A register counts as read if any element packed into it is read — including
+        // read. A register counts as read if any element packed into it is read â€” including
         // a system value sharing it (observed: PARTICLE_RANDOM unread + SV_IsFrontFace read
         // in the same register still occupies an attribute slot; d26fd88ff8712f9e).
         ps_attrs: distinct_regs(ex.input_sig.iter().filter(|e| {
@@ -974,7 +983,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
     if !clash.is_empty() {
         let mut force = em.uav_force.clone();
         force.extend(clash);
-        return translate_with(ex, user_base_override, force);
+        return translate_with(ex, image_layouts, user_base_override, force);
     }
     if is_ps {
         em.find_export_epilogs();
@@ -1251,7 +1260,7 @@ impl<'a> Emitter<'a> {
             let (mut sym, mut written) = states[b].clone().unwrap();
             if let Err(e) = self.res_block(&mut sym, &mut written, ranges[b].clone()) {
                 // Unknown effect: forget everything and treat every SGPR as written. Keep
-                // the first failure — it is the root cause if the recording pass fails too.
+                // the first failure â€” it is the root cause if the recording pass fails too.
                 first_err.get_or_insert(e);
                 sym.clear();
                 written = (0u16..=105).collect();
@@ -2002,9 +2011,17 @@ impl<'a> Emitter<'a> {
                     })?;
                     let mut tex_res: Vec<(u32, Res)> = Vec::new();
                     for (ttable, off) in &tex_c {
-                        let tslot = self.bind_id(*ttable, *off, 32);
+                        let types: &[u32] = if ins.mnemonic.starts_with("image_sample") || ins.mnemonic.starts_with("image_gather") || ins.mnemonic == "image_get_lod" {
+                            &[3]
+                        } else if ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") {
+                            &[6]
+                        } else {
+                            &[3, 6]
+                        };
+                        let binding = self.image_binding(*ttable, *off, types)?;
+                        let tslot = binding.map_or_else(|| self.bind_id(*ttable, *off, 32), |(slot, _)| slot);
                         let writes = ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") || self.uav_force.contains(&tslot);
-                        let is_uav = self.table_kind_for(*ttable, writes) == Some(1);
+                        let is_uav = binding.map_or_else(|| self.table_kind_for(*ttable, writes) == Some(1), |(_, ty)| ty == 6);
                         if tslot & BINDLESS != 0 {
                             if is_uav { self.bl_uav.insert(tslot); } else { self.bl_srv.insert(tslot); }
                         }
@@ -2025,7 +2042,7 @@ impl<'a> Emitter<'a> {
                             format!("mimg at {:#x}: s{ss} not a sampler descriptor ({:?})", ins.offset, sym.get(&ss))
                         })?;
                         for (stable, off) in &samp_c {
-                            let sslot = self.bind_id(*stable, *off, 16);
+                            let sslot = self.image_binding(*stable, *off, &[1])?.map_or_else(|| self.bind_id(*stable, *off, 16), |(slot, _)| slot);
                             // Depth-compare variants (opcode bit 3) need a comparison sampler.
                             if ins.op & 8 != 0 {
                                 self.samp_cmp.insert(sslot);
@@ -2065,7 +2082,7 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    /// Registers read before any write in program order — i.e. the shader's entry ABI
+    /// Registers read before any write in program order â€” i.e. the shader's entry ABI
     /// (interpolation barycentrics, fragment position, user-data SGPRs, thread ids...).
     fn live_in(&self) -> Vec<String> {
         let mut written: BTreeSet<String> = BTreeSet::new();
@@ -2204,7 +2221,7 @@ impl<'a> Emitter<'a> {
     ///   [L..=B]. Flags for labels inside the body are reset each iteration; flags for
     ///   labels past B (loop exits) terminate the loop and keep skipping until their label.
     ///   Loops must be properly nested, have one back-edge per header, and must not be
-    ///   entered from outside except through the header — otherwise `Err`.
+    ///   entered from outside except through the header â€” otherwise `Err`.
     fn emit_body(&mut self, is_ps: bool) -> Result<(), String> {
         let mut off2idx: HashMap<usize, usize> = self.insns.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
         // A branch to the address just past the last instruction leaves the program (same as
@@ -2351,7 +2368,7 @@ impl<'a> Emitter<'a> {
     /// General control flow: a `while` + `switch` dispatcher over basic blocks, used when
     /// the CFG is not reducible to nested loops. Each block ends by setting the next block
     /// id (`tb_pc`); the program ends when it reaches the id one past the last instruction.
-    /// (Implicit-derivative sampling cannot live inside this loop — FXC rejects it, and the
+    /// (Implicit-derivative sampling cannot live inside this loop â€” FXC rejects it, and the
     /// shader then fails to compile rather than silently changing meaning.)
     fn emit_body_dispatch(&mut self, is_ps: bool) -> Result<(), String> {
         let n = self.insns.len();
@@ -3124,7 +3141,7 @@ impl<'a> Emitter<'a> {
                     }
                     "s_brev_b32" => self.ws(&d, &format!("reversebits({a})")),
                     "s_bcnt1_i32_b64" => {
-                        // Population count of a 64-bit value — typically the number of active
+                        // Population count of a 64-bit value â€” typically the number of active
                         // lanes (wave-level allocation). One invocation = one lane, so a lane
                         // mask counts as 0 or 1.
                         let ah = r(&hi(&s[0]))?;
@@ -3331,7 +3348,7 @@ impl<'a> Emitter<'a> {
                     if self.emit_rm_load(idx, ins)?.is_some() {
                         return Ok(());
                     }
-                    self.line("// (descriptor fetch from root table — resolved statically)");
+                    self.line("// (descriptor fetch from root table â€” resolved statically)");
                     return Ok(());
                 }
                 let n = 1u32 << (ins.op - 8);
@@ -3510,7 +3527,7 @@ impl<'a> Emitter<'a> {
                         "ds_read_b32" | "ds_read2_b32" | "ds_read2st64_b32" | "ds_write_b32" | "ds_write2_b32" | "ds_write2st64_b32"
                     ) =>
             {
-                // Compute: LDS is the thread group's shared memory → an HLSL `groupshared`
+                // Compute: LDS is the thread group's shared memory â†’ an HLSL `groupshared`
                 // array addressed by byte address / 4 (32 KiB, the D3D groupshared limit).
                 self.uses_lds = true;
                 let rd = m.starts_with("ds_read");
@@ -3639,7 +3656,7 @@ impl<'a> Emitter<'a> {
             }
             Enc::Ds if m == "ds_swizzle_b32" => {
                 // Quad swizzle (QDMode): each lane of a 2x2 pixel quad reads the lane selected
-                // by a 2-bit field of the 8-bit mask — how RDNA2 pixel shaders fetch neighbour
+                // by a 2-bit field of the 8-bit mask â€” how RDNA2 pixel shaders fetch neighbour
                 // values for derivatives. Per pixel: value at quad position (sx, sy) =
                 // v + (sx - px) * ddx_fine(v) + (sy - py) * ddy_fine(v), with (px, py) this
                 // pixel's position in its quad. Treats the register as float (derivative use).
@@ -4544,7 +4561,7 @@ impl<'a> Emitter<'a> {
         let fc = || fw(2);
         let (a, b) = (r(&s[0])?, s.get(1).map(r).transpose()?.unwrap_or_default());
         let c = s.get(2).map(|o| r(o)).transpose().unwrap_or(None).unwrap_or_default();
-        // `v_mul_legacy_f32` / `v_mad_legacy_f32`: DX9 multiply rules — the product is 0 when
+        // `v_mul_legacy_f32` / `v_mad_legacy_f32`: DX9 multiply rules â€” the product is 0 when
         // either operand is 0, even against infinity or NaN (`tb_mull`). A plain multiply
         // only matched under fast-math; with exact arithmetic it produced NaN positions.
         let legacy = m.ends_with("_legacy_f32");
@@ -4762,7 +4779,7 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         if ins.mnemonic.contains("_atomic_") {
-            // Buffer atomics → HLSL Interlocked* on the UAV element. With GLC set the
+            // Buffer atomics â†’ HLSL Interlocked* on the UAV element. With GLC set the
             // pre-operation value is returned in vdata.
             let (offen, idxen, glc) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0, ins.aux.mask & 4 != 0);
             if (offen && idxen) || !matches!(ins.src[2], Opnd::ConstInt(0)) {
@@ -5355,7 +5372,7 @@ impl<'a> Emitter<'a> {
                 format!("uav{slot}")
             };
             if ins.mnemonic.starts_with("image_atomic_") {
-                // Image atomics → Interlocked* on a RWTexture<uint> texel; vdata carries the
+                // Image atomics â†’ Interlocked* on a RWTexture<uint> texel; vdata carries the
                 // operand in and the previous value out.
                 if !as_uint {
                     return Err("image atomic on a non-UAV table".into());

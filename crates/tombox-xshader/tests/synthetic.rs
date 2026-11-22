@@ -298,3 +298,28 @@ fn loops_translate_deterministically() {
         assert!(translate(&ex).expect("translate").hlsl == first, "translation differs between runs");
     }
 }
+
+#[test]
+fn pso_image_binding_selects_register_space_and_checks_conflicting_layouts() {
+    use tombox_xshader::hlsl::translate_with_image_layouts;
+    use tombox_xshader::meta::PsvResource;
+    use tombox_xshader::psocache::{BindingLayout, UserDataBinding, UserDataKind};
+    let words = [
+        0xf40c_0004, 0xfa00_0000, // load image descriptor via s8
+        0x7e00_0280, 0x7e02_0280,
+        0xf000_1108, 0, // image_load
+        0x0604_0100, PACK_V0_V2_V2, PACK_V1_V2_V2,
+        EXP_MRT0_COMPR[0], EXP_MRT0_COMPR[1], S_ENDPGM,
+    ];
+    let mut ex = shader(Stage::Pixel, &words, vec![], vec![sig("SV_Target", 64, 3, 0, 0xf)], None);
+    ex.resources = [1, 2].map(|space| PsvResource { res_type: 3, lower: 3, upper: 5, space }).to_vec();
+    let layout = |space: u32| BindingLayout { metadata_index: 0, entries: vec![UserDataBinding {
+        kind: UserDataKind::ShaderResource, byte_offset: 0, register: 4, raw_fields: [0, space << 16 | 0x808, 0, 0],
+    }] };
+    let t = translate_with_image_layouts(&ex, &[layout(2), layout(2)]).unwrap();
+    assert!(t.hlsl.contains("register(t4, space2)"), "{}", t.hlsl);
+    #[cfg(windows)]
+    tombox_xshader::dxc::compile(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile)).unwrap();
+    assert!(translate_with_image_layouts(&ex, &[layout(1), layout(2)]).err().unwrap().contains("conflicting image layouts"));
+    assert!(translate_with_image_layouts(&ex, &[layout(0)]).err().unwrap().contains("ambiguous register space"));
+}

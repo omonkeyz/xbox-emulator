@@ -2,7 +2,7 @@
 //!
 //! Usage: xshader <shader.dxbc> [--isa-out <file.bin>] [--fssm-out <file.bin>]
 //!
-//! Prints the DXBC→XDAT→zlib→FSSM→RDNA2 chain it walked and a hex/word dump of the ISA.
+//! Prints the DXBCâ†’XDATâ†’zlibâ†’FSSMâ†’RDNA2 chain it walked and a hex/word dump of the ISA.
 
 use std::process::ExitCode;
 use tombox_xshader::{extract, parse_root_signature, Stage};
@@ -57,6 +57,7 @@ fn main() -> ExitCode {
         }
     };
 
+    let mut layouts = Vec::new();
     if let Some(path) = pso_cache {
         use tombox_xshader::psocache::{shader_hash, PsoCache};
         let Some(hash) = shader_hash(&blob) else {
@@ -66,7 +67,10 @@ fn main() -> ExitCode {
         let cache = std::fs::File::open(path)
             .and_then(|mut file| PsoCache::read(&mut file, pso_offset.unwrap_or(0)));
         match cache {
-            Ok(cache) => println!("PSO binding layouts: {:#x?}", cache.bindings(&hash)),
+            Ok(cache) => {
+                layouts.extend_from_slice(cache.bindings(&hash));
+                println!("PSO binding layouts: {layouts:#x?}");
+            }
             Err(e) => {
                 eprintln!("cannot read PSO cache {path}: {e}");
                 return ExitCode::FAILURE;
@@ -206,7 +210,7 @@ fn main() -> ExitCode {
         }
     }
     if let Some(f) = hlsl_out {
-        match tombox_xshader::hlsl::translate(&ex) {
+        match tombox_xshader::hlsl::translate_with_image_layouts(&ex, &layouts) {
             Ok(t) => {
                 if let Err(e) = std::fs::write(&f, &t.hlsl) {
                     eprintln!("cannot write {f}: {e}");
