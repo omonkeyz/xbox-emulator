@@ -659,8 +659,46 @@ fn gpu_mesh_lds_write_before_reconverged_barrier() {
     let err = translate(&divergent).err().expect("divergent LDS barrier is refused");
     assert!(err.contains("writes LDS or memory"), "{err}");
 
-    // The triangle starts at lane 64, which reads the value lane 11 wrote.
     let got = unsafe { render(&shader(false), 1) }.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(got, [11, 1, 0x77, 0x88]);
+}
+
+#[test]
+fn gpu_mesh_lds_with_export_between_barriers() {
+    let shader = |conditional_first_barrier: bool| {
+        let mut words = console_ms(67, 1, TRI);
+        let insert = words.len() - 3;
+        let mut body = vec![
+            vop2(0x1a, 10, ic(2), 0),
+            sop1(4, 10, EXEC),
+            vopc(0xd2, ic(11), 0),
+            sopp(8, if conditional_first_barrier { 6 } else { 3 }),
+            0xd834_0000, 10, // Lane 11 writes value 11 to LDS word 11.
+            sopp(0x0c, 0),
+        ];
+        body.push(sopp(0x0a, 0));
+        if !conditional_first_barrier {
+            body.push(sopp(8, 2)); // Reopen the same EXEC guard for the export.
+        }
+        body.extend(exp(12, 0, false, [0; 4]));
+        body.extend([
+            sop1(4, EXEC, 10),
+            sopp(0x0a, 0),
+            vop1(1, 10, ic(44)),
+            0xd8d8_0000, 0x0700_000a, // Read LDS word 11 into the exported parameter.
+            sopp(0x0c, 0),
+        ]);
+        words.splice(insert..insert, body);
+        words
+    };
+    let conditional = ms(&shader(true), mesh_info(128, 128, 128, 2), pos_param_outs());
+    let err = translate(&conditional).err().expect("conditional LDS barrier is refused");
+    assert!(err.contains("writes LDS or memory"), "{err}");
+
+    let uniform = shader(false);
+    let t = translate(&ms(&uniform, mesh_info(128, 128, 128, 2), pos_param_outs())).unwrap();
+    assert_eq!(t.hlsl.matches("GroupMemoryBarrierWithGroupSync();").count(), 5);
+    let got = unsafe { render(&uniform, 1) }.unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(got, [11, 1, 0x77, 0x88]);
 }
 
