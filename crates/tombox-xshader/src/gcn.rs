@@ -408,6 +408,11 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             ins.words.clone()
         }
         Enc::Mimg => {
+            for (bit, name) in [(15, "R128 (128-bit resource descriptor)"), (16, "TFE (texture fail status VGPR)"), (17, "LWE (LOD warning status)")] {
+                if (w >> bit) & 1 != 0 {
+                    return Err(err(format!("MIMG {name} is not translated")));
+                }
+            }
             let da = (w >> 14) & 1;
             let dim = if da != 0 { 5 } else { 1 };
             vec![(w & !(1 << 14)) | dim << 3, ins.words[1]]
@@ -729,6 +734,19 @@ mod tests {
         }
         v.sort();
         v
+    }
+
+    #[test]
+    fn mimg_r128_tfe_lwe_are_refused_instead_of_passed_through() {
+        let sample = 0xf080_0f00u32;
+        let l = to_rdna2(&bytes(&[sample | 1 << 14, 0x0002_0100, 0xbf81_0000])).unwrap();
+        let w = u32::from_le_bytes(l.isa[0..4].try_into().unwrap());
+        assert_eq!((w >> 14) & 0xf, 0);
+        assert_eq!((w >> 3) & 7, 5);
+        for (bit, name) in [(15, "R128"), (16, "TFE"), (17, "LWE")] {
+            let e = to_rdna2(&bytes(&[sample | 1 << bit, 0x0002_0100, 0xbf81_0000])).unwrap_err();
+            assert!(e.contains(name), "{name}: {e}");
+        }
     }
 
     #[test]

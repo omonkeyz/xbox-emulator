@@ -564,6 +564,7 @@ unsafe extern "system" fn create_committed_resource(
             None => {}
         }
         unsafe { crate::rtcap::register(*ppv, &desc_copy[..0x38], init_state) };
+        crate::res3d::note_create(unsafe { *ppv }, &desc_copy[..0x38], &format!("committed heapType={heap_type} heapFlags={heap_flags:#x} state={init_state:#x} backing={backing:x?}"));
         if crate::rtcap::enabled() && desc_copy[0] == 1 && !pheap.is_null() {
             let width = u64::from_le_bytes(desc_copy[0x10..0x18].try_into().unwrap());
             unsafe { crate::bindtrace::note_buffer(*ppv, width, *pheap) };
@@ -1094,6 +1095,7 @@ unsafe extern "system" fn real_create_cbv(real: *mut c_void, pdesc: *const u8, d
 unsafe extern "system" fn real_create_srv(real: *mut c_void, res: *mut c_void, pdesc: *const u8, dest: usize) {
     let desc = if pdesc.is_null() { None } else { Some(unsafe { core::ptr::read_unaligned(pdesc as *const [u8; 40]) }) };
     crate::bindtrace::note_desc(dest, crate::bindtrace::Desc::Srv { res: res as usize, desc });
+    crate::res3d::note_view(res, "SRV", desc.as_ref(), dest);
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *const u8, usize) = unsafe { core::mem::transmute(real_orig(18)) };
     unsafe { f(real, res, pdesc, dest) };
     crate::bindtrace::note_desc_after(dest, 0, crate::bindtrace::Desc::Srv { res: res as usize, desc });
@@ -1101,6 +1103,7 @@ unsafe extern "system" fn real_create_srv(real: *mut c_void, res: *mut c_void, p
 unsafe extern "system" fn real_create_uav(real: *mut c_void, res: *mut c_void, counter: *mut c_void, pdesc: *const u8, dest: usize) {
     let desc = if pdesc.is_null() { None } else { Some(unsafe { core::ptr::read_unaligned(pdesc as *const [u8; 40]) }) };
     crate::bindtrace::note_desc(dest, crate::bindtrace::Desc::Uav { res: res as usize, desc });
+    crate::res3d::note_view(res, "UAV", desc.as_ref(), dest);
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, *const u8, usize) = unsafe { core::mem::transmute(real_orig(19)) };
     unsafe { f(real, res, counter, pdesc, dest) };
     crate::bindtrace::note_desc_after(dest, 0, crate::bindtrace::Desc::Uav { res: res as usize, desc });
@@ -1546,6 +1549,7 @@ unsafe extern "system" fn create_placed_resource(
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
         unsafe { crate::gpu_va::note_resource(real, *ppv, &d, init_state, None) };
+        crate::res3d::note_create(unsafe { *ppv }, &d, &format!("placed heap={heap:p}+{offset:#x} state={init_state:#x}"));
     }
     if hr >= 0 && crate::rtcap::enabled() && d[0] == 1 && !ppv.is_null() {
         let width = u64::from_le_bytes(d[0x10..0x18].try_into().unwrap());
@@ -1614,6 +1618,7 @@ unsafe extern "system" fn create_placed_resource_x(
         unsafe { addref(res) };
         unsafe { crate::gpu_va::note_resource(real, res, &d, init_state, Some(va)) };
         crate::placed::register(res, crate::placed::Placed { va, desc: orig, init_state });
+        crate::res3d::note_create(res, &orig, &format!("placedX va={va:#x} {}", match &made { Some(m) => format!("aliased {:?} heap {:#x}+{:#x}", m.kind, m.heap, m.offset), None => "separate committed".to_string() }));
         if flags & 0x7 != 0 {
             unsafe { crate::rtcap::register(res, &d[..0x38], init_state) };
             static RT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);

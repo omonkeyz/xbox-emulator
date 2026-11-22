@@ -15,8 +15,11 @@ extern "system" {
 }
 
 pub(super) const LOG: usize = 4096;
+pub(super) static POKE: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+pub(super) static VAL: [AtomicUsize; LOG] = [const { AtomicUsize::new(0) }; LOG];
 pub(super) static N: AtomicUsize = AtomicUsize::new(0);
 pub(super) static EV: [AtomicUsize; LOG * 2] = [const { AtomicUsize::new(0) }; LOG * 2];
+pub(super) static STK: [AtomicUsize; LOG * 64] = [const { AtomicUsize::new(0) }; LOG * 64];
 
 unsafe extern "system" fn veh(p: *mut *mut u8) -> i32 {
     let rec = *p;
@@ -30,8 +33,29 @@ unsafe extern "system" fn veh(p: *mut *mut u8) -> i32 {
     if i < LOG {
         EV[i * 2].store(rip, Ordering::SeqCst);
         EV[i * 2 + 1].store((dr6 & 0xf) as usize, Ordering::SeqCst);
+        if let Some(k) = (0..3).find(|k| dr6 >> k & 1 != 0) {
+            let a = *(ctx.add(0x48 + 8 * k) as *const usize);
+            VAL[i].store(*(a as *const usize), Ordering::SeqCst);
+        }
+        let rsp = *(ctx.add(0x98) as *const u64) as *const usize;
+        for k in 0..64 {
+            STK[i * 64 + k].store(*rsp.add(k), Ordering::SeqCst);
+        }
     }
     *(ctx.add(0x68) as *mut u64) = 0;
+    let mask = POKE[2].load(Ordering::SeqCst);
+    if dr6 & 8 != 0 && mask != 0 {
+        let base = (*(ctx.add(0x98) as *const u64) as usize).wrapping_sub(POKE[0].load(Ordering::SeqCst)) as *mut u8;
+        let pat = POKE[1].load(Ordering::SeqCst);
+        for q in 0..8 {
+            if mask >> q & 1 != 0 {
+                for k in 0..8 {
+                    let j = q * 8 + k;
+                    *base.add(j) = (pat.wrapping_mul(0x9e37_79b9).wrapping_add(j * 0x45d9_f3b) >> 7) as u8;
+                }
+            }
+        }
+    }
     if dr6 & 8 != 0 {
         *(ctx.add(0x44) as *mut u32) |= 0x10000;
     }
@@ -67,6 +91,17 @@ pub(super) struct Watch {
     tid: u32,
 }
 
+pub(super) fn rearm(data: &[usize]) {
+    let tid = unsafe { GetCurrentThreadId() };
+    let mut dr = [0usize; 4];
+    let mut dr7 = 0u64;
+    for (k, &a) in data.iter().take(3).enumerate() {
+        dr[k] = a & !7;
+        dr7 |= 1 << (2 * k) | 0b1101 << (16 + 4 * k);
+    }
+    set_drs(tid, dr, dr7);
+}
+
 impl Watch {
     pub(super) fn arm(data: &[usize], exec: Option<usize>) -> Watch {
         assert!(data.len() <= 3);
@@ -85,6 +120,9 @@ impl Watch {
         }
         set_drs(tid, dr, dr7);
         Watch { v, tid }
+    }
+    pub(super) fn stack(&self, i: usize) -> [usize; 64] {
+        core::array::from_fn(|k| STK[i * 64 + k].load(Ordering::SeqCst))
     }
     pub(super) fn events(&self) -> Vec<(usize, usize)> {
         let n = N.load(Ordering::SeqCst).min(LOG);

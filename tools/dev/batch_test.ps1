@@ -24,7 +24,12 @@
   [string]$OutRoot = 'D:\TomBox\tools\dev\batch_runs',
   [string]$Agility = 'D:\xbox-pc-port\emulator\third_party\agility-sdk\build\native\bin\x64',
   [int]$AgilityVersion = 620,
-  [int]$MaxEntriesPerCategory = 300
+  [int]$MaxEntriesPerCategory = 300,
+  [switch]$FullBoot,
+  [string]$Scene = '',
+  [string]$FastTarget = '',
+  [ValidateRange(1, 2)][int]$Parallel = 1,
+  [string]$Id = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +41,71 @@ $DbgLayer = -not $NoD3d12Debug
 
 function Say([string]$m, [string]$c = 'Gray') { Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $m) -ForegroundColor $c }
 function ConvertTo-MdText([string]$s) { if ($null -eq $s) { return '' }; return ($s -replace '\|', '\|' -replace '`', "'" -replace '[\x00-\x08\x0b\x0c\x0e-\x1f]', '') }
+
+if (-not $FullBoot -and -not $DryRun) {
+  $fastMap = [ordered]@{ 'fortnite-lobby' = 'fortnite'; 'trackmania' = 'trackmania'; 'xdefiant' = 'xdefiant'; 'terraria' = 'terraria'; 'minecraft' = 'minecraft' }
+  $alias = @{ 'fortnite' = 'fortnite-lobby' }
+  $want = if ($Only.Count) { @($Only | ForEach-Object { if ($alias.ContainsKey($_)) { $alias[$_] } else { $_ } }) } else { @($fastMap.Keys) }
+  foreach ($w in $want) { if (-not $fastMap.Contains($w)) { Say "fast path: '$w' has no scene (fortnite-play needs -FullBoot); skipped" 'Yellow' } }
+  $want = @($want | Where-Object { $fastMap.Contains($_) })
+  if (-not $FastTarget) { $FastTarget = if ($Profile -eq 'dev-fast') { 'D:\TomBox\target-fast\dev-fast' } else { Join-Path $Root 'target\release' } }
+  if (-not $Id) { $Id = "batch$Stamp" }
+  $fastRun = Join-Path $PSScriptRoot 'fast_run.ps1'
+  New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
+  Say "FAST PATH (default; -FullBoot for the old full boot): $($want -join ', ') from $FastTarget, $Parallel at a time -> $RunRoot" 'Cyan'
+  $jobs = New-Object System.Collections.ArrayList
+  foreach ($w in $want) {
+    $t = $fastMap[$w]
+    $out = Join-Path $RunRoot $w
+    $fa = @('-NoProfile', '-File', $fastRun, '-Title', $t, '-Target', $FastTarget, '-Id', $Id, '-Out', $out)
+    if ($Scene) { $fa += @('-Scene', $Scene) }
+    if ($PadScript) { $fa += @('-PadScript', "`"$PadScript`"") }
+    [void]$jobs.Add([pscustomobject]@{ Slug = $w; Title = $t; Out = $out; Args = $fa; Proc = $null })
+  }
+  $pending = New-Object System.Collections.Queue
+  foreach ($j in $jobs) { $pending.Enqueue($j) }
+  $running = New-Object System.Collections.ArrayList
+  while ($pending.Count -or $running.Count) {
+    while ($pending.Count -and $running.Count -lt $Parallel) {
+      $j = $pending.Dequeue()
+      New-Item -ItemType Directory -Force -Path $j.Out | Out-Null
+      Say "  start $($j.Slug): fast_run $($j.Title)" 'DarkGray'
+      $j.Proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $j.Args -RedirectStandardOutput (Join-Path $j.Out 'fast_run.stdout.txt') -RedirectStandardError (Join-Path $j.Out 'fast_run.stderr.txt') -WindowStyle Hidden -PassThru
+      [void]$running.Add($j)
+      if ($pending.Count) { Start-Sleep -Seconds 3 }
+    }
+    Start-Sleep -Seconds 2
+    foreach ($j in @($running)) { if ($j.Proc.HasExited) { $running.Remove($j); Say "  done $($j.Slug)" 'DarkGray' } }
+  }
+  $sb = New-Object System.Text.StringBuilder
+  [void]$sb.AppendLine('# Batch test report (fast path)')
+  [void]$sb.AppendLine('')
+  [void]$sb.AppendLine("- Started: $($BatchStart.ToString('yyyy-MM-dd HH:mm:ss')), finished: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+  [void]$sb.AppendLine("- Path: tools\dev\fast_run.ps1 per title, headless, test overlays + test save roots (run-xone-test), straight to each title's main scene. Full boot: batch_test.ps1 -FullBoot")
+  [void]$sb.AppendLine("- DLLs: $FastTarget; run folder: ``$RunRoot``")
+  [void]$sb.AppendLine('')
+  [void]$sb.AppendLine('| Title | Scene | Reached | Time to scene | Result | Why not / milestones | Logs |')
+  [void]$sb.AppendLine('|---|---|---|---|---|---|---|')
+  foreach ($j in $jobs) {
+    $rj = Join-Path $j.Out 'result.json'
+    if (Test-Path -LiteralPath $rj) {
+      $r = Get-Content -LiteralPath $rj -Raw | ConvertFrom-Json
+      $msText = (@($r.milestones.PSObject.Properties | ForEach-Object { "$($_.Name) +$($_.Value)s" }) -join ', ')
+      $note = if ($r.reached) { $msText } else { "$($r.not_reached). $msText" }
+      $tts = if ($r.reached) { "$($r.scene_s) s" } else { '-' }
+      [void]$sb.AppendLine(("| {0} | {1} | {2} | {3} | {4} | {5} | ``{6}`` |" -f $j.Title, $r.scene, $(if ($r.reached) { 'yes' } else { 'NO' }), $tts, (ConvertTo-MdText $r.result), (ConvertTo-MdText $note), $j.Out))
+      Say ("  {0,-11} {1,-17} {2}" -f $j.Title, $r.scene, $(if ($r.reached) { "REACHED at +$($r.scene_s)s" } else { "not reached: $($r.not_reached)" })) $(if ($r.reached) { 'Green' } else { 'Red' })
+    } else {
+      $err = (Get-Content -LiteralPath (Join-Path $j.Out 'fast_run.stderr.txt') -Raw -ErrorAction SilentlyContinue)
+      [void]$sb.AppendLine(("| {0} | - | NO | - | fast_run failed | {1} | ``{2}`` |" -f $j.Title, (ConvertTo-MdText ([string]$err -replace '\s+', ' ').Substring(0, [Math]::Min(200, ([string]$err).Length))), $j.Out))
+      Say "  $($j.Title): fast_run produced no result.json (see $($j.Out)\fast_run.stderr.txt)" 'Red'
+    }
+  }
+  [IO.File]::WriteAllText($Report, $sb.ToString(), (New-Object System.Text.UTF8Encoding $false))
+  Copy-Item $Report (Join-Path $RunRoot 'batch_report.md') -Force
+  Say "report: $Report" 'Cyan'
+  return
+}
 
 $Titles = @(
   [pscustomobject]@{ Slug = 'fortnite-lobby'; Name = 'Fortnite (lobby, default ready-up path armed)'; Script = 'run_fortnite.ps1'; Args = @{};

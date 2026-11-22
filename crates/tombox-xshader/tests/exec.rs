@@ -869,7 +869,7 @@ fn saveexec(c: &mut Cases, m: &'static str, op: u32, a: u32, f: fn(u32, u32) -> 
 }
 
 #[test]
-fn exec_writes_keep_only_the_lane_bit_so_mask_loops_end() {
+fn wqm_of_exec_keeps_only_the_lane_bit_so_mask_loops_end() {
     let mut c = Cases::new();
     let mut post = pr();
     post.raw(&[sop1(4, 30, 126)]).s2v(0, 30).s2v(1, 31);

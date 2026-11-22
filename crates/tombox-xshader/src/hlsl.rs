@@ -446,6 +446,7 @@ struct Emitter<'a> {
     rm_used: BTreeSet<usize>,
     bl: Vec<(u8, u32)>,
     bl_loads: HashMap<usize, (u32, u8)>,
+    bl_const: HashMap<u32, u32>,
     uses_f64: bool,
     uav_mips: BTreeSet<u32>,
     tex_mips: BTreeSet<u32>,
@@ -486,6 +487,16 @@ pub const BL_ALIASES: u32 = 6;
 
 pub fn bl_alias_space(k: u32, space: u32) -> u32 {
     TB_BLALIAS_SPACE + (k - 1) * 100_000 + space
+}
+
+pub fn psv_image_dim(kind: u32, da_dim: u32) -> u32 {
+    match (kind, da_dim) {
+        (1, 1) => 0,
+        (4, 1) => 2,
+        (5, 1) => 3,
+        (6, 5) => 4,
+        _ => da_dim,
+    }
 }
 
 fn bl_name(table: u8, key: usize) -> String {
@@ -1068,6 +1079,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         rm_used: BTreeSet::new(),
         bl: Vec::new(),
         bl_loads: HashMap::new(),
+        bl_const: HashMap::new(),
         uses_f64: false,
         uav_mips: BTreeSet::new(),
         tex_mips: BTreeSet::new(),
@@ -1258,6 +1270,50 @@ impl<'a> Emitter<'a> {
             }
             _ => fallback,
         }
+    }
+
+    fn sgpr_const_in(insns: &[Insn], start: usize, idx: usize, reg: u8) -> Option<u32> {
+        for j in (start..idx).rev() {
+            let i = &insns[j];
+            let wide = if i.enc == Enc::Smem && i.op <= 4 { 1u16 << i.op } else if i.mnemonic.ends_with("_b64") || i.mnemonic.ends_with("_u64") || i.mnemonic.ends_with("_i64") { 2 } else { 1 };
+            let hit = i.dst.iter().any(|d| matches!(d, Opnd::Sgpr(r) if (reg as u16) >= *r as u16 && (reg as u16) < *r as u16 + wide));
+            if !hit {
+                continue;
+            }
+            return match (i.mnemonic.as_str(), i.src.first()) {
+                ("s_movk_i32", _) => Some(i.aux.imm as i32 as u32),
+                ("s_mov_b32", Some(Opnd::ConstInt(v))) => Some(*v as u32),
+                ("s_mov_b32", Some(Opnd::Literal(v))) => Some(*v),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    fn gcn_image_dim(&self, table: u8, off: u32, is_uav: bool, dim: u32) -> u32 {
+        if !crate::gcn::is_durango(&self.ex.fssm) || !matches!(dim, 1 | 5) {
+            return dim;
+        }
+        let byte = if off & BINDLESS != 0 {
+            let n = off & !BINDLESS;
+            match (self.bl_const.get(&n), self.bl.get(n as usize)) {
+                (Some(c), Some((_, imm))) => c.wrapping_add(*imm),
+                _ => return dim,
+            }
+        } else {
+            off
+        };
+        if self.root_param_at(table, self.user_base()).is_none() {
+            return dim;
+        }
+        let id = self.bind_id(table, byte, 32);
+        if id & BINDLESS != 0 {
+            return dim;
+        }
+        let (space, reg) = (id >> 16, id & 0xffff);
+        let want = if is_uav { 6 } else { 3 };
+        let Some(p) = self.ex.resources.iter().find(|p| p.res_type == want && p.space == space && p.lower <= reg && reg <= p.upper) else { return dim };
+        psv_image_dim(p.kind, dim)
     }
 
     fn decl(&self, used: &mut Vec<(String, u8, usize)>, ty: &str, name: &str, slot: u32, class: char, range_type: u32, stride: u32) -> Result<String, String> {
@@ -1896,6 +1952,7 @@ impl<'a> Emitter<'a> {
         range: std::ops::Range<usize>,
     ) -> Result<(), String> {
         let insns = self.insns.clone();
+        let block_start = range.start;
         let dbg_reg = std::env::var("TB_DFDEBUG").ok().and_then(|v| v.parse::<u16>().ok());
         let mut dbg_prev: Option<Sym> = dbg_reg.and_then(|r| sym.get(&r).copied());
         for idx in range {
@@ -2056,6 +2113,9 @@ impl<'a> Emitter<'a> {
                         if bn == next {
                             self.bl.push((table, ins.aux.imm as u32));
                         }
+                        if let Some(c) = Self::sgpr_const_in(&insns, block_start, idx, soff as u8) {
+                            self.bl_const.insert(bn, c);
+                        }
                         for k in 0..n {
                             sym.insert(d + k as u16, Sym::Desc { table, off: BINDLESS | bn, k });
                             written.insert(d + k as u16);
@@ -2161,7 +2221,7 @@ impl<'a> Emitter<'a> {
                     let n = ins.src.len();
                     let rs = ins.src.get(n - 2).and_then(sg).ok_or("mimg: bad srsrc")?;
                     let ss = ins.src.get(n - 1).and_then(sg).ok_or("mimg: bad ssamp")?;
-                    let dim = ins.aux.imm as u32;
+                    let da_dim = ins.aux.imm as u32;
                     let tex_c = self.desc_candidates(sym.get(&rs), 32).ok_or_else(|| {
                         format!("mimg at {:#x}: s{rs} not an image descriptor ({:?})", ins.offset, sym.get(&rs))
                     })?;
@@ -2170,6 +2230,7 @@ impl<'a> Emitter<'a> {
                         let tslot = self.bind_id(*ttable, *off, 32);
                         let writes = ins.mnemonic.contains("store") || ins.mnemonic.contains("atomic") || self.uav_force.contains(&tslot);
                         let is_uav = self.kind_at(*ttable, *off, writes)? == Some(1);
+                        let dim = self.gcn_image_dim(*ttable, *off, is_uav, da_dim);
                         if tslot & BINDLESS != 0 {
                             if is_uav { self.bl_uav.insert(tslot); } else { self.bl_srv.insert(tslot); }
                         }
@@ -2347,8 +2408,6 @@ impl<'a> Emitter<'a> {
         self.touch(dst);
         let d = name(dst)?;
         match d.as_str() {
-            "exec_lo" => self.line(&format!("exec_lo = ({expr}) & 1u;")),
-            "exec_hi" => self.line("exec_hi = 0u;"),
             _ => self.line(&format!("{d} = {expr};")),
         }
         Ok(())
@@ -3174,6 +3233,9 @@ impl<'a> Emitter<'a> {
                         let t = self.tmp;
                         self.tmp += 1;
                         self.line(&format!("uint t{t} = {a}; t{t} |= (t{t} >> 1) & 0x77777777u; t{t} |= (t{t} >> 2) & 0x33333333u; t{t} &= 0x11111111u; t{t} *= 0xfu;"));
+                        if name(&d)? == "exec_lo" {
+                            self.line(&format!("t{t} &= 1u;"));
+                        }
                         self.ws(&d, &format!("t{t}"))?;
                         self.line(&format!("scc = (t{t} != 0u) ? 1u : 0u;"));
                         Ok(())
@@ -3185,6 +3247,9 @@ impl<'a> Emitter<'a> {
                         self.tmp += 1;
                         for (k, x) in [("l", &a), ("h", &ah)] {
                             self.line(&format!("uint t{t}{k} = {x}; t{t}{k} |= (t{t}{k} >> 1) & 0x77777777u; t{t}{k} |= (t{t}{k} >> 2) & 0x33333333u; t{t}{k} &= 0x11111111u; t{t}{k} *= 0xfu;"));
+                        }
+                        if name(&d)? == "exec_lo" {
+                            self.line(&format!("t{t}l &= 1u; t{t}h = 0u;"));
                         }
                         self.ws(&d, &format!("t{t}l"))?;
                         let dh = hi(&d);
@@ -5501,6 +5566,12 @@ impl<'a> Emitter<'a> {
         if ins.mnemonic.starts_with("image_bvh") {
             return self.emit_bvh(ins);
         }
+        let w0 = ins.raw.first().copied().unwrap_or(0);
+        for (bit, name) in [(15, "R128"), (16, "TFE"), (17, "LWE")] {
+            if (w0 >> bit) & 1 != 0 {
+                return Err(format!("{} with {name} set at {:#x} is not translated", ins.mnemonic, ins.offset));
+            }
+        }
         let rs = self.res.get(&idx).cloned().ok_or("unresolved image")?;
         if ins.mnemonic == "image_get_resinfo" {
             let (slot, dim, is_uav) = match rs.first() {
@@ -6261,9 +6332,13 @@ impl<'a> Emitter<'a> {
                 None => "float4",
             };
             let ty = match (dim, self.uav_uint.contains(slot)) {
+                (0, false) => format!("RWTexture1D<{e}>"),
+                (4, false) => format!("RWTexture1DArray<{e}>"),
                 (1, false) => format!("RWTexture2D<{e}>"),
                 (2, false) => format!("RWTexture3D<{e}>"),
                 (5, false) => format!("RWTexture2DArray<{e}>"),
+                (0, true) => "RWTexture1D<uint>".to_string(),
+                (4, true) => "RWTexture1DArray<uint>".to_string(),
                 (1, true) => "RWTexture2D<uint>".to_string(),
                 (2, true) => "RWTexture3D<uint>".to_string(),
                 (5, true) => "RWTexture2DArray<uint>".to_string(),

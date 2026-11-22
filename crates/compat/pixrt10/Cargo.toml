@@ -13,9 +13,11 @@ path = "../pixrt/src/lib.rs"
 
 [dependencies]
 compat-common = { path = "../compat-common" }
+console-sandbox = { path = "../console-sandbox" }
 
 [build-dependencies]
 xone-exports = { path = "../xone-exports" }
 
 [dev-dependencies]
 xone-exports = { path = "../xone-exports" }
+xbtp = { path = "../xbtp" }

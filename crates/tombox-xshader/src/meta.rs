@@ -59,6 +59,7 @@ pub struct PsvResource {
     pub space: u32,
     pub lower: u32,
     pub upper: u32,
+    pub kind: u32,
 }
 
 /// Parse the PSV0 chunk far enough to recover the resource-binding list.
@@ -162,6 +163,7 @@ pub fn parse_psv0(body: &[u8]) -> Result<Vec<PsvResource>, String> {
             space: u32_at(body, e + 4)?,
             lower: u32_at(body, e + 8)?,
             upper: u32_at(body, e + 12)?,
+            kind: if bind_size >= 24 { u32_at(body, e + 16)? } else { 0 },
         });
     }
     Ok(out)

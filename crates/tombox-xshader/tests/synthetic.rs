@@ -325,3 +325,15 @@ fn pixel_attribute_past_the_interpolants_reads_the_layer_sysval() {
     let t = translate(&ex).expect("v_interp_mov of the layer attribute translates");
     assert!(t.hlsl.contains("(uint)(i.i1.x)"), "{}", t.hlsl);
 }
+
+#[test]
+fn image_ops_with_status_or_r128_bits_are_refused() {
+    let root = || Some(RootSig { version: 2, flags: 1, params: vec![table(0, 64, 5), table(2, 16, 5)], num_static_samplers: 0, static_samplers: Vec::new() });
+    let program = |load: u32| vec![0xf40c_0004, 0xfa00_0000, 0x7e00_0280, 0x7e02_0280, load, 0x0000_0000, 0x3604_0081, S_NOP, S_NOP, PACK_V0_V2_V2, PACK_V1_V2_V2, EXP_MRT0_COMPR[0], EXP_MRT0_COMPR[1], S_ENDPGM];
+    let out = || vec![sig("SV_Target", 64, 3, 0, 0xf)];
+    translate(&shader(Stage::Pixel, &program(0xf000_1108), vec![], out(), root())).expect("plain image_load");
+    for (bit, name) in [(15, "R128"), (16, "TFE"), (17, "LWE")] {
+        let e = translate(&shader(Stage::Pixel, &program(0xf000_1108 | 1 << bit), vec![], out(), root())).err().unwrap_or_else(|| panic!("{name} translated"));
+        assert!(e.contains(name), "{name}: {e}");
+    }
+}

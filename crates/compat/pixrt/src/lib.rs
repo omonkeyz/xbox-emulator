@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 use core::ffi::c_void;
+
+#[cfg(not(pixrt_classic))]
+pub mod runtime;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -132,7 +135,8 @@ pub struct ToolState {
     pub heap: usize,
     pub overflow: bool,
     pub overflow_used: std::sync::atomic::AtomicBool,
-    pub overflow_alloc: bool,
+    pub overflow_alloc: std::sync::atomic::AtomicBool,
+    pub words: [std::sync::atomic::AtomicU16; 6],
     pub tools_bytes: u64,
     pub messages: Vec<&'static str>,
 }
@@ -207,7 +211,7 @@ pub fn build_state(v: &Variant) -> ToolState {
     for m in &messages {
         unsafe { OutputDebugStringW(wide(m).as_ptr()) };
     }
-    ToolState { heap, overflow, overflow_used: std::sync::atomic::AtomicBool::new(false), overflow_alloc: false, tools_bytes: size, messages }
+    ToolState { heap, overflow, overflow_used: std::sync::atomic::AtomicBool::new(false), overflow_alloc: std::sync::atomic::AtomicBool::new(false), words: [const { std::sync::atomic::AtomicU16::new(0) }; 6], tools_bytes: size, messages }
 }
 
 pub fn os_build() -> u32 {
@@ -247,8 +251,9 @@ pub unsafe extern "system" fn tool_alloc(size: usize) -> *mut c_void {
             return p.add(1) as *mut c_void;
         }
     }
+    let overflow_alloc = s.overflow_alloc.load(Ordering::Relaxed);
     if s.overflow {
-        if s.overflow_alloc {
+        if overflow_alloc {
             let p = XMemAlloc(total, OVERFLOW_ATTRIBUTES) as *mut u64;
             if p.is_null() {
                 return core::ptr::null_mut();
@@ -257,7 +262,7 @@ pub unsafe extern "system" fn tool_alloc(size: usize) -> *mut c_void {
             s.overflow_used.store(true, Ordering::Relaxed);
             return p.add(1) as *mut c_void;
         }
-    } else if s.overflow_alloc {
+    } else if overflow_alloc {
         return core::ptr::null_mut();
     }
     if size == 0 {

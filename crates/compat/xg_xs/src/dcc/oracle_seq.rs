@@ -203,8 +203,52 @@ fn perturbed_call(dec: usize, enc: usize, c: &Case, p: usize) -> Out {
     call_via(dec, enc, c, 0x3c)
 }
 
-pub(super) const PATTERNS: usize = 8;
+pub(super) const PATTERNS: usize = 11;
 pub(super) const HOOKED: usize = 6;
+pub(super) const HELD: usize = 8;
+pub(super) const THREAD: usize = 10;
+
+fn with_held_xmem<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let w: Vec<u16> = "xmem.dll".encode_utf16().chain(Some(0)).collect();
+    let h = unsafe { GetModuleHandleW(w.as_ptr()) };
+    let g = |nm: &str| unsafe { GetProcAddress(h, format!("{nm}\0").as_ptr()) as usize };
+    let a: XAlloc = unsafe { core::mem::transmute(g("XMemAllocDefault")) };
+    let fr: XFree = unsafe { core::mem::transmute(g("XMemFreeDefault")) };
+    let sizes = [0x4usize, 0x10, 0x100, 0x14d0, 0x10, 0x100, 0x4];
+    let held: Vec<*mut u8> = (0..n).map(|i| unsafe { a(sizes[i % sizes.len()], 0x480009e) }).collect();
+    for (i, &p) in held.iter().enumerate() {
+        unsafe { core::ptr::write_bytes(p, pfill(n + 90, i), sizes[i % sizes.len()]) };
+    }
+    let r = f();
+    for &p in &held {
+        unsafe { fr(p, 0x480009e) };
+    }
+    r
+}
+
+fn on_fresh_thread(dec: usize, enc: usize, id: u64) -> Out {
+    std::thread::spawn(move || perturbed_call(dec, enc, &case(id), 0)).join().unwrap()
+}
+
+pub(super) fn host_residue_sites(b: &super::oracle_cases::Build, c: &Case) -> Vec<(usize, usize, usize)> {
+    if c.enc { vec![(b.convs, 0x88, 0xff)] } else { vec![] }
+}
+
+fn poked_call(o: &crate::oracle::Oracle, c: &Case, p: usize) -> Out {
+    let b = build_of(o);
+    let sites = host_residue_sites(&b, c);
+    let (cd, ce) = (o.f("XGDecodeDCC") as usize, o.f("XGEncodeDCC") as usize);
+    let Some(&(site, off, mask)) = sites.first() else { return perturbed_call(cd, ce, c, 0) };
+    use std::sync::atomic::Ordering::SeqCst;
+    super::watch::POKE[0].store(off, SeqCst);
+    super::watch::POKE[1].store(p, SeqCst);
+    super::watch::POKE[2].store(mask, SeqCst);
+    let w = super::watch::Watch::arm(&[], Some(o.h + site));
+    let r = perturbed_call(cd, ce, c, 0);
+    drop(w);
+    super::watch::POKE[2].store(0, SeqCst);
+    r
+}
 
 type XAlloc = unsafe extern "system" fn(usize, u64) -> *mut u8;
 type XFree = unsafe extern "system" fn(*mut u8, u64);
@@ -213,6 +257,10 @@ static XDEFF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 static HOOK_PAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(super) static ALOG: std::sync::Mutex<Vec<(bool, usize, usize, u64)>> = std::sync::Mutex::new(Vec::new());
+pub(super) static SURFW_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(super) static SURFW_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(super) static SURFW_OFF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(super) static SURFW: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 pub(super) static ALOG_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[inline(never)]
@@ -222,6 +270,19 @@ unsafe extern "system" fn hook_alloc(size: usize, attr: u64) -> *mut u8 {
         let r = f(size, attr);
         if let Ok(mut l) = ALOG.try_lock() {
             l.push((true, r as usize, size, attr));
+        }
+        return r;
+    }
+    if SURFW_ON.load(std::sync::atomic::Ordering::SeqCst) {
+        let f: XAlloc = core::mem::transmute(XDEF.load(std::sync::atomic::Ordering::SeqCst));
+        let r = f(size, attr);
+        if size == 0x100 {
+            let n = SURFW_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n % 2 == 1 {
+                let mut l = SURFW.lock().unwrap();
+                l.push(r as usize + SURFW_OFF.load(std::sync::atomic::Ordering::SeqCst));
+                super::watch::rearm(&l);
+            }
         }
         return r;
     }
@@ -333,7 +394,7 @@ fn heap_child(spec: &str) {
     for p in from..PATTERNS {
         writeln!(so, "@@P {p}").unwrap();
         so.flush().unwrap();
-        let r = if p == RELOC { perturbed_call(rd, re, &c, 0) } else if p >= HOOKED { with_xmem_hook(p, || perturbed_call(cd, ce, &c, 0)) } else { perturbed_call(cd, ce, &c, p.saturating_sub(1)) };
+        let r = if p == RELOC { perturbed_call(rd, re, &c, 0) } else if p == THREAD { on_fresh_thread(cd, ce, id) } else if p >= HELD { with_held_xmem(if p == HELD { 7 } else { 23 }, || perturbed_call(cd, ce, &c, 0)) } else if p >= HOOKED { with_xmem_hook(p, || perturbed_call(cd, ce, &c, 0)) } else { perturbed_call(cd, ce, &c, p.saturating_sub(1)) };
         writeln!(so, "@@H {p} {:08x} {:016x}", r.hr as u32, out_hash(&c, &r)).unwrap();
         so.flush().unwrap();
     }
@@ -396,7 +457,10 @@ pub(super) fn proven(v: &[Res]) -> Option<&'static str> {
     if v.len() > RELOC && differ(&v[0], &v[RELOC]) {
         return Some("console output changes when the same console DLL is loaded at another base (it writes its own code addresses)");
     }
-    if v.len() > HOOKED && v[HOOKED..].iter().any(|r| differ(&v[0], r)) {
+    if v.len() > HELD && v[HELD..THREAD.min(v.len())].iter().any(|r| differ(&v[0], r)) {
+        return Some("console output changes when the title holds other XMem blocks across the call (XMemAllocDefault, the console attribute 0x480009e); it embeds addresses or contents of the title allocator's heap");
+    }
+    if v.len() > HOOKED && v[HOOKED..HELD.min(v.len())].iter().any(|r| differ(&v[0], r)) {
         return Some("console output changes when the title installs a forwarding XMem allocation hook (XMEM_SET_ALLOCATION_HOOKS); it depends on the title's allocator path");
     }
     None
@@ -504,7 +568,7 @@ fn dcc_reject_causes() {
             "E rejects with every unknown fixed".to_string()
         } else {
             let bits: Vec<String> = (0..4).filter(|&b| native_with(&c, e, 1 << b) != 0).map(|b| ["relay1-entry", "relay2-entry", "relay3-entry", "conv-host-residue"][b].to_string()).collect();
-            format!("E needs {}", bits.join("+"))
+            { let qs: Vec<String> = (0..8).filter(|&q| native_with(&c, e, 1 << (8 + q)) != 0).map(|q| format!("q{q}")).collect(); format!("E needs {} conv quads [{}]", bits.join("+"), qs.join(",")) }
         };
         by.entry(k).or_default().push(id);
     }
@@ -699,7 +763,18 @@ fn dcc_watch_scratch() {
         let w = super::watch::Watch::arm(&addrs, Some(o.h + site));
         let _ = perturbed_call(cd, ce, &c, 0);
         let ev = w.events();
+        let stks: Vec<[usize; 64]> = (0..ev.len()).map(|i| w.stack(i)).collect();
         drop(w);
+        if std::env::var("TOMBOX_DCC_WATCH_STK").is_ok() {
+            let hits: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.1 & 8 != 0).map(|(i, _)| i).collect();
+            let pick: Vec<usize> = hits.iter().take(2).flat_map(|&h| h.saturating_sub(3)..h).collect();
+            for (i, (rip, m)) in ev.iter().enumerate().filter(|(i, _)| pick.contains(i)) {
+                let st: Vec<String> = stks[i].iter().enumerate().filter(|(_, &v)| (v >= o.h && v < o.h + 0x100000) || (v > 0x10000_0000 && super::watch::where_is(v).contains('+'))).map(|(k, &v)| format!("[{:#x}]{}", k * 8, if v >= o.h && v < o.h + 0x100000 { format!("con+{:#x}", v - o.h) } else { super::watch::where_is(v) })).collect();
+                let regs: Vec<String> = stks[i][..2].iter().map(|v| format!("{v:#x}")).collect();
+                println!("watch {id} ev{i} top {}", regs.join(" "));
+                println!("watch {id} ev{i} m{m} rip {} stk {}", super::watch::where_is(*rip), st.join(" "));
+            }
+        }
         let mut blk = 0usize;
         let mut last: Vec<Option<usize>> = vec![None; qs.len()];
         let mut line = Vec::new();
@@ -822,6 +897,67 @@ fn dcc_surface_initial() {
 
 #[test]
 #[ignore]
+fn dcc_watch_surfaces() {
+    let Ok(spec) = std::env::var("TOMBOX_DCC_SURFW") else { return };
+    let (id, off) = spec.split_once(':').unwrap_or((&spec, "0"));
+    let id: u64 = id.parse().unwrap();
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let o = oracle().expect("console xg_xs.dll");
+    let (cd, ce) = (o.f("XGDecodeDCC") as usize, o.f("XGEncodeDCC") as usize);
+    let c = case(id);
+    let w = super::watch::Watch::arm(&[], None);
+    SURFW.lock().unwrap().clear();
+    SURFW_N.store(0, std::sync::atomic::Ordering::SeqCst);
+    SURFW_OFF.store(off.parse().unwrap(), std::sync::atomic::Ordering::SeqCst);
+    SURFW_ON.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = with_xmem_hook(0, || call_via(cd, ce, &c, 0x3c));
+    SURFW_ON.store(false, std::sync::atomic::Ordering::SeqCst);
+    let ev = w.events();
+    let w_st: Vec<[usize; 64]> = (0..ev.len()).map(|i| w.stack(i)).collect();
+    drop(w);
+    let surf = SURFW.lock().unwrap().clone();
+    println!("surfw {id} surfaces {surf:x?} hr {:#x} out {:02x?}", r.hr, &r.dst[..r.dst.len().min(16)]);
+    for (i, (rip, m)) in ev.iter().enumerate() {
+        let v = super::watch::VAL[i].load(std::sync::atomic::Ordering::SeqCst);
+        let at = if *rip >= o.h && *rip < o.h + 0x100000 { format!("con+{:#x}", rip - o.h) } else { super::watch::where_is(*rip) };
+        let st: Vec<String> = w_st[i].iter().enumerate().filter(|(_, &x)| x >= o.h && x < o.h + 0x100000).map(|(k, &x)| format!("[{:#x}]con+{:#x}", k * 8, x - o.h)).collect();
+        println!("surfw {id} ev{i} s{m} {at} val {v:016x} stk {}", st.join(" "));
+    }
+}
+
+#[test]
+#[ignore]
+fn dcc_dec_residue_find() {
+    let Ok(spec) = std::env::var("TOMBOX_DCC_RFIND") else { return };
+    let (id, pat) = spec.split_once(':').unwrap();
+    let id: u64 = id.parse().unwrap();
+    let pat: Vec<u8> = pat.split(',').map(|x| u8::from_str_radix(x, 16).unwrap()).collect();
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let o = oracle().expect("console xg_xs.dll");
+    let b = build_of(&o);
+    let (cd, ce) = (o.f("XGDecodeDCC") as usize, o.f("XGEncodeDCC") as usize);
+    let c = case(id);
+    let sites = [(b.dconv, b.conv), (b.drelays[0], b.relay), (b.drelays[1], b.relay), (b.drelays[2], b.relay)];
+    for &m in &c.meta {
+        let sg = crate::dcc::bits::seg_info_checked(m as u32);
+        println!("rfind {id} meta {m:#x} segs {sg:x?}");
+    }
+    for (si, &(s, t)) in sites.iter().enumerate() {
+        let sn = unsafe { super::oracle_cases::Snap::new(o.h, s, o.h + t) };
+        unsafe { sn.reset() };
+        let r = perturbed_call(cd, ce, &c, 0);
+        let n = (unsafe { sn.count() } as usize).min(super::oracle_cases::SLOTS);
+        for k in 0..n {
+            let sl = unsafe { sn.slot(k) };
+            let hits: Vec<String> = (0..sl.len() - pat.len()).filter(|&j| sl[j..j + pat.len()] == pat[..]).map(|j| format!("rsp-{:#x}", super::oracle_cases::SNAP - j)).collect();
+            let t = &sl[super::oracle_cases::SNAP - 0x88..super::oracle_cases::SNAP - 0x48];
+            println!("rfind {id} site{si} call{k} hr {:#x} hits {hits:?} temp {:02x?}", r.hr, t);
+        }
+    }
+}
+
+#[test]
+#[ignore]
 fn dcc_alloc_trace() {
     let Ok(ids) = std::env::var("TOMBOX_DCC_ALLOC_IDS") else { return };
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -865,18 +1001,30 @@ fn oracle_dcc_accepted_cases_invariant() {
         }
         acc += 1;
         CUR_ID.store(id as usize, std::sync::atomic::Ordering::SeqCst);
-        for v in 0..8usize {
+        for v in 0..10usize {
             let r = match v {
                 5 => perturbed_call(rd, re, &c, 0),
                 6 | 7 => with_xmem_hook(v, || perturbed_call(cd, ce, &c, 0)),
+                8 | 9 => poked_call(&o, &c, v),
                 _ => perturbed_call(cd, ce, &c, v),
             };
             runs += 1;
             if !same_out(&c, &nat, &r) {
+                if v == 0 && std::env::var("TOMBOX_DCC_INV_DUMP").is_ok() {
+                    for blk in 0..c.n {
+                        let (a, b2) = (&nat.dst[blk * 256..blk * 256 + 256], &r.dst[blk * 256..blk * 256 + 256]);
+                        let dj: Vec<usize> = (0..256).filter(|&j| a[j] != b2[j]).collect();
+                        if !dj.is_empty() {
+                            println!("invdump {id} fmt {} meta {:02x?} blk{blk} differ {:?}
+  native  {:02x?}
+  console {:02x?}", c.fmt, c.meta, &dj[..dj.len().min(24)], &a[dj[0] & !63..(dj[0] & !63) + 64], &b2[dj[0] & !63..(dj[0] & !63) + 64]);
+                        }
+                    }
+                }
                 bad.push(format!("{id}@{v}"));
             }
         }
     }
-    println!("dcc accepted cases ({}): {acc} of {n} generator cases accepted natively; {runs} console runs under stack smears 00/ff/random, heap sprays, a relocated console DLL and two forwarding XMem allocation hooks; {} differ from native: {:?}", b.name, bad.len(), &bad[..bad.len().min(40)]);
+    println!("dcc accepted cases ({}): {acc} of {n} generator cases accepted natively; {runs} console runs under stack smears 00/ff/random, heap sprays, a relocated console DLL, two forwarding XMem allocation hooks and two rewrites of the host-CRT scratch residue; {} differ from native: {:?}", b.name, bad.len(), &bad[..bad.len().min(40)]);
     assert!(bad.is_empty());
 }
