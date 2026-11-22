@@ -636,6 +636,35 @@ fn gpu_mesh_uniform_entry_counts_preserve_rendered_output() {
 }
 
 #[test]
+fn gpu_mesh_lds_write_before_reconverged_barrier() {
+    let shader = |divergent: bool| {
+        let mut words = console_ms(67, 1, TRI);
+        let insert = words.len() - 3;
+        words.splice(insert..insert, [
+            vop2(0x1a, 10, ic(2), 0), // Each writer gets its own LDS word.
+            sop1(4, 10, EXEC),
+            vopc(0xd2, ic(11), 0), // Only lane 11 writes.
+            sopp(8, if divergent { 4 } else { 3 }),
+            0xd834_0000, 10, // ds_write_b32 v10, v0
+            sopp(0x0c, 0), // Wait for the writes.
+            sopp(0x0a, 0),
+            sop1(4, EXEC, 10),
+            vop1(1, 10, ic(44)),
+            0xd8d8_0000, 0x0700_000a, // ds_read_b32 v7, v10
+            sopp(0x0c, 0),
+        ]);
+        words
+    };
+    let divergent = ms(&shader(true), mesh_info(128, 128, 128, 2), pos_param_outs());
+    let err = translate(&divergent).err().expect("divergent LDS barrier is refused");
+    assert!(err.contains("writes LDS or memory"), "{err}");
+
+    // The triangle starts at lane 64, which reads the value lane 11 wrote.
+    let got = unsafe { render(&shader(false), 1) }.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(got, [11, 1, 0x77, 0x88]);
+}
+
+#[test]
 fn mesh_alloc_and_lds_refusals() {
     let mut w = console_ms(67, 1, TRI);
     let i = w.iter().position(|x| *x == sopp(0x10, 9)).unwrap();
