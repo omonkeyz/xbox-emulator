@@ -37,11 +37,7 @@ impl<'a> Emitter<'a> {
 
     fn ms_threads(&self) -> Result<u32, String> {
         let m = self.mesh_info()?;
-        let n = m.num_threads.iter().map(|&x| x.max(1)).product::<u32>();
-        if m.num_threads[0] == 0 || n > 128 {
-            return Err(format!("mesh shader thread-group size {:?} outside 1..128", m.num_threads));
-        }
-        Ok(n)
+        crate::meta::mesh_thread_count(m.num_threads)
     }
 
     pub(super) fn mesh_mbcnt(&self, ins: &Insn, b: String) -> Result<String, String> {
@@ -204,7 +200,7 @@ impl<'a> Emitter<'a> {
         }
         let _ = writeln!(h, "}};");
         let _ = writeln!(h, "struct SPrim {{ bool cull : SV_CullPrimitive; }};");
-        let [tx, ty_, tz] = m.num_threads.map(|x| x.max(1));
+        let [tx, ty_, tz] = m.num_threads;
         let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]");
         let _ = writeln!(h, "[outputtopology(\"{topo}\")]");
         let _ = writeln!(

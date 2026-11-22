@@ -115,16 +115,14 @@ pub fn check_against_psv0(m: &MeshInfo, p: &EntryStageProps) -> Result<[u32; 3],
             p.max_vertices, p.max_primitives, p.topology, m.max_vertices, m.max_primitives, m.topology
         ));
     }
-    let n: u64 = p.num_threads.iter().map(|&x| x as u64).product();
-    if p.num_threads.contains(&0) || n > 128 {
-        return Err(format!("DXIL entry thread-group size {:?} outside 1..128", p.num_threads));
-    }
+    crate::meta::mesh_thread_count(p.num_threads)?;
     Ok(p.num_threads)
 }
 
 pub fn fill_num_threads(gs: &mut Option<GsInfo>, disasm: impl FnOnce() -> Option<String>) -> Result<bool, String> {
     let Some(m) = gs.as_mut().and_then(|g| g.mesh.as_mut()) else { return Ok(false) };
-    if m.num_threads[0] != 0 {
+    if m.num_threads != [0; 3] {
+        crate::meta::mesh_thread_count(m.num_threads)?;
         return Ok(false);
     }
     let Some(p) = disasm().as_deref().and_then(parse_entry_stage_props) else { return Ok(false) };
@@ -160,6 +158,18 @@ mod tests {
         m.max_vertices = 4;
         assert!(check_against_psv0(&m, &p).unwrap_err().contains("mesh state"));
         assert_eq!(check_against_psv0(&mi(13, 16), &p), Ok([32, 1, 1]));
+    }
+
+    #[test]
+    fn invalid_dimensions_do_not_fall_back_or_overflow() {
+        let mut m = mi(13, 16);
+        m.num_threads = [0, 2, 1];
+        let mut gs = Some(GsInfo { input_primitive: 0, output_topology: 0, max_vertex_count: 0, mesh: Some(m) });
+        assert!(fill_num_threads(&mut gs, || panic!("consulted")).is_err());
+        m.num_threads = [0; 3];
+        let mut p = parse_entry_stage_props(MS).unwrap();
+        p.num_threads = [u32::MAX; 3];
+        assert!(check_against_psv0(&m, &p).is_err());
     }
 
     #[test]

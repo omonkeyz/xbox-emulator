@@ -237,6 +237,32 @@ fn mesh_clip_distance_export_maps_to_pos1() {
 }
 
 #[test]
+fn mesh_and_amplification_validate_thread_dimensions() {
+    for dims in [[1, 0, 1], [0, 1, 1], [129, 1, 1], [65536, 65536, 1], [u32::MAX; 3]] {
+        let mut info = mesh_info(1, 3, 1, 2);
+        info.num_threads = dims;
+        let mesh = ms(&console_ms(3, 1, 0), info, pos_param_outs());
+        assert!(translate(&mesh).err().unwrap().contains("thread-group size"));
+        info.stage = 14;
+        let mut amp = ms(&[S_ENDPGM], info, vec![]);
+        amp.stage = Stage::Amplification;
+        assert!(translate(&amp).err().unwrap().contains("thread-group size"));
+    }
+
+    for dims in [[1, 1, 1], [1, 3, 1], [8, 4, 4]] {
+        let mut info = mesh_info(1, 0, 0, 0);
+        info.num_threads = dims;
+        info.stage = 14;
+        let mut amp = ms(&[S_ENDPGM], info, vec![]);
+        amp.stage = Stage::Amplification;
+        let t = translate(&amp).unwrap();
+        let threads: u32 = dims.into_iter().product();
+        assert!(t.hlsl.contains(&format!("tb_k < 4u; tb_k += {threads}u) tb_args[tb_k] = 0u;")));
+        dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).unwrap();
+    }
+}
+
+#[test]
 fn mesh_refusals_are_explicit() {
     let base = console_ms(3, 1, 0);
     let mut mi = mesh_info(128, 128, 128, 2);

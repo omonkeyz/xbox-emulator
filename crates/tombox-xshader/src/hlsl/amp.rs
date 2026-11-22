@@ -73,8 +73,8 @@ impl<'a> Emitter<'a> {
     }
 
     fn amp_threads(&self, m: &MeshInfo) -> Result<[u32; 3], String> {
-        if m.num_threads[0] != 0 {
-            return Ok(m.num_threads.map(|x| x.max(1)));
+        if m.num_threads != [0; 3] {
+            return Ok(m.num_threads);
         }
         let f = &self.ex.fssm;
         let w = |o: usize| f.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
@@ -246,9 +246,7 @@ impl<'a> Emitter<'a> {
             return Err(format!("amplification payload of {} bytes exceeds the D3D12 limit {MAX_PAYLOAD}", m.payload_bytes));
         }
         let [tx, ty, tz] = self.amp_threads(&m)?;
-        if tx * ty * tz > 128 {
-            return Err(format!("amplification thread-group size {:?} above 128", m.num_threads));
-        }
+        let threads = crate::meta::mesh_thread_count([tx, ty, tz])?;
         let n = payload_dwords(m.payload_bytes.max(4));
         h.insert_str(0, "#define TB_AMP_GMEM 1\n");
         h.push_str(&self.ring_helpers(n, false));
@@ -261,8 +259,8 @@ impl<'a> Emitter<'a> {
         let _ = writeln!(h, "{}", self.reg_decls());
         let _ = writeln!(h, "    v0 = gtid.x; v1 = gtid.y; v2 = gtid.z;");
         let _ = writeln!(h, "    s2 = {:#x}u; s3 = {:#x}u; s4 = gid.x; tb_gidx = gid.x;", ARGS_HI << 24, PAY_HI << 24);
-        let _ = writeln!(h, "    if (gi < 4u) tb_args[gi] = 0u;");
-        let _ = writeln!(h, "    for (uint tb_k = gi; tb_k < {n}u; tb_k += {}u) tb_pl.w[tb_k] = 0u;", tx * ty * tz);
+        let _ = writeln!(h, "    for (uint tb_k = gi; tb_k < 4u; tb_k += {threads}u) tb_args[tb_k] = 0u;");
+        let _ = writeln!(h, "    for (uint tb_k = gi; tb_k < {n}u; tb_k += {threads}u) tb_pl.w[tb_k] = 0u;");
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
         h.push_str(&self.body);
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");

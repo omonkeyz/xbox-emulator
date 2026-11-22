@@ -85,6 +85,14 @@ pub struct MeshInfo {
     pub num_threads: [u32; 3],
 }
 
+pub(crate) fn mesh_thread_count(dims: [u32; 3]) -> Result<u32, String> {
+    let count = dims.into_iter().try_fold(1u32, u32::checked_mul);
+    match count {
+        Some(n @ 1..=128) => Ok(n),
+        _ => Err(format!("mesh/amplification thread-group size {dims:?} outside 1..128")),
+    }
+}
+
 pub fn parse_psv0_mesh(info: &[u8]) -> Option<MeshInfo> {
     let stage = *info.get(24)?;
     let num_threads = if info.len() >= 48 { [u32_at(info, 36).ok()?, u32_at(info, 40).ok()?, u32_at(info, 44).ok()?] } else { [0; 3] };
