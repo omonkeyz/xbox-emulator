@@ -50,7 +50,7 @@ Counted live by `tools/progress/gen.py`; full table with evidence in [docs/MILES
 |---|---|---|
 | Fortnite (Chapter 2 Season 4) | 2.0.1461.7919 | Boots, logs in to a private server, reaches the lobby. 2D interface correct. 3D scene lit but the character material is wrong and bloom shows artifacts. No audio. Not playable. On this machine (2026-11-21): boots, first frames, window on the primary monitor, login complete, hotfix success, game-mode select, Battle Royale lobby (`UI.State.Athena.Frontend`). |
 | XDefiant | dump examined | **Not run.** Imports and console OS (10.0.22000) mapped in [docs/LIBRARY_MAP.md](docs/LIBRARY_MAP.md); new modules include XCurl, Bink2Scarlett, chad (XDsp*), xapu (XApu*). |
-| Grand Theft Auto VI | 1.0.2.1 | **Not run** (dump has no executable). Shader package examined: 26,503 shaders, plain compressed Xbox shader containers. Of a 4,000-shader sample all disassemble cleanly; ~⅓ of vertex shaders translate. Blockers: mesh shaders, shaders without root signatures. |
+| Grand Theft Auto VI | 1.0.2.1 | **Not run** (dump has no executable). The package audit matched all 611 distinct static imports from the 16 bundled DLLs to Windows, package, or emulator exports. The [mesh shader scan](docs/BLOCKERS.md#grand-theft-auto-vi-package-audit) still stops at resource binding because the shaders lack embedded root signatures. |
 
 ## Our local state
 

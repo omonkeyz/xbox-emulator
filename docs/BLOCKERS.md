@@ -459,9 +459,15 @@ elease`, the log shows one install and every interface is emulated.
   - Measured on the PC: every input event is kept per provider, flag bits 1/2/3/6 add rundown events, missing input 2, NULL merged name 0x507, bit 30 with low 12 bits clear 0x57, two inputs from different sessions 1306 (console result). Without a console image the export returns 0x507.
   - Tests: tests_merge::* (SIH ETL fixture copied to temp, events read back with OpenTraceW/ProcessTrace) and tests/exports.rs (ordinal 1, and the built cdylib loaded with LoadLibraryW forwards to the console image).
 - NOTE, sechost EtwQueryRealtimeConsumer: already implemented (port of 0x4ad40) and its tests pass. The PC sechost/advapi32 do not export it, so it cannot be a thin forward. Its emulated EventsLost/BuffersLost stay 0 because realtime delivery runs in the PC ProcessTrace.
+## Grand Theft Auto VI package audit
+
+- Build 1.0.2.1 contains 16 DLLs with 611 distinct static module and symbol pairs. The package DLL export tables accounted for 113, Windows exports and API-set hosts accounted for 492, and the built emulator DLLs exported the remaining six. The audit used emulator revision `4cb7a54` and did not run the package DLLs or verify dynamic loading.
+- The package lacks the title executable, so its imports and runtime initialization remain untested.
+- All 26,503 scanned shader containers lack an embedded root signature. That includes 9,282 mesh containers with 8,765 unique shaders. A matching pipeline root signature is needed to establish the title's mesh resource bindings.
+
 ## Mesh / amplification shader stages (emulator, all titles) - 2026-11-21, stages agent
 - DONE: Mesh shaders translate from RDNA2 ISA to HLSL ms_6_5 (crates/tombox-xshader/src/hlsl/mesh.rs). The console MS ABI is taken from 8765 GTA VI mesh programs: v5 = workgroup vertex id (gid.x * threads + thread index), s3[27:24] = wave index, s_sendmsg 9 (GS_ALLOC_REQ) with m0 = prims << 12 | verts, exp pos 12 / clip-cull 13-15, exp prim 20 (indices at bits 0/10/20, bit 31 = culled). It renders correctly on WARP (tests/mesh.rs).
-- OPEN, real mesh programs: none of the four titles has a mesh or amplification shader in its uncompressed data or captured shader caches (Fortnite pakchunk0: 105,506 unique shaders, 0 MS/AS). All 8765 GTA VI mesh shaders have no RTS0 chunk, so their user-SGPR resources (s16 and up) cannot be bound without the title's root signature. The translator stops at the first resource load (8749 of them) or at an unsupported wave-reduction prologue (16 of them).
+- OPEN, real mesh programs: Fortnite pakchunk0 contains 105,506 unique shaders and no mesh or amplification shaders. The current GTA VI mesh scan stops first at resource binding for all 8,765 unique shaders. Of those, 6,297 first fail at a scalar buffer load and 2,468 first fail at a descriptor-table buffer load. The scan does not establish what would fail after the correct pipeline bindings are supplied.
 - OPEN, amplification shaders: not translated. The ABI was derived from the xgs12_10d driver side (0xde6f0, 0xde8a0, 0xde570):
   - The AS runs as a compute dispatch on the ACE queue.
   - The user data is written by SET_SH_REG to COMPUTE_USER_DATA_0..3:
