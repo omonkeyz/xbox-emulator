@@ -44,20 +44,33 @@ def main():
     t += rust_rows("SQRT0", table(os.path.join(d, "sqrt64_e0.txt"), 16))
     t += rust_rows("SQRT1", table(os.path.join(d, "sqrt64_e1.txt"), 16))
     open(tables_out, "w").write("\n".join(t) + "\n")
+    ranges = [("v_rcp_f32", "v_rcp_f32_d3_e0", 0x3F800000), ("v_rcp_f32", "v_rcp_f32_d3_e1", 0x40000000),
+              ("v_rcp_iflag_f32", "v_rcp_iflag_f32_d3_e0", 0x3F800000), ("v_rcp_iflag_f32", "v_rcp_iflag_f32_d3_e1", 0x40000000),
+              ("v_rsq_f32", "v_rsq_f32_d3_e0", 0x3F800000), ("v_rsq_f32", "v_rsq_f32_d3_e1", 0x40000000),
+              ("v_sqrt_f32", "v_sqrt_f32_d3_e0", 0x3F800000), ("v_sqrt_f32", "v_sqrt_f32_d3_e1", 0x40000000),
+              ("v_log_f32", "v_log_f32_d3_e0", 0x3F800000), ("v_log_f32", "v_log_f32_d3_e1", 0x40000000),
+              ("v_exp_f32", "v_exp_f32_d3_m1p2", 0x3F800000), ("v_exp_f32", "v_exp_f32_d3_m05", 0x3F000000), ("v_exp_f32", "v_exp_f32_d3_n05", 0xBF000000),
+              ("v_sin_f32", "v_sin_f32_d3_e125", 0x3E000000), ("v_sin_f32", "v_sin_f32_d3_e25", 0x3E800000),
+              ("v_cos_f32", "v_cos_f32_d3_e125", 0x3E000000), ("v_cos_f32", "v_cos_f32_d3_e25", 0x3E800000)]
+    for base in (0x3F000000, 0x00800000, 0x7F000000):
+        ranges.append(("v_log_f32", f"x_log_{base:08x}", base))
+    for base in (0x40000000, 0xC0000000, 0x42800000, 0xC2800000, 0x33800000):
+        ranges.append(("v_exp_f32", f"x_exp_{base:08x}", base))
+    for op in ("sin", "cos"):
+        for base in (0x3F000000, 0x3F800000, 0x40800000, 0x4A800000, 0x39800000, 0x39000000, 0xBE800000, 0x00800000):
+            ranges.append((f"v_{op}_f32", f"x_{op}_{base:#010x}", base))
     w = [f'pub const SOURCE: &str = "{gfx}, {machine}";']
-    w.append("pub const RANGE_DIGESTS: [(&str, u64); 4] = [")
-    for op, files in (("v_rcp_f32", ("v_rcp_f32_d3_e0", "v_rcp_f32_d3_e1")), ("v_rcp_iflag_f32", ("v_rcp_iflag_f32_d3_e0", "v_rcp_iflag_f32_d3_e0")),
-                      ("v_rsq_f32", ("v_rsq_f32_d3_e0", "v_rsq_f32_d3_e1")), ("v_sqrt_f32", ("v_sqrt_f32_d3_e0", "v_sqrt_f32_d3_e1"))):
-        ws = words(os.path.join(d, "data", files[0] + ".bin"), 1 << 23)
-        if op != "v_rcp_iflag_f32":
-            ws += words(os.path.join(d, "data", files[1] + ".bin"), 1 << 23)
-        w.append(f'    ("{op}", {fnv(ws):#018x}),')
+    w.append(f"pub const RANGE_DIGESTS: [(&str, u32, u64); {len(ranges)}] = [")
+    for op, fn, base in ranges:
+        ws = words(os.path.join(d, "data", fn + ".bin"), 1 << 23)
+        w.append(f'    ("{op}", {base:#010x}, {fnv(ws):#018x}),')
     w.append("];")
-    w.append("pub const EDGE_DIGESTS: [(&str, u64); 8] = [")
-    for op in ("rcp", "rcp_iflag", "rsq", "sqrt"):
+    ops = ("rcp", "rcp_iflag", "rsq", "sqrt", "log", "exp", "sin", "cos")
+    w.append(f"pub const EDGE_DIGESTS: [(&str, u32, u64); {2 * len(ops)}] = [")
+    for op in ops:
         for m in (3, 0):
             ws = words(os.path.join(d, "data", f"edge_{op}_d{m}.bin"), 1 << 20)
-            w.append(f'    ("v_{op}_f32 mode {m}", {fnv(ws):#018x}),')
+            w.append(f'    ("v_{op}_f32", {m}, {fnv(ws):#018x}),')
     w.append("];")
     open(hw_out, "w").write("\n".join(w) + "\n")
 

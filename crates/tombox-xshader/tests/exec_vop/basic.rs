@@ -149,7 +149,7 @@ fn vop1_basic() {
     for &(x, r) in &[(1.0f32, 0.0f32), (8.0, 3.0), (0.25, -2.0), (1024.0, 10.0), (0.0, f32::NEG_INFINITY), (f32::INFINITY, f32::INFINITY), (-0.0, f32::NEG_INFINITY)] {
         v1c(&mut c, "v_log_f32", 0x27, fb(x), fb(r));
     }
-    v1c(&mut c, "v_log_f32", 0x27, fb(-1.0), 0x7fc0_0000);
+    v1c(&mut c, "v_log_f32", 0x27, fb(-1.0), 0xffc0_0000);
     for &(x, r) in &[(1.0f32, 1.0f32), (2.0, 0.5), (-4.0, -0.25), (0.0, f32::INFINITY), (-0.0, f32::NEG_INFINITY), (f32::INFINITY, 0.0), (0.125, 8.0)] {
         v1c(&mut c, "v_rcp_f32", 0x2a, fb(x), fb(r));
         v1c(&mut c, "v_rcp_iflag_f32", 0x2b, fb(x), fb(r));

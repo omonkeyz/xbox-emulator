@@ -191,3 +191,17 @@ Every row reports 0 mismatches against all of its f64 outputs. Then
 
 writes the tables and FNV-1a-64 digests of the recorded f32 results (every mantissa of [1,4), and the
 whole-range sweep in both denormal modes) that crates/tombox-xshader/src/trans32 is tested against.
+
+
+f32 log, exp, sin, cos (crates/tombox-xshader/src/trans32/amd.rs)
+-----------------------------------------------------------------
+
+These are ported from AMD rocjitsu (ROCm/rocm-systems, emulation/rocjitsu/lib/util/include/util/
+amdgpu_{exp,log,trig}.h, MIT; see trans32/LICENSE-rocjitsu.txt), which was fitted to gfx1100 and
+gfx1201 captures. Compiled unchanged against the gfx1036 data here (quiet_snan = false, denormal mode 3)
+it reproduces every recorded result: 25 complete 2^23-input ranges and the whole-range sweep in both
+denormal modes. Denormal mode 0 equals mode 3 with denormal inputs and results flushed to signed zero.
+
+    trans_runner k.co v_sin_f32_d3 8388608 0x39800000 1 data/x_sin_0x39800000.bin
+    (log: 0x3f000000 0x00800000 0x7f000000; exp: 0x40000000 0xc0000000 0x42800000 0xc2800000 0x33800000;
+     sin, cos: 0x3f000000 0x3f800000 0x40800000 0x4a800000 0x39800000 0x39000000 0xbe800000 0x00800000)

@@ -1,3 +1,4 @@
+mod amd;
 mod tables;
 
 #[cfg(test)]
@@ -6,7 +7,7 @@ mod rdna2_hw;
 use std::fmt::Write;
 use tables::{RCP, RSQ0, RSQ1, SQRT0, SQRT1};
 
-pub const OPS: [&str; 4] = ["v_rcp_f32", "v_rcp_iflag_f32", "v_rsq_f32", "v_sqrt_f32"];
+pub const OPS: [&str; 8] = ["v_rcp_f32", "v_rcp_iflag_f32", "v_rsq_f32", "v_sqrt_f32", "v_log_f32", "v_exp_f32", "v_sin_f32", "v_cos_f32"];
 
 pub fn op_index(mnemonic: &str) -> Option<usize> {
     OPS.iter().position(|m| *m == mnemonic)
@@ -75,6 +76,13 @@ fn pack(sign: u32, e: i32, a: i64, round_bits: u32, shift: i64) -> u32 {
 }
 
 pub fn eval(op: usize, x: u32) -> u32 {
+    match op {
+        4 => return amd::log(x),
+        5 => return amd::exp(x),
+        6 => return amd::trig(x, false),
+        7 => return amd::trig(x, true),
+        _ => {}
+    }
     let s = x & 0x8000_0000;
     let ex = (x >> 23) & 0xff;
     let mn = if ex == 0 { 0 } else { x & 0x7f_ffff };
@@ -168,6 +176,7 @@ uint tb_t32_pack(uint s, int e, int64_t a, uint rb, int64_t shift) {
     return s | ((uint)(e + 127) << 23) | ((uint)y & 0x7fffffu);
 }
 uint tb_t32(uint op, uint x) {
+    if (op >= 4u) return tb_t32_amd(op, x);
     uint s = x & 0x80000000u, ex = (x >> 23) & 0xffu;
     uint mn = ex == 0u ? 0u : (x & 0x7fffffu);
     if (ex == 255u && mn != 0u) return x;
@@ -199,6 +208,7 @@ pub fn hlsl() -> String {
     let vals: Vec<String> = rows.iter().flat_map(|r| r.iter()).map(|v| format!("{v}")).collect();
     let mut h = String::new();
     let _ = writeln!(h, "static const int64_t TB_T32_TAB[{}] = {{ {} }};", vals.len(), vals.join(", "));
+    h.push_str(&amd::hlsl());
     h.push_str(HLSL_BODY);
     h
 }
@@ -217,23 +227,26 @@ mod tests {
         h
     }
 
+    fn flush(x: u32) -> u32 {
+        if x & 0x7f80_0000 == 0 { x & 0x8000_0000 } else { x }
+    }
+
     #[test]
-    fn f32_rcp_rsq_sqrt_match_rdna2_on_every_mantissa() {
-        for (i, &(m, want)) in rdna2_hw::RANGE_DIGESTS.iter().enumerate() {
-            assert_eq!(OPS[i], m);
-            let n = if i == 1 { 1u32 << 23 } else { 1u32 << 24 };
-            let got = fnv((0..n).map(|k| eval(i, 0x3f80_0000 + k)));
-            assert_eq!(got, want, "{m}: model digest differs from the {} record", rdna2_hw::SOURCE);
+    fn f32_transcendentals_match_rdna2_on_recorded_ranges() {
+        for &(m, base, want) in rdna2_hw::RANGE_DIGESTS.iter() {
+            let op = op_index(m).unwrap();
+            let got = fnv((0..1u32 << 23).map(|k| eval(op, base.wrapping_add(k))));
+            assert_eq!(got, want, "{m} from {base:#010x}: model digest differs from the {} record", rdna2_hw::SOURCE);
         }
     }
 
     #[test]
-    fn f32_rcp_rsq_sqrt_match_rdna2_across_the_float_range() {
-        for (k, &(m, want)) in rdna2_hw::EDGE_DIGESTS.iter().enumerate() {
-            let op = k / 2;
-            assert!(m.starts_with(OPS[op]));
-            let got = fnv((0..1u32 << 20).map(|g| eval(op, g.wrapping_mul(4099))));
-            assert_eq!(got, want, "{m}: model digest differs from the {} record", rdna2_hw::SOURCE);
+    fn f32_transcendentals_match_rdna2_across_the_float_range() {
+        for &(m, mode, want) in rdna2_hw::EDGE_DIGESTS.iter() {
+            let op = op_index(m).unwrap();
+            let run = |x: u32| if mode == 0 { flush(eval(op, flush(x))) } else { eval(op, x) };
+            let got = fnv((0..1u32 << 20).map(|g| run(g.wrapping_mul(4099))));
+            assert_eq!(got, want, "{m} denormal mode {mode}: model digest differs from the {} record", rdna2_hw::SOURCE);
         }
     }
 

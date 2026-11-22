@@ -418,21 +418,6 @@ fn d1(s: &mut Suite, m: &'static str, op: u32, cmp: Cmp, g: fn(f64) -> Option<u6
     s.add(m, "VOP1", "e64 neg", Class::F64, &[], &vop3o(0x180 + op, OUT, [v(12), 0, 0], 0, 1, false, 0), &[], &[cmp, Cmp::F64Hi], move |x| g(-d(x.d[2], x.d[3])).map_or(vec![None, None], o64));
 }
 
-fn trans_in(x: u32) -> bool {
-    den32(x)
-}
-
-fn tr(x: u32, r: f64) -> Option<u32> {
-    if trans_in(x) {
-        return None;
-    }
-    let y = r as f32;
-    if den32(y.to_bits()) {
-        return None;
-    }
-    Some(f32q(y))
-}
-
 fn frexp32(x: u32) -> (u32, u32) {
     let a = x & 0x7fff_ffff;
     if a == 0 || a >= 0x7f80_0000 {
@@ -497,25 +482,6 @@ fn fract32(x: u32) -> Option<u32> {
     Some(r.min(f(0x3f7f_ffff)).to_bits())
 }
 
-fn sin_rev(x: u32, cos: bool) -> Option<u32> {
-    if !cos && x & 0x7fff_ffff == 0 {
-        return Some(x);
-    }
-    if trans_in(x) || nan32(x) {
-        return if nan32(x) { Some(QNAN32) } else { None };
-    }
-    let v = f(x) as f64;
-    if !v.is_finite() {
-        return Some(QNAN32);
-    }
-    if v.abs() > 256.0 {
-        return None;
-    }
-    let t = v - v.floor();
-    let a = 2.0 * std::f64::consts::PI * t;
-    Some(f32q(if cos { a.cos() } else { a.sin() } as f32))
-}
-
 fn vop1_ops(s: &mut Suite) {
     u1(s, "v_mov_b32", 0x01, Class::U32, |a| a);
     u1(s, "v_not_b32", 0x37, Class::U32, |a| !a);
@@ -545,14 +511,14 @@ fn vop1_ops(s: &mut Suite) {
     f1(s, "v_ceil_f32", 0x22, Class::F32, Cmp::F32(0), |a| if den32(a) { None } else { Some(f32q(f(a).ceil())) }, true);
     f1(s, "v_rndne_f32", 0x23, Class::F32, Cmp::F32(0), |a| Some(f32q(rne32(f(a)))), true);
     f1(s, "v_floor_f32", 0x24, Class::F32, Cmp::F32(0), |a| if den32(a) { None } else { Some(f32q(f(a).floor())) }, true);
-    f1(s, "v_exp_f32", 0x25, Class::Trans, Cmp::F32(2), |a| tr(a, 2f64.powf(f(a) as f64)), true);
-    f1(s, "v_log_f32", 0x27, Class::Trans, Cmp::F32Tol(2, 2.0e-7), |a| if f(a) == 0.0 { Some(0xff80_0000) } else if trans_in(a) { None } else { tr(a, (f(a) as f64).log2()) }, true);
+    f1(s, "v_exp_f32", 0x25, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(5, a)), true);
+    f1(s, "v_log_f32", 0x27, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(4, a)), true);
     f1(s, "v_rcp_f32", 0x2a, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(0, a)), true);
     f1(s, "v_rcp_iflag_f32", 0x2b, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(1, a)), false);
     f1(s, "v_rsq_f32", 0x2e, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(2, a)), true);
     f1(s, "v_sqrt_f32", 0x33, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(3, a)), true);
-    f1(s, "v_sin_f32", 0x35, Class::Trans, Cmp::F32Tol(4, 4.0e-6), |a| sin_rev(a, false), true);
-    f1(s, "v_cos_f32", 0x36, Class::Trans, Cmp::F32Tol(4, 4.0e-6), |a| sin_rev(a, true), true);
+    f1(s, "v_sin_f32", 0x35, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(6, a)), true);
+    f1(s, "v_cos_f32", 0x36, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(7, a)), true);
     f1(s, "v_frexp_exp_i32_f32", 0x3f, Class::F32, Cmp::X, |a| Some(frexp32(a).1), false);
     f1(s, "v_frexp_mant_f32", 0x40, Class::F32, Cmp::F32(0), |a| Some(frexp32(a).0), false);
     h1(s, "v_cvt_f16_u16", 0x50, Class::U32, Cmp::F16(0), |a| Some(d2h((a & 0xffff) as f64)));

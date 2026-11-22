@@ -3,7 +3,17 @@ use tombox_xshader::trans32;
 
 const THREADS: u32 = 1024;
 const PER: u32 = 1024;
-const OPCODES: [u32; 4] = [0x2a, 0x2b, 0x2e, 0x33];
+const OPCODES: [u32; 8] = [0x2a, 0x2b, 0x2e, 0x33, 0x27, 0x25, 0x35, 0x36];
+const RANGES: [&[(u32, u32)]; 8] = [
+    &[(0x3f80_0000, 8)],
+    &[(0x3f80_0000, 8)],
+    &[(0x3f80_0000, 16)],
+    &[(0x3f80_0000, 16)],
+    &[(0x3f00_0000, 16)],
+    &[(0x3f80_0000, 8), (0xbf80_0000, 8)],
+    &[(0x3980_0000, 8), (0x3e80_0000, 8), (0x4080_0000, 8)],
+    &[(0x3980_0000, 8), (0x3e80_0000, 8), (0x4080_0000, 8)],
+];
 
 fn store_dword(vdata: u32, vaddr: u32) -> [u32; 2] {
     [0xe000_0000 | (0x1c << 18) | (1 << 12), vaddr | (vdata << 8) | (2 << 16) | (0x80 << 24)]
@@ -36,12 +46,13 @@ fn sweep_case(op: usize, base: u32, spread: bool) -> CsCase {
 }
 
 #[test]
-fn f32_rcp_rsq_sqrt_exact_on_every_mantissa() {
+fn f32_transcendentals_exact_on_every_mantissa() {
     let mut cs = Vec::new();
     for op in 0..trans32::OPS.len() {
-        let blocks = if op < 2 { 8 } else { 16 };
-        for b in 0..blocks {
-            cs.push(sweep_case(op, 0x3f80_0000 + b * THREADS * PER, false));
+        for &(base, blocks) in RANGES[op] {
+            for b in 0..blocks {
+                cs.push(sweep_case(op, base + b * THREADS * PER, false));
+            }
         }
         cs.push(sweep_case(op, 0, true));
     }
