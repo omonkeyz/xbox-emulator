@@ -1344,7 +1344,12 @@ impl<'a> Emitter<'a> {
     fn sgpr_const_in(insns: &[Insn], start: usize, idx: usize, reg: u8) -> Option<u32> {
         for j in (start..idx).rev() {
             let i = &insns[j];
-            let wide = if i.enc == Enc::Smem && i.op <= 4 { 1u16 << i.op } else if i.mnemonic.ends_with("_b64") || i.mnemonic.ends_with("_u64") || i.mnemonic.ends_with("_i64") { 2 } else { 1 };
+            let wide = match i.enc {
+                Enc::Smem if matches!(i.op, 0..=4 | 8..=12) => 1u16 << (i.op & 7),
+                Enc::Smem if matches!(i.op, 0x24 | 0x25) => 2,
+                _ if ["_b64", "_u64", "_i64"].iter().any(|suffix| i.mnemonic.ends_with(suffix)) => 2,
+                _ => 1,
+            };
             let hit = i.dst.iter().any(|d| matches!(d, Opnd::Sgpr(r) if (reg as u16) >= *r as u16 && (reg as u16) < *r as u16 + wide));
             if !hit {
                 continue;
@@ -2342,7 +2347,7 @@ impl<'a> Emitter<'a> {
                     }
                     let mut samp_res: Vec<(u32, Res)> = Vec::new();
                     if ins.mnemonic.starts_with("image_sample") || ins.mnemonic.starts_with("image_gather") || ins.mnemonic == "image_get_lod" {
-                        let fixed = if sym.get(&ss).is_none() && written.contains(&ss) { self.dg_static_sampler(idx, ss)? } else { None };
+                        let fixed = if sym.get(&ss).is_none() && written.contains(&ss) { self.static_sampler(idx, ss)? } else { None };
                         let samp_c = match fixed {
                             Some(slot) => vec![(0xffu8, slot)],
                             None => self.desc_candidates(sym.get(&ss), 16).ok_or_else(|| {

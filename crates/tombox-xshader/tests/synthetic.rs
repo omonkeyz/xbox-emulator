@@ -5,7 +5,7 @@
 //! wrapped in a `ShaderExtract` with a made-up signature.
 
 use tombox_xshader::hlsl::translate;
-use tombox_xshader::meta::{GsInfo, MeshInfo, PsvResource, RootParam, RootParamKind, RootRange, RootSig, SigElement};
+use tombox_xshader::meta::{GsInfo, MeshInfo, PsvResource, RootParam, RootParamKind, RootRange, RootSig, SigElement, StaticSampler};
 use tombox_xshader::{parse_root_signature, ShaderExtract, Stage};
 
 const S_ENDPGM: u32 = 0xbf81_0000;
@@ -717,4 +717,64 @@ fn raw_uav_buffer_atomics_share_ubuf_instead_of_overlapping_utb() {
         let profile = tombox_xshader::dxc::profile_for(t.profile);
         tombox_xshader::dxc::compile(&t.hlsl, &profile).expect("DXC compile");
     }
+}
+
+fn literal_sampler_shader(address: u32, last_sampler_word: u32) -> ShaderExtract {
+    let words = [
+        0x7e04_0280, 0x7e06_0280,
+        0xf40c_0200, 0xfa00_0000, 0xbf8c_c07f,
+        0xbe90_03ff, 0x0000_0092,
+        0xbe91_03ff, 0x00c0_0000,
+        0xbe92_0380, last_sampler_word,
+        0xf080_0f08, 0x0082_0402, 0xbf8c_3f70,
+        0xf800_180f, 0x0706_0504, S_ENDPGM,
+    ];
+    let root = RootSig {
+        version: 1,
+        flags: 0,
+        params: vec![table(0, 1, 5)],
+        num_static_samplers: 1,
+        static_samplers: vec![StaticSampler {
+            filter: 0,
+            address_u: address,
+            address_v: address,
+            address_w: address,
+            comparison_func: 1,
+            max_anisotropy: 1,
+            border_color: 0,
+            min_lod_bits: 0,
+            max_lod_bits: f32::MAX.to_bits(),
+            register: 0,
+            space: 0,
+            visibility: 5,
+        }],
+    };
+    let mut ex = shader(
+        Stage::Pixel, &words, vec![], vec![sig("SV_Target", 64, 3, 0, 0xf)], Some(root),
+    );
+    ex.has_psv0 = true;
+    ex.resources = vec![
+        PsvResource { res_type: 3, space: 0, lower: 0, upper: 0, kind: 2 },
+        PsvResource { res_type: 1, space: 0, lower: 0, upper: 0, kind: 14 },
+    ];
+    ex
+}
+
+#[test]
+fn rdna2_literal_sampler_uses_the_static_root_binding() {
+    let ex = literal_sampler_shader(3, 0xbe93_0380);
+    let translated = translate(&ex).expect("translate a clamp sampler");
+    assert!(translated.hlsl.contains("register(s0)"));
+    assert!(translated.hlsl.contains("register(t0)"));
+}
+
+#[test]
+fn rdna2_literal_sampler_rejects_incompatible_or_unproven_bindings() {
+    let wrong_address = translate(&literal_sampler_shader(1, 0xbe93_0380))
+        .err().expect("reject a wrap sampler for a clamp descriptor");
+    assert!(wrong_address.contains("no static sampler has the decoded address modes"), "{wrong_address}");
+
+    let nonliteral_word = translate(&literal_sampler_shader(3, 0xbe93_0314))
+        .err().expect("reject a nonliteral sampler word");
+    assert!(nonliteral_word.contains("not a sampler descriptor"), "{nonliteral_word}");
 }
