@@ -180,9 +180,9 @@ fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &Input
         format!("translate: {e}")
     })?;
     if crate::cbv_raw::enabled() {
-        if !tombox_xshader::gcn::is_durango(&ex.fssm) {
-            dump_failure(hash, blob, None, "Xbox One title shader is not a Durango program");
-            return Err("bind: Xbox One title shader is not a Durango program; its constant buffers cannot follow the raw-SRV binding".into());
+        if let Some(why) = crate::cbv_raw::shader_kind_refusal(crate::cbv_raw::xbox_one_title(), tombox_xshader::gcn::is_durango(&ex.fssm)) {
+            dump_failure(hash, blob, None, why);
+            return Err(format!("bind: {why}; its constant buffers cannot follow the raw-SRV binding"));
         }
         t.hlsl = crate::cbv_raw::rewrite_hlsl(&t.hlsl).map_err(|e| {
             dump_failure(hash, blob, None, &e);

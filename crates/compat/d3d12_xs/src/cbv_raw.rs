@@ -23,16 +23,61 @@ static PREV_RS: AtomicUsize = AtomicUsize::new(0);
 static PREV_CBV: AtomicUsize = AtomicUsize::new(0);
 static REAL_ROOT_SRV: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 
-pub fn enabled() -> bool {
-    static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Auto,
+    On,
+    Off,
+}
+
+pub fn parse_mode(v: Option<&str>) -> Result<Mode, String> {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("auto") => Ok(Mode::Auto),
+        Some("1") | Some("on") => Ok(Mode::On),
+        Some("0") | Some("off") => Ok(Mode::Off),
+        Some(other) => Err(format!("cbv_raw={other:?} is not one of auto, on, off, 1, 0; using auto")),
+    }
+}
+
+pub fn xbox_one_title() -> bool {
+    static X: OnceLock<bool> = OnceLock::new();
+    *X.get_or_init(|| {
         extern "system" {
             fn GetModuleHandleW(n: *const u16) -> *mut c_void;
         }
         let name: Vec<u16> = "d3d12_x.dll".encode_utf16().chain(Some(0)).collect();
-        let on = !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null();
+        !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null()
+    })
+}
+
+pub fn shader_kind_refusal(xbox_one: bool, durango: bool) -> Option<&'static str> {
+    (xbox_one && !durango).then_some("Xbox One title shader is not a Durango program")
+}
+
+pub fn enabled() -> bool {
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| {
+        let raw = std::env::var("TOMBOX_CBV_RAW").ok().or_else(|| compat_common::cfg("cbv_raw"));
+        let mode = parse_mode(raw.as_deref()).unwrap_or_else(|e| {
+            record("d3d12_xs", "cbv_raw", &e);
+            Mode::Auto
+        });
+        let xbox_one = xbox_one_title();
+        let on = match mode {
+            Mode::Auto => xbox_one,
+            Mode::On => true,
+            Mode::Off => false,
+        };
+        let why = match (mode, xbox_one) {
+            (Mode::Auto, _) => "Xbox One title (d3d12_x.dll loaded)",
+            (Mode::On, _) => "cbv_raw=on",
+            (Mode::Off, true) => "cbv_raw=off on an Xbox One title (d3d12_x.dll loaded)",
+            (Mode::Off, false) => "cbv_raw=off",
+        };
         if on {
-            record("d3d12_xs", "cbv_raw", &format!("Xbox One title (d3d12_x.dll loaded): constant buffers are bound as raw SRVs in space {TB_CBRAW_SPACE}+n so a CBV may start at any 16-byte-aligned address like on the console"));
+            record("d3d12_xs", "cbv_raw", &format!("{why}: constant buffers are bound as raw SRVs in space {TB_CBRAW_SPACE}+n so a CBV may start at any 16-byte-aligned address like on the console"));
+        } else if mode == Mode::Off {
+            record("d3d12_xs", "cbv_raw", &format!("{why}: constant buffers stay PC CBVs (BufferLocation must be 256-byte aligned)"));
         }
         on
     })
@@ -509,6 +554,26 @@ mod tests {
             w(&mut b, 44, d as u32);
         }
         b
+    }
+
+    #[test]
+    fn cbv_raw_mode_setting_is_validated() {
+        assert_eq!(parse_mode(None), Ok(Mode::Auto));
+        assert_eq!(parse_mode(Some("")), Ok(Mode::Auto));
+        assert_eq!(parse_mode(Some("auto")), Ok(Mode::Auto));
+        assert_eq!(parse_mode(Some(" ON ")), Ok(Mode::On));
+        assert_eq!(parse_mode(Some("1")), Ok(Mode::On));
+        assert_eq!(parse_mode(Some("off")), Ok(Mode::Off));
+        assert_eq!(parse_mode(Some("0")), Ok(Mode::Off));
+        assert!(parse_mode(Some("yes")).is_err());
+    }
+
+    #[test]
+    fn only_xbox_one_titles_require_durango_programs() {
+        assert_eq!(shader_kind_refusal(true, true), None);
+        assert!(shader_kind_refusal(true, false).is_some());
+        assert_eq!(shader_kind_refusal(false, false), None);
+        assert_eq!(shader_kind_refusal(false, true), None);
     }
 
     #[test]
