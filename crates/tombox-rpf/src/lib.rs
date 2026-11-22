@@ -134,6 +134,15 @@ fn map_regions(b: &[u8], from: usize) -> Vec<Region> {
 
 /// Parse the header and map the rest of the file.
 pub fn inspect(b: &[u8]) -> Result<Rpf, String> {
+    inspect_prefix(b, b.len() as u64)
+}
+
+/// Inspect a leading slice of an archive with a known total size.
+/// Only complete plain RPF8 entries within the slice are returned.
+pub fn inspect_prefix(b: &[u8], file_size: u64) -> Result<Rpf, String> {
+    if b.len() as u64 > file_size {
+        return Err("inspected bytes exceed the archive size".into());
+    }
     let magic = u32_at(b, 0)?;
     if magic >> 8 != 0x0052_5046 {
         return Err(format!("not an RPF file: magic {magic:#010x} (expected \"RPF\" + version digit)"));
@@ -145,10 +154,14 @@ pub fn inspect(b: &[u8]) -> Result<Rpf, String> {
             let (entry_count, tag) = (u32_at(b, 4)?, u32_at(b, 12)?);
             let mut entries = Vec::new();
             if tag as u16 == 0xff {
-                // Bounded by the file, not by the count the file claims.
-                for i in 0..entry_count as usize {
-                    let o = 272 + i * 24;
-                    let Some(e) = b.get(o..o + 24) else { return Err(format!("truncated: entry {i} of {entry_count} at {o:#x}")) };
+                const TABLE_START: usize = 272;
+                const ENTRY_SIZE: usize = 24;
+                let table_end = TABLE_START as u64 + u64::from(entry_count) * ENTRY_SIZE as u64;
+                if entry_count != 0 && table_end > file_size {
+                    return Err(format!("truncated: RPF8 table ends at {table_end:#x}, file size is {file_size:#x}"));
+                }
+                let available = b.get(TABLE_START..).unwrap_or_default();
+                for e in available.chunks_exact(ENTRY_SIZE).take(entry_count as usize) {
                     let q = |k: usize| u64::from_le_bytes(e[k..k + 8].try_into().unwrap());
                     let (q0, q1) = (q(0), q(8));
                     entries.push(Entry8 {
@@ -245,6 +258,19 @@ mod tests {
         assert!(matches!(inspect(&b).unwrap().header, Header::V8 { ref entries, .. } if entries.is_empty()));
         b[12] = 0xff;
         assert!(inspect(&b[..280]).unwrap_err().contains("truncated"));
+    }
+
+    #[test]
+    fn rpf8_prefix_skips_partial_entries_but_rejects_truncated_files() {
+        let mut prefix = vec![0u8; 272 + 24 + 8];
+        prefix[..4].copy_from_slice(b"8FPR");
+        prefix[4..8].copy_from_slice(&2u32.to_le_bytes());
+        prefix[12..14].copy_from_slice(&0xffu16.to_le_bytes());
+        let file_size = 272 + 2 * 24;
+        let rpf = inspect_prefix(&prefix, file_size).unwrap();
+        assert!(matches!(rpf.header, Header::V8 { entry_count: 2, ref entries, .. } if entries.len() == 1));
+        assert!(inspect_prefix(&prefix, file_size - 1).unwrap_err().contains("truncated"));
+        assert!(inspect(&prefix).unwrap_err().contains("truncated"));
     }
 
     #[test]

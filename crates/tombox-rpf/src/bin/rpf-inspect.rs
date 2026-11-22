@@ -1,6 +1,6 @@
 //! rpf-inspect <file.rpf>: print the header fields and region map of a RAGE package file.
 use std::process::ExitCode;
-use tombox_rpf::{inspect, Header, RegionKind, RPF7_OPEN};
+use tombox_rpf::{inspect_prefix, Header, RegionKind, RPF7_OPEN};
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let r = match inspect(&data) {
+    let r = match inspect_prefix(&data, total) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -38,6 +38,9 @@ fn main() -> ExitCode {
         Header::V8 { entry_count, names_length, decryption_tag, platform, entries } => {
             let enc = if *decryption_tag == 0xff { "0xff (table is plain)".to_string() } else { format!("{decryption_tag:#x} (table is encrypted)") };
             println!("  entries {entry_count}, names {names_length} bytes, platform {platform:#x}, decryption tag {enc}");
+            if *decryption_tag == 0xff && entries.len() < *entry_count as usize {
+                println!("  showing {} of {entry_count} entries from the inspected prefix", entries.len());
+            }
             for e in entries {
                 println!("    {:08X} ext {:#04x}{} offset {:#x} size {:#x} compressor {} key {:#04x}",
                     e.name_hash, e.ext_id, if e.resource { " resource" } else { "" }, e.offset, e.size_on_disk, e.compressor, e.key_id);
