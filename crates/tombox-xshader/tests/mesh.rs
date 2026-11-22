@@ -228,6 +228,9 @@ fn mesh_clip_distance_export_maps_to_pos1() {
     let t = translate(&ms(&w, mesh_info(64, 64, 64, 2), outs)).expect("translate");
     assert!(t.hlsl.contains("if (exec_lo & 1u) o.o1.x = asfloat(v1);"), "{}", t.hlsl);
     assert!(t.hlsl.contains("if (exec_lo & 1u) o.o1.y = asfloat(v2);"), "{}", t.hlsl);
+    assert!(!t.hlsl.contains("groupshared uint tb_mscnt;"));
+    assert!(!t.hlsl.contains("GroupMemoryBarrierWithGroupSync();"));
+    dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).unwrap();
     let mut w2 = w.clone();
     let i = w2.iter().position(|x| *x == exp(13, 0x3, false, [1, 2, 0, 0])[0]).unwrap();
     w2[i] = exp(14, 0x3, false, [1, 2, 0, 0])[0];
@@ -498,6 +501,18 @@ fn gpu_mesh_divergent_barrier_without_memory_writes() {
     assert_eq!(t.hlsl.matches("GroupMemoryBarrierWithGroupSync();").count(), 3, "{}", t.hlsl);
     let got = unsafe { render(&w, 3) }.unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(got, [2 * 128 + 64, 1, 0x77, 0x88]);
+}
+
+#[test]
+fn gpu_mesh_uniform_entry_counts_preserve_rendered_output() {
+    let mut words = console_ms(67, 1, TRI);
+    let guard = words.iter().position(|&w| w == sop1(4, 10, EXEC)).unwrap();
+    let barrier = words.iter().position(|&w| w == sopp(0x0a, 0)).unwrap();
+    words.drain(guard..=barrier);
+    words.splice(..0, [sop1(3, M0, LIT), (1 << 12) | 67, sopp(0x10, 9)]);
+    let shader = translate(&ms(&words, mesh_info(128, 128, 128, 2), pos_param_outs())).unwrap();
+    assert!(!shader.hlsl.contains("GroupMemoryBarrierWithGroupSync();"));
+    assert_eq!(unsafe { render(&words, 1) }.unwrap(), [64, 1, 0x77, 0x88]);
 }
 
 #[test]

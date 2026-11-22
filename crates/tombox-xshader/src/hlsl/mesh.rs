@@ -69,6 +69,18 @@ impl<'a> Emitter<'a> {
         Ok(Some(format!("(gid.x * {}u + (gi & {:#x}u))", self.ms_threads()?, !(w - 1))))
     }
 
+    // All invocations enter with EXEC enabled. A literal allocation in the
+    // first two instructions needs no cross-wave broadcast when it is the
+    // only allocation and no branch can jump back into the pair.
+    fn uniform_entry_allocation(&self) -> bool {
+        let [load, send, tail @ ..] = self.insns.as_slice() else { return false };
+        load.mnemonic == "s_mov_b32" && load.dst.first() == Some(&Opnd::M0)
+            && matches!(load.src.first(), Some(Opnd::Literal(_) | Opnd::ConstInt(_)))
+            && send.mnemonic == "s_sendmsg" && send.aux.imm == i64::from(GS_ALLOC_REQ)
+            && !tail.iter().any(|i| i.mnemonic.starts_with("s_branch")
+                || i.mnemonic.starts_with("s_cbranch") || i.mnemonic == "s_sendmsg")
+    }
+
     pub(super) fn mesh_sendmsg(&mut self, ins: &Insn) -> Result<(), String> {
         let msg = ins.aux.imm as u32 & 0xf;
         if msg != GS_ALLOC_REQ {
@@ -192,7 +204,10 @@ impl<'a> Emitter<'a> {
 ");
             h.push_str(p);
         }
-        let _ = writeln!(h, "groupshared uint tb_mscnt;");
+        let local_counts = self.uniform_entry_allocation() && !self.uses_lds;
+        if !local_counts {
+            let _ = writeln!(h, "groupshared uint tb_mscnt;");
+        }
         let _ = writeln!(h, "struct SOut {{");
         for (ei, e) in self.ex.output_sig.iter().enumerate() {
             let (ty, _) = sig_type(e);
@@ -222,14 +237,20 @@ impl<'a> Emitter<'a> {
         let _ = writeln!(h, "{}", self.reg_decls());
         let w = wave_size(&self.insns);
         let _ = writeln!(h, "    SOut o = (SOut)0; uint tb_prim = 0u;");
-        let _ = writeln!(h, "    if (gi == 0u) tb_mscnt = 0u;");
-        let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
+        if local_counts {
+            let _ = writeln!(h, "    uint tb_mscnt = 0u;");
+        } else {
+            let _ = writeln!(h, "    if (gi == 0u) tb_mscnt = 0u;");
+            let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
+        }
         let _ = writeln!(h, "    v5 = gid.x * {n}u + gi; s3 = (gi / {w}u) << 24;");
         if pl.is_some() {
             h.push_str(&self.amp_ms_prologue(m.payload_bytes));
         }
         h.push_str(&self.body);
-        let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
+        if !local_counts {
+            let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
+        }
         let _ = writeln!(h, "    uint tb_nv = tb_mscnt & 0xfffu, tb_np = (tb_mscnt >> 12) & 0xfffu;");
         let _ = writeln!(h, "    SetMeshOutputCounts(tb_nv, tb_np);");
         let _ = writeln!(h, "    if (gi < tb_nv) verts[gi] = o;");
