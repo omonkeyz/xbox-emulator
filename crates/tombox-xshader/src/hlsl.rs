@@ -432,6 +432,7 @@ struct Emitter<'a> {
     live: Vec<String>,
     /// Pixel shader needs its position within the 2x2 quad (ds_swizzle).
     uses_quad: bool,
+    vs_lds_out: bool,
     regs: BTreeSet<String>,
     body: String,
     tmp: usize,
@@ -1050,6 +1051,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         dsel_moves: HashMap::new(),
         live: Vec::new(),
         uses_quad: false,
+        vs_lds_out: false,
         regs: BTreeSet::new(),
         body: String::new(),
         tmp: 0,
@@ -3620,6 +3622,7 @@ impl<'a> Emitter<'a> {
                 // registers back to back, 4 dwords each (observed in a55400ccab602283: dwords
                 // 0..3 = TEXCOORD6.xyzw, 4..6 = TEXCOORD8.xyz, matching the output signature).
                 // The address register is this vertex's record base and is not needed.
+                self.vs_lds_out = true;
                 let off = ins.aux.imm as u32;
                 let vg = |o: &Opnd, k: u8| match o {
                     Opnd::Vgpr(n) => Ok(Opnd::Vgpr(n + k)),
@@ -6441,6 +6444,20 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                         None => (if c == 3 { "0x3f800000u" } else { "0u" }).to_string(),
                     };
                     let _ = writeln!(init, "    {v} = {val};");
+                }
+            }
+            if ex.stage == Stage::Vertex && !self.vs_lds_out && self.durango.is_none() {
+                for (ei, e) in ex.input_sig.iter().enumerate() {
+                    let v = match e.sysval {
+                        6 => "v0",
+                        8 => "v3",
+                        _ => continue,
+                    };
+                    if !self.live.iter().any(|l| l == v) {
+                        continue;
+                    }
+                    self.regs.insert(v.to_string());
+                    let _ = writeln!(init, "    {v} = (uint)(i.i{ei});");
                 }
             }
         }

@@ -314,6 +314,29 @@ fn vertex_misc_vector_export_feeds_the_render_target_array_index() {
     assert!(line.contains("uint4(") && line.trim_end().ends_with(".z);"), "{line}");
 }
 
+const EXP_POS0_V0_V3: [u32; 2] = [0xf800_08cf, 0x0300_0300];
+
+#[test]
+fn vertex_shader_receives_vertex_and_instance_index_in_v0_and_v3() {
+    let words = [EXP_POS0_V0_V3[0], EXP_POS0_V0_V3[1], S_ENDPGM];
+    let position = || vec![sig("SV_Position", 1, 3, 0, 0xf)];
+    let ex = shader(Stage::Vertex, &words, vec![sig("SV_VertexID", 6, 1, 0, 1), sig("SV_InstanceID", 8, 1, 1, 1)], position(), None);
+    let t = translate(&ex).expect("translate (vertex and instance index)");
+    assert!(t.hlsl.contains("    v0 = (uint)(i.i0);"), "{}", t.hlsl);
+    assert!(t.hlsl.contains("    v3 = (uint)(i.i1);"), "{}", t.hlsl);
+    let ex = shader(Stage::Vertex, &words, vec![sig("SV_VertexID", 6, 1, 0, 1)], position(), None);
+    let t = translate(&ex).expect("translate (vertex index only)");
+    assert!(t.hlsl.contains("    v0 = (uint)(i.i0);"), "{}", t.hlsl);
+    assert!(!t.hlsl.contains("v3 = (uint)(i."), "{}", t.hlsl);
+    let mut attribute = sig("ATTRIBUTE", 0, 3, 0, 0xf);
+    attribute.rw_mask = 0xf;
+    let exp_pos0_v4_v5_v6_v7 = [0xf800_08cf, 0x0706_0504, S_ENDPGM];
+    let ex = shader(Stage::Vertex, &exp_pos0_v4_v5_v6_v7, vec![attribute, sig("SV_VertexID", 6, 1, 1, 1), sig("SV_InstanceID", 8, 1, 2, 1)], position(), None);
+    let t = translate(&ex).expect("translate (index declared, not read)");
+    assert!(!t.hlsl.contains("v0 = (uint)(i.") && !t.hlsl.contains("v3 = (uint)(i."), "{}", t.hlsl);
+    assert!(t.hlsl.contains("    v4 = asuint(i.i0.x);"), "{}", t.hlsl);
+}
+
 #[test]
 fn pixel_attribute_past_the_interpolants_reads_the_layer_sysval() {
     let words = [0xc802_0002, 0xf800_1c03, 0x0000_0000, S_ENDPGM];
