@@ -408,3 +408,103 @@ fn image_mimg_atomics() {
     }
     run_mem_cases("mimg_atomics", &cs);
 }
+
+fn unorm(op: [u32; 2]) -> [u32; 2] {
+    [op[0] | (1 << 12), op[1]]
+}
+
+fn a16(op: [u32; 2]) -> [u32; 2] {
+    [op[0], op[1] | (1 << 30)]
+}
+
+#[test]
+fn image_mimg_unorm_a16_and_refusals() {
+    let mut cs = Vec::new();
+    let tex_a = || Env { tex: Some(&IMG_A), samp: ptsamp(), ..Default::default() };
+    let tex_c = || Env { tex: Some(&IMG_C), samp: ptsamp(), ..Default::default() };
+
+    for &(tx, ty) in &[(0.5f32, 0.5f32), (2.5, 4.5), (7.5, 1.5)] {
+        let op = unorm(mimg(0x27, 0xf, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, fb(tx)).vv(2, fb(ty));
+        let (x, y) = (tx.floor() as u32, ty.floor() as u32);
+        cs.push(case("image_sample_lz", op, build(&pre, &op, 4, 4, false), tex_a(), ea(0, x, y).to_vec()));
+    }
+    for &(tx, ty, slice) in &[(1.5f32, 2.5f32, 0.0f32), (3.5, 6.5, 2.0)] {
+        let op = unorm(mimg(0x27, 0xf, 5, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, fb(tx)).vv(2, fb(ty)).vv(3, fb(slice));
+        let (x, y) = (tx.floor() as u32, ty.floor() as u32);
+        cs.push(case("image_sample_lz", op, build(&pre, &op, 4, 4, false), tex_c(), ta(0, slice as u32, x, y).to_vec()));
+    }
+    for &(tx, ty, lod) in &[(2.5f32, 4.5f32, 1.0f32), (6.5, 2.5, 2.0)] {
+        let op = unorm(mimg(0x24, 0xf, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, fb(tx)).vv(2, fb(ty)).vv(3, fb(lod));
+        let m = nearest(lod, 4);
+        let (x, y) = pt(m, tx / 8.0, ty / 8.0, (0, 0));
+        cs.push(case("image_sample_l", op, build(&pre, &op, 4, 4, false), tex_a(), ea(m, x, y).to_vec()));
+    }
+
+    for &(x, y) in &[(2u32, 5u32), (7, 3), (0, 0)] {
+        let op = a16(mimg(0x00, 0xf, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, x | (y << 16));
+        cs.push(case("image_load", op, build(&pre, &op, 4, 4, false), tex_a(), ea(0, x, y).to_vec()));
+    }
+    {
+        let (x, y) = (4u32, 6u32);
+        let op = a16(mimg(0x08, 0xf, 1, 1, 4, 16, 0));
+        let vals = [fb(1.25), fb(-3.5), fb(42.0), fb(0.5)];
+        let mut pre = Prog::new();
+        pre.vv(1, x | (y << 16)).vv(4, vals[0]).vv(5, vals[1]).vv(6, vals[2]).vv(7, vals[3]);
+        let base = ((y * 8 + x) * 4) as usize;
+        let uav = (0..4).map(|c| (0usize, base + c, vals[c])).collect();
+        cs.push(MCase { m: "image_store", op: op.to_vec(), words: build(&pre, &op, 4, 0, true), env: Env { uav: Some(&IMG_U), ..Default::default() }, rt: vec![], uav, tol: 0.0 });
+    }
+    for &(u, v) in &[(0.3125f32, 0.5625f32), (0.8125, 0.1875)] {
+        let op = a16(mimg(0x27, 0xf, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, h16(u) | (h16(v) << 16));
+        let (x, y) = pt(0, u, v, (0, 0));
+        cs.push(case("image_sample_lz", op, build(&pre, &op, 4, 4, false), tex_a(), ea(0, x, y).to_vec()));
+    }
+    {
+        let (u, v, lod) = (0.3125f32, 0.5625f32, 2.0f32);
+        let op = a16(mimg(0x24, 0xf, 1, 1, 4, 0, 12));
+        let mut pre = Prog::new();
+        pre.vv(1, h16(u) | (h16(v) << 16)).vv(2, h16(lod));
+        let m = nearest(lod, 4);
+        let (x, y) = pt(m, u, v, (0, 0));
+        cs.push(case("image_sample_l", op, build(&pre, &op, 4, 4, false), tex_a(), ea(m, x, y).to_vec()));
+    }
+    run_mem_cases("mimg_unorm_a16", &cs);
+
+    let mimg_base = mimg(0x27, 0xf, 1, 1, 4, 0, 12);
+    for (bad_op, needle) in [
+        ([mimg_base[0] | (1 << 16), mimg_base[1]], "TFE"),
+        ([mimg_base[0] | (1 << 17), mimg_base[1]], "LWE"),
+        (unorm(mimg(0x27, 0xf, 3, 1, 4, 0, 12)), "cube"),
+    ] {
+        let mut pre = Prog::new();
+        pre.vv(1, fb(0.5)).vv(2, fb(0.5)).vv(3, fb(0.0));
+        let words = build(&pre, &bad_op, 4, 4, false);
+        let err = match translate(&extract(&words, false)) {
+            Ok(t) => panic!("expected refusal for {needle}, got:\n{}", t.hlsl),
+            Err(e) => e,
+        };
+        assert!(err.contains(needle), "expected {needle} in error: {err}");
+    }
+    for (bad_mubuf, needle) in [
+        ([0xe000_0000 | (0x0c << 18) | (1 << 16), 0x0002_0401], "MUBUF LDS"),
+        ([0xe000_0000 | (0x0c << 18), 0x0082_0401], "MUBUF TFE"),
+    ] {
+        let mut p = Prog::new();
+        p.raw(&smem(2, 8, P_SRV, 0, SNULL)).vv(1, 0).raw(&bad_mubuf).raw(&[vop1(1, 0, v(4))]);
+        let err = match translate(&extract(&p.words(), false)) {
+            Ok(t) => panic!("expected refusal for {needle}, got:\n{}", t.hlsl),
+            Err(e) => e,
+        };
+        assert!(err.contains(needle), "expected {needle} in error: {err}");
+    }
+}

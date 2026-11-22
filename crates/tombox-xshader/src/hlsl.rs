@@ -2318,6 +2318,16 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
+            if ins.mnemonic.starts_with("image_store") {
+                if let Some(Opnd::Vgpr(base)) = ins.dst.first() {
+                    for reg in u32::from(*base)..u32::from(*base) + mimg_data_regs(ins) {
+                        if !written.contains(&format!("v{reg}")) {
+                            live.insert((1, reg));
+                        }
+                    }
+                }
+                continue;
+            }
             // Multi-register destinations: SMEM loads, MIMG results, 64-bit scalar ops.
             let extra = match ins.enc {
                 Enc::Smem if matches!(ins.op, 0x24 | 0x25) => 1,
@@ -5035,6 +5045,12 @@ impl<'a> Emitter<'a> {
     /// immediate the byte offset inside the element. Dynamic offsets (OFFEN / SOFFSET
     /// register) are not handled yet and fail explicitly.
     fn emit_mubuf(&mut self, idx: usize, ins: &Insn) -> Result<(), String> {
+        if (ins.raw.first().copied().unwrap_or(0) >> 16) & 1 != 0 {
+            return Err("MUBUF LDS (load to LDS) unsupported".into());
+        }
+        if (ins.raw.get(1).copied().unwrap_or(0) >> 23) & 1 != 0 {
+            return Err("MUBUF TFE status return unsupported".into());
+        }
         if let Some(Res::CbDyn(slot)) = self.res.get(&idx).and_then(|v| v.first()).copied() {
             let (offen, idxen) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0);
             if (idxen && offen) || !matches!(ins.src[2], Opnd::ConstInt(0)) || !ins.mnemonic.starts_with("buffer_load_dword") {
@@ -5528,6 +5544,9 @@ impl<'a> Emitter<'a> {
             return self.emit_bvh(ins);
         }
         let w0 = ins.raw.first().copied().unwrap_or(0);
+        let w1 = ins.raw.get(1).copied().unwrap_or(0);
+        let unorm = (w0 >> 12) & 1 != 0;
+        let a16 = (w1 >> 30) & 1 != 0;
         for (bit, name) in [(15, "R128"), (16, "TFE"), (17, "LWE")] {
             if (w0 >> bit) & 1 != 0 {
                 return Err(format!("{} with {name} set at {:#x} is not translated", ins.mnemonic, ins.offset));
@@ -5542,7 +5561,7 @@ impl<'a> Emitter<'a> {
             };
             let mip = ins.src[0];
             self.touch(&mip);
-            let mip = r(&mip)?;
+            let mip = if a16 { format!("({} & 0xffffu)", r(&mip)?) } else { r(&mip)? };
             let obj = if is_uav { format!("uav{slot}") } else { format!("tex{slot}") };
             let t = self.tmp;
             self.tmp += 1;
@@ -5596,11 +5615,21 @@ impl<'a> Emitter<'a> {
                 Opnd::Vgpr(n) => n,
                 _ => return Err("bad vaddr".into()),
             };
+            let addr_reg = |i: usize| -> Opnd { if nsa > 0 { ins.src[i] } else { Opnd::Vgpr(first + i as u8) } };
+            let addr_i = |em: &mut Self, i: usize| -> Result<String, String> {
+                if a16 {
+                    let o = addr_reg(i / 2);
+                    em.touch(&o);
+                    Ok(format!("(({} >> {}u) & 0xffffu)", r(&o)?, 16 * (i % 2)))
+                } else {
+                    let o = addr_reg(i);
+                    em.touch(&o);
+                    r(&o)
+                }
+            };
             let mut c = vec![];
             for i in 0..ncoord {
-                let o = if nsa > 0 { ins.src[i] } else { Opnd::Vgpr(first + i as u8) };
-                self.touch(&o);
-                c.push(r(&o)?);
+                c.push(addr_i(self, i)?);
             }
             let vd = match ins.dst[0] {
                 Opnd::Vgpr(n) => n,
@@ -5608,13 +5637,12 @@ impl<'a> Emitter<'a> {
             };
             let as_uint = is_uav && self.uav_uint.contains(&slot);
             let uobj = if is_uav && with_mip {
-                let o = if nsa > 0 { ins.src[ncoord] } else { Opnd::Vgpr(first + ncoord as u8) };
                 if slot & BINDLESS != 0 {
                     return Err(format!("{} on a bindless UAV: per-mip views need a heap-mirrored descriptor range", ins.mnemonic));
                 }
-                self.touch(&o);
+                let mip_u = addr_i(self, ncoord)?;
                 self.uav_mips.insert(slot);
-                format!("uav{slot}_m[NonUniformResourceIndex(min({}, 15u))]", r(&o)?)
+                format!("uav{slot}_m[NonUniformResourceIndex(min({mip_u}, 15u))]")
             } else {
                 format!("uav{slot}")
             };
@@ -5669,9 +5697,7 @@ impl<'a> Emitter<'a> {
                 self.tmp += 1;
                 // image_load_mip carries the mip level as one more address component.
                 let mip = if with_mip {
-                    let o = if nsa > 0 { ins.src[ncoord] } else { Opnd::Vgpr(first + ncoord as u8) };
-                    self.touch(&o);
-                    format!("(int){}", r(&o)?)
+                    format!("(int){}", addr_i(self, ncoord)?)
                 } else {
                     "0".to_string()
                 };
@@ -5679,9 +5705,8 @@ impl<'a> Emitter<'a> {
                     if is_uav {
                         return Err("multisampled UAV load unsupported".into());
                     }
-                    let o = if nsa > 0 { ins.src[ncoord] } else { Opnd::Vgpr(first + ncoord as u8) };
-                    self.touch(&o);
-                    format!("tex{slot}.Load(int2({}), (int){})", c.iter().map(|x| format!("(int){x}")).collect::<Vec<_>>().join(", "), r(&o)?)
+                    let sample = addr_i(self, ncoord)?;
+                    format!("tex{slot}.Load(int2({}), (int){sample})", c.iter().map(|x| format!("(int){x}")).collect::<Vec<_>>().join(", "))
                 } else if is_uav {
                     format!("{uobj}[uint{ncoord}({})]", c.join(", "))
                 } else {
@@ -5739,9 +5764,30 @@ impl<'a> Emitter<'a> {
             };
             let mut c = vec![];
             for i in 0..nc {
-                let o = if nsa > 0 { ins.src[i] } else { Opnd::Vgpr(first + i as u8) };
+                let o = if nsa > 0 {
+                    ins.src[if a16 { i / 2 } else { i }]
+                } else {
+                    Opnd::Vgpr(first + (if a16 { i / 2 } else { i }) as u8)
+                };
                 self.touch(&o);
-                c.push(f(&o)?);
+                c.push(if a16 { format!("f16tof32({} >> {}u)", r(&o)?, 16 * (i % 2)) } else { f(&o)? });
+            }
+            if unorm {
+                let (outs, n) = match dim {
+                    0 => ("w, l", 1),
+                    4 => ("w, e, l", 1),
+                    1 => ("w, h, l", 2),
+                    5 => ("w, h, e, l", 2),
+                    2 => ("w, h, d, l", 3),
+                    _ => return Err("unnormalised coordinates on a cube image unsupported".into()),
+                };
+                let td = self.tmp;
+                self.tmp += 1;
+                let decl: Vec<String> = outs.split(", ").map(|v| format!("{v}{td}")).collect();
+                self.line(&format!("uint {}; tex{tslot}.GetDimensions(0u, {});", decl.join(", "), decl.join(", ")));
+                for (k, sz) in ["w", "h", "d"].iter().take(n).enumerate() {
+                    c[k] = format!("({} / (float){sz}{td})", c[k]);
+                }
             }
             let cv = if dim == 3 { format!("tb_cube_dir({})", c.join(", ")) } else if nc == 1 { c[0].clone() } else { format!("float{nc}({})", c.join(", ")) };
             let vd = match ins.dst[0] {
@@ -5816,9 +5862,14 @@ impl<'a> Emitter<'a> {
         } else {
             None
         };
-        let bias = if matches!(modi, 5 | 6) { Some(f(&take(self))?) } else { None };
+        let bias = if matches!(modi, 5 | 6) {
+            let o = take(self);
+            Some(if a16 { format!("f16tof32({})", r(&o)?) } else { f(&o)? })
+        } else {
+            None
+        };
         let zref = if cmp { Some(f(&take(self))?) } else { None };
-        let grads = if matches!(modi, 2 | 3) {
+        let mut grads = if matches!(modi, 2 | 3) {
             let mut dx = vec![];
             for _ in 0..nder {
                 dx.push(f(&take(self))?);
@@ -5827,17 +5878,58 @@ impl<'a> Emitter<'a> {
             for _ in 0..nder {
                 dy.push(f(&take(self))?);
             }
-            let v = |c: &Vec<String>| if c.len() == 1 { c[0].clone() } else { format!("float{}({})", c.len(), c.join(", ")) };
-            Some((v(&dx), v(&dy)))
+            Some((dx, dy))
         } else {
             None
         };
+        let base = next;
+        let mut half = 0usize;
+        let mut takef = |em: &mut Self| -> Result<String, String> {
+            let k = half;
+            half += 1;
+            if a16 {
+                let o = addr(base + k / 2);
+                em.touch(&o);
+                Ok(format!("f16tof32({} >> {}u)", r(&o)?, 16 * (k % 2)))
+            } else {
+                let o = addr(base + k);
+                em.touch(&o);
+                f(&o)
+            }
+        };
         let mut coords = vec![];
         for _ in 0..ncoord {
-            coords.push(f(&take(self))?);
+            coords.push(takef(self)?);
         }
-        let lod = if modi == 4 { Some(f(&take(self))?) } else { None };
-        let clamp = if matches!(modi, 1 | 3 | 6) { Some(f(&take(self))?) } else { None };
+        let lod = if modi == 4 { Some(takef(self)?) } else { None };
+        let clamp = if matches!(modi, 1 | 3 | 6) { Some(takef(self)?) } else { None };
+        if unorm {
+            let (outs, n) = match dim {
+                0 => ("w, l", 1),
+                4 => ("w, e, l", 1),
+                1 => ("w, h, l", 2),
+                5 => ("w, h, e, l", 2),
+                2 => ("w, h, d, l", 3),
+                _ => return Err("unnormalised coordinates on a cube image unsupported".into()),
+            };
+            let td = self.tmp;
+            self.tmp += 1;
+            let decl: Vec<String> = outs.split(", ").map(|v| format!("{v}{td}")).collect();
+            self.line(&format!("uint {}; tex{tslot}.GetDimensions(0u, {});", decl.join(", "), decl.join(", ")));
+            for (k, sz) in ["w", "h", "d"].iter().take(n).enumerate() {
+                coords[k] = format!("({} / (float){sz}{td})", coords[k]);
+                if let Some((dx, dy)) = &mut grads {
+                    if k < dx.len() {
+                        dx[k] = format!("({} / (float){sz}{td})", dx[k]);
+                        dy[k] = format!("({} / (float){sz}{td})", dy[k]);
+                    }
+                }
+            }
+        }
+        let grads = grads.map(|(dx, dy)| {
+            let v = |c: &Vec<String>| if c.len() == 1 { c[0].clone() } else { format!("float{}({})", c.len(), c.join(", ")) };
+            (v(&dx), v(&dy))
+        });
         // Cube images are addressed by hardware (s, t, face) coordinates (see tb_cube_dir).
         let cvec = if dim == 3 {
             format!("tb_cube_dir({})", coords.join(", "))
