@@ -228,6 +228,7 @@ impl<'a> Emitter<'a> {
             self.amp_ms_regs();
         }
         let _ = writeln!(h, "{}", self.reg_decls());
+        h.push_str(&self.ud_init());
         let w = wave_size(&self.insns);
         let _ = writeln!(h, "    SOut o = (SOut)0; uint tb_prim = 0u;");
         if local_counts {

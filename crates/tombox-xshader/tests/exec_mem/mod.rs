@@ -12,6 +12,7 @@ mod mimg;
 mod mtbuf;
 mod mtbuf_hw;
 mod rootmem;
+mod user_data;
 
 pub const R32G32B32A32_FLOAT: u32 = 2;
 pub const R32_FLOAT: u32 = 41;

@@ -34,6 +34,7 @@ mod durango;
 mod mixed;
 mod mimg_d16;
 mod atomic;
+mod user_data;
 use mimg_d16::{mimg_data_regs, Lane};
 
 pub struct Translated {
@@ -45,6 +46,7 @@ pub struct Translated {
     pub mip_srvs: Vec<u32>,
     pub needs_gmem: bool,
     pub needs_global: bool,
+    pub user_data_base: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -462,6 +464,7 @@ struct Emitter<'a> {
     uses_global: bool,
     mode_use: mode::ModeUse,
     out_interp: InputInterp,
+    user_data: bool,
 }
 
 /// SGPR spills through vector lanes.
@@ -996,17 +999,29 @@ pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
 }
 
 pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
+    translate_linked_with(ex, feeds_ps, false)
+}
+
+pub fn translate_user_data(ex: &ShaderExtract) -> Result<Translated, String> {
+    translate_linked_with(ex, None, true)
+}
+
+pub fn translate_linked_user_data(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
+    translate_linked_with(ex, feeds_ps, true)
+}
+
+fn translate_linked_with(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>, user_data: bool) -> Result<Translated, String> {
     let out_interp = match ex.stage {
         Stage::Vertex | Stage::Geometry | Stage::Mesh => feeds_ps.cloned().unwrap_or_default(),
         _ => InputInterp::default(),
     };
-    match translate_with(ex, &out_interp, None, BTreeSet::new()) {
-        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new()).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
+    match translate_with(ex, &out_interp, None, BTreeSet::new(), user_data) {
+        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new(), user_data).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
         r => r,
     }
 }
 
-fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_override: Option<usize>, uav_force: BTreeSet<u32>) -> Result<Translated, String> {
+fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_override: Option<usize>, uav_force: BTreeSet<u32>, user_data: bool) -> Result<Translated, String> {
     let (profile, is_ps) = match ex.stage {
         Stage::Vertex => ("vs_5_0", false),
         Stage::Pixel => ("ps_5_0", true),
@@ -1097,6 +1112,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         uses_global: false,
         mode_use: mode::ModeUse::default(),
         out_interp: out_interp.clone(),
+        user_data,
     };
     em.vreg_array = em.insns.iter().any(|i| i.mnemonic.starts_with("v_movrel"));
     em.mode_use = mode::analyze(&em.insns);
@@ -1118,7 +1134,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
     if !clash.is_empty() {
         let mut force = em.uav_force.clone();
         force.extend(clash);
-        return translate_with(ex, out_interp, user_base_override, force);
+        return translate_with(ex, out_interp, user_base_override, force, user_data);
     }
     if is_ps {
         em.find_export_epilogs();
@@ -1160,7 +1176,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, user_data_base: em.ud_active().then(|| em.user_base()) })
 }
 
 impl<'a> Emitter<'a> {
@@ -6344,6 +6360,9 @@ impl<'a> Emitter<'a> {
         if let Some(x) = self.rm_header() {
             let _ = write!(h, "{x}");
         }
+        if let Some(x) = self.ud_header() {
+            h.push_str(&x);
+        }
         if let Some(x) = centroid::header(ex) {
             h.push_str(&x);
         }
@@ -6375,6 +6394,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
                 self.regs.insert(format!("s{}", g + k));
             }
             let _ = writeln!(h, "{}", self.reg_decls());
+            h.push_str(&self.ud_init());
             let _ = writeln!(h, "    v0 = gtid.x; v1 = gtid.y; v2 = gtid.z;");
             let _ = writeln!(h, "    s{} = gid.x; s{} = gid.y; s{} = gid.z;", g, g + 1, g + 2);
             h.push_str(&dg_init);
@@ -6445,7 +6465,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
         // elements is read (read mask 0 in the input signature) gets no group: in the skinned
         // depth-only shader d15c18830a4616f9 ATTRIBUTE1/2 (tangents) are unread and the bone
         // indices of ATTRIBUTE3 arrive in v8..v11, not v16..v19.
-        let mut init = String::new();
+        let mut init = self.ud_init();
         if self.is_gs {
             // GS entry ABI (from WriteToSliceMainGS): s3 carries the wave's primitive count in
             // bits [15:8]; v0/v1 hold the vertex offsets (v0 = offset0 | offset1 << 16, v1 =

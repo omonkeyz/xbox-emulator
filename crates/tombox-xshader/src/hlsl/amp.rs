@@ -258,6 +258,7 @@ impl<'a> Emitter<'a> {
             self.regs.insert(reg.to_string());
         }
         let _ = writeln!(h, "{}", self.reg_decls());
+        h.push_str(&self.ud_init());
         let _ = writeln!(h, "    v0 = gtid.x; v1 = gtid.y; v2 = gtid.z;");
         let _ = writeln!(h, "    s2 = {:#x}u; s3 = {:#x}u; s4 = gid.x; tb_gidx = gid.x;", ARGS_HI << 24, PAY_HI << 24);
         let _ = writeln!(h, "    for (uint tb_k = gi; tb_k < 4u; tb_k += {threads}u) tb_args[tb_k] = 0u;");
