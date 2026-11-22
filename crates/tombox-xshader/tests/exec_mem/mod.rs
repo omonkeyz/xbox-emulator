@@ -12,6 +12,7 @@ mod mimg;
 mod mtbuf;
 mod mtbuf_hw;
 mod trans16;
+mod trans32;
 mod rootmem;
 mod user_data;
 

@@ -22,6 +22,7 @@ pub mod decls;
 pub mod uearchive;
 pub mod rdna2;
 pub mod trans16;
+pub mod trans32;
 pub mod gcn;
 pub mod gds_abi;
 pub mod global_abi;

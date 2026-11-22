@@ -157,11 +157,11 @@ fn vop1_basic() {
     for &(x, r) in &[(1.0f32, 1.0f32), (4.0, 0.5), (0.25, 2.0), (0.0, f32::INFINITY), (f32::INFINITY, 0.0), (16.0, 0.25)] {
         v1c(&mut c, "v_rsq_f32", 0x2e, fb(x), fb(r));
     }
-    v1c(&mut c, "v_rsq_f32", 0x2e, fb(-1.0), 0x7fc0_0000);
+    v1c(&mut c, "v_rsq_f32", 0x2e, fb(-1.0), 0xffc0_0000);
     for &(x, r) in &[(4.0f32, 2.0f32), (0.0, 0.0), (-0.0, -0.0), (2.25, 1.5), (f32::INFINITY, f32::INFINITY), (1.0e10, 1.0e5), (0.0625, 0.25)] {
         v1c(&mut c, "v_sqrt_f32", 0x33, fb(x), fb(r));
     }
-    v1c(&mut c, "v_sqrt_f32", 0x33, fb(-4.0), 0x7fc0_0000);
+    v1c(&mut c, "v_sqrt_f32", 0x33, fb(-4.0), 0xffc0_0000);
     for &(x, s, co) in &[(0.0f32, 0.0f32, 1.0f32), (0.25, 1.0, 0.0), (-0.25, -1.0, 0.0), (0.5, 0.0, -1.0), (1.0, 0.0, 1.0)] {
         if s == 0.0 && x != 0.0 {
             v1c(&mut c, "v_cos_f32", 0x36, fb(x), fb(co));

@@ -145,3 +145,49 @@ Results (gfx1036):
   32-segment cubic in the low 18 mantissa bits (sqrt 16 segments) with the square and cube terms
   taken from the mantissa without its lowest bit; the remaining ~0.015 ulp is not modelled yet.
 
+
+f32 rcp, rcp_iflag, rsq, sqrt (trans32_solve.cpp, trans32_gen.py)
+------------------------------------------------------------------
+
+v_rcp_f64, v_rsq_f64 and v_sqrt_f64 return the transcendental unit's internal value with no
+final rounding (34 bits for rcp, 35 for rsq/sqrt). The f32 instructions round that same value:
+
+    f32 = round_to_nearest_even(internal + shift) to 24 bits, shift = -2^-27
+    (0 in the table entry whose results reach 1.0: rcp and rsq segment 0, sqrt segment 15)
+
+so the f64 outputs show the datapath directly. Per table segment (rcp and rsq: top 5 mantissa
+bits, t = low 18 bits; sqrt: exponent parity and top 4 bits, t = low 19 bits), in units of the
+internal LSB, with every rounding half-to-even:
+
+    P      = c1 * t / 2^bits(t), held with a 24-bit significand (quantum q below the switch, 2q above)
+    coarse = c0 + P, rounded to 2^-29
+    S      = ((t >> k)^2) >> 10            k = 1 (rcp, rsq) or 2 (sqrt)
+    H      = c2 + Q * floor((M * t + phi) / Dn)
+    fine   = H * S / 2^24, held with a 24-bit significand
+    internal = coarse + fine
+
+Denormal inputs and results are flushed to signed zero whatever MODE says; NaN inputs are
+returned unchanged; rsq/sqrt of a negative nonzero input give 0xffc00000; sqrt(-0) = -0,
+rsq(-0) = -inf, rcp(+-0) = +-inf, rcp(+-inf) = +-0. v_rcp_iflag_f32 equals v_rcp_f32.
+
+Data (trans_probe.py kernels, every sweep run twice and kept only when identical):
+
+    trans_runner k.co v_rcp_f32_d3 8388608 0x3f800000 1 data/v_rcp_f32_d3_e0.bin       (and 0x40000000 -> _e1,
+                                                                                       rsq, sqrt, rcp_iflag)
+    trans_runner k.co v_rcp_f64_d3 1048576 0x3ff00000 $((k << 29)) data/rcp64_k$k.bin 2           (k = 0..7)
+    trans_runner k.co v_rsq_f64_d3 1048576 $((0x3ff00000 + (e << 20))) $((k << 29)) data/rsq64_e${e}_k$k.bin 2
+    trans_runner k.co v_rcp_f32_d3 1048576 0 4099 data/edge_rcp_d3.bin           (whole float range; d0 too)
+
+Tables (C++17, g++ -O3 trans32_solve.cpp -o trans32_solve; arguments: first segment, last segment,
+2 2 (half-even ties), output file):
+
+    OP=rcp SC=0 MUL=256 ./trans32_solve 0 31 2 2 rcp64_tables.txt
+    OP=rsq EX=e SC=2 MUL=256 ./trans32_solve 0 31 2 2 rsq64_e$e.txt
+    OP=sqrt EX=e SC=4 SB=19 SQ=2 MUL=256 ./trans32_solve 0 15 2 2 sqrt64_e$e.txt
+
+Every row reports 0 mismatches against all of its f64 outputs. Then
+
+    python3 trans32_gen.py <dir> crates/tombox-xshader/src/trans32/tables.rs crates/tombox-xshader/src/trans32/rdna2_hw.rs gfx1036 "<machine>"
+
+writes the tables and FNV-1a-64 digests of the recorded f32 results (every mantissa of [1,4), and the
+whole-range sweep in both denormal modes) that crates/tombox-xshader/src/trans32 is tested against.

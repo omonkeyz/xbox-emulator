@@ -433,10 +433,6 @@ fn tr(x: u32, r: f64) -> Option<u32> {
     Some(f32q(y))
 }
 
-fn rcp32(x: u32) -> Option<u32> {
-    tr(x, 1.0 / f(x) as f64)
-}
-
 fn frexp32(x: u32) -> (u32, u32) {
     let a = x & 0x7fff_ffff;
     if a == 0 || a >= 0x7f80_0000 {
@@ -551,10 +547,10 @@ fn vop1_ops(s: &mut Suite) {
     f1(s, "v_floor_f32", 0x24, Class::F32, Cmp::F32(0), |a| if den32(a) { None } else { Some(f32q(f(a).floor())) }, true);
     f1(s, "v_exp_f32", 0x25, Class::Trans, Cmp::F32(2), |a| tr(a, 2f64.powf(f(a) as f64)), true);
     f1(s, "v_log_f32", 0x27, Class::Trans, Cmp::F32Tol(2, 2.0e-7), |a| if f(a) == 0.0 { Some(0xff80_0000) } else if trans_in(a) { None } else { tr(a, (f(a) as f64).log2()) }, true);
-    f1(s, "v_rcp_f32", 0x2a, Class::Trans, Cmp::F32(1), rcp32, true);
-    f1(s, "v_rcp_iflag_f32", 0x2b, Class::Trans, Cmp::F32(1), rcp32, false);
-    f1(s, "v_rsq_f32", 0x2e, Class::Trans, Cmp::F32(1), |a| if f(a) == 0.0 { Some(if a >> 31 != 0 { 0xff80_0000 } else { 0x7f80_0000 }) } else { tr(a, 1.0 / (f(a) as f64).sqrt()) }, true);
-    f1(s, "v_sqrt_f32", 0x33, Class::Trans, Cmp::F32(1), |a| if f(a) == 0.0 { Some(a) } else { tr(a, (f(a) as f64).sqrt()) }, true);
+    f1(s, "v_rcp_f32", 0x2a, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(0, a)), true);
+    f1(s, "v_rcp_iflag_f32", 0x2b, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(1, a)), false);
+    f1(s, "v_rsq_f32", 0x2e, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(2, a)), true);
+    f1(s, "v_sqrt_f32", 0x33, Class::Trans, Cmp::X, |a| Some(tombox_xshader::trans32::eval(3, a)), true);
     f1(s, "v_sin_f32", 0x35, Class::Trans, Cmp::F32Tol(4, 4.0e-6), |a| sin_rev(a, false), true);
     f1(s, "v_cos_f32", 0x36, Class::Trans, Cmp::F32Tol(4, 4.0e-6), |a| sin_rev(a, true), true);
     f1(s, "v_frexp_exp_i32_f32", 0x3f, Class::F32, Cmp::X, |a| Some(frexp32(a).1), false);
