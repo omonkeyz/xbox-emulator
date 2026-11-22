@@ -234,3 +234,26 @@ low word carries, and every low-bit pattern at both mantissa corners: 723,517,44
                  data/exh/rcp_0x3ff00000_$(( (ml << 29) | (eh << 27) | (15 << 23) )).bin 2       (hi = 0x3ff00000 + i)
     trans_runner k.co v_rcp_f64m_d0 8388608 1 0x3ff00000 data/cz_rcp_0x3ff00000.bin 2            (lo = i, hi fixed)
     trans_runner k.co v_rcp_f64m_d0 8388608 0xffffffff 0x3fffffff data/co_rcp_0x3fffffff.bin 2   (lo = -i)
+
+
+Instruction checks (verify_probe.py, verify_runner.cpp, verify_gen.py)
+----------------------------------------------------------------------
+
+One kernel per instruction: each workgroup loads four input dwords, runs the instruction once and
+stores v10, s24, s25 and SCC, so the recorded results can be replayed by the translator test with
+the same encodings.
+
+    python3 verify_probe.py k.s in 64
+    clang-18 -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx1036 -c k.s -o k.o && ld.lld-18 -shared k.o -o k.co
+    g++ -O2 -D__HIP_PLATFORM_AMD__ -o verify_runner verify_runner.cpp -lamdhip64
+    ./verify_runner k.co hv_s_bfe_u32 in/s_bfe_u32.in out/s_bfe_u32.a                 (twice; keep when identical)
+    python3 verify_gen.py . crates/tombox-xshader/tests/exec_vop/rdna2_silicon.rs 32 "<machine>"
+
+bs_x / bs_xy / bs_xyz store through a V# with stride 16 and the formats in stores.in (75 32_32_32_32_UINT,
+77 32_32_32_32_FLOAT, 72 32_32_32_UINT, 62, 20 32_UINT) into memory filled with 0xaa; ds_hi writes a
+dword, then ds_write_b16_d16_hi at byte offset 0 or 2, and reads the dword back. On gfx1036:
+
+    format stores, 4-component formats: x, y[, z], then 0 in every component the instruction does not write
+    format stores, 3- and 1-component formats: only the format's components are written
+    s_bfe width >= 32: S0 >> offset (all remaining bits)
+    v_fma*_f16 with a signalling NaN operand (IEEE mode off): the NaN comes back unquieted

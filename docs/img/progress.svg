@@ -952,7 +952,7 @@
 <rect x="550.00" y="370.00" width="450.00" height="170.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="555.00" y="386.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Device</text>
 </g>
-<text x="4.00" y="571.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">RDNA2 shader instructions translated: 96.36% (768/797)</text>
+<text x="4.00" y="571.00" font-family="sans-serif" font-size="16" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">RDNA2 shader instructions translated: 97.62% (778/797)</text>
 <g><title>VOPC: 190/190 (100%)</title>
 <rect x="1.00" y="581.00" width="16.89" height="18.43" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="17.89" y="581.00" width="16.89" height="18.43" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1147,7 +1147,7 @@
 <rect x="0.00" y="580.00" width="238.39" height="260.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="5.00" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">VOPC</text>
 </g>
-<g><title>VOP3: 114/116 (98%)</title>
+<g><title>VOP3: 116/116 (100%)</title>
 <rect x="239.39" y="581.00" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="255.34" y="581.00" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="271.29" y="581.00" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1262,8 +1262,8 @@
 <rect x="287.24" y="819.15" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="303.19" y="819.15" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="319.14" y="819.15" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="335.09" y="819.15" width="15.95" height="19.85" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="351.04" y="819.15" width="15.95" height="19.85" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="335.09" y="819.15" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="351.04" y="819.15" width="15.95" height="19.85" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="238.39" y="580.00" width="145.55" height="260.00" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="243.39" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">VOP3</text>
 </g>
@@ -1350,7 +1350,7 @@
 <rect x="383.94" y="580.00" width="171.89" height="149.93" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="388.94" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">VOP1</text>
 </g>
-<g><title>DS: 50/58 (86%)</title>
+<g><title>DS: 51/58 (87%)</title>
 <rect x="384.94" y="730.93" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="401.93" y="730.93" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="418.92" y="730.93" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1401,7 +1401,7 @@
 <rect x="503.87" y="802.98" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="520.86" y="802.98" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="537.84" y="802.98" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="384.94" y="820.99" width="16.99" height="18.01" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="384.94" y="820.99" width="16.99" height="18.01" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="401.93" y="820.99" width="16.99" height="18.01" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="418.92" y="820.99" width="16.99" height="18.01" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="435.91" y="820.99" width="16.99" height="18.01" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1412,7 +1412,7 @@
 <rect x="383.94" y="729.93" width="171.89" height="110.07" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="388.94" y="745.93" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">DS</text>
 </g>
-<g><title>SOP2: 49/51 (96%)</title>
+<g><title>SOP2: 51/51 (100%)</title>
 <rect x="556.83" y="581.00" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="574.29" y="581.00" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="591.75" y="581.00" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1462,12 +1462,12 @@
 <rect x="626.67" y="679.95" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="644.13" y="679.95" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="661.59" y="679.95" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="556.83" y="696.45" width="17.46" height="16.49" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="574.29" y="696.45" width="17.46" height="16.49" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="556.83" y="696.45" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="574.29" y="696.45" width="17.46" height="16.49" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="555.83" y="580.00" width="124.22" height="133.94" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="560.83" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SOP2</text>
 </g>
-<g><title>VOP2: 45/48 (93%)</title>
+<g><title>VOP2: 48/48 (100%)</title>
 <rect x="556.83" y="714.94" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="574.29" y="714.94" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="591.75" y="714.94" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1513,9 +1513,9 @@
 <rect x="556.83" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="574.29" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="591.75" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="609.21" y="821.28" width="17.46" height="17.72" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="626.67" y="821.28" width="17.46" height="17.72" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="644.13" y="821.28" width="17.46" height="17.72" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="609.21" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="626.67" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="644.13" y="821.28" width="17.46" height="17.72" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="555.83" y="713.94" width="124.22" height="126.06" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="560.83" y="729.94" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">VOP2</text>
 </g>
@@ -1652,7 +1652,7 @@
 <rect x="785.45" y="580.00" width="107.28" height="112.51" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="790.45" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SOPP</text>
 </g>
-<g><title>MUBUF: 35/37 (94%)</title>
+<g><title>MUBUF: 37/37 (100%)</title>
 <rect x="893.72" y="581.00" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="911.27" y="581.00" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="928.82" y="581.00" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1688,8 +1688,8 @@
 <rect x="928.82" y="659.94" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="946.36" y="659.94" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="963.91" y="659.94" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="981.45" y="659.94" width="17.55" height="15.79" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="893.72" y="675.73" width="17.55" height="15.79" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="981.45" y="659.94" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="893.72" y="675.73" width="17.55" height="15.79" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="892.72" y="580.00" width="107.28" height="112.51" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="897.72" y="596.00" font-family="sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">MUBUF</text>
 </g>
