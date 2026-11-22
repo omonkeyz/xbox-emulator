@@ -2849,6 +2849,26 @@ impl<'a> Emitter<'a> {
         }
         let t = self.tmp;
         self.tmp += 1;
+        if let Some(op) = crate::trans32::op64_index(m).filter(|_| !f64_native()) {
+            self.uses_trans32 = true;
+            let x = d64(s.first().ok_or("missing operand")?)?;
+            self.line(&format!("uint t{t}l, t{t}h; asuint({x}, t{t}l, t{t}h);"));
+            if mods & 1 != 0 {
+                self.line(&format!("t{t}h &= 0x7fffffffu;"));
+            }
+            if (mods >> 3) & 1 != 0 {
+                self.line(&format!("t{t}h ^= 0x80000000u;"));
+            }
+            self.line(&format!("uint2 t{t}r = tb_t64({op}u, t{t}l, t{t}h);"));
+            if vop3 && (ins.aux.imm2 != 0 || ins.aux.imm != 0) {
+                let e = res(format!("asdouble(t{t}r.x, t{t}r.y)"));
+                self.line(&format!("double t{t}d = {e}; uint t{t}a, t{t}b; asuint(t{t}d, t{t}a, t{t}b);"));
+                self.wv(&d, &format!("t{t}a"))?;
+                return self.wv(&hi64(&d), &format!("t{t}b"));
+            }
+            self.wv(&d, &format!("t{t}r.x"))?;
+            return self.wv(&hi64(&d), &format!("t{t}r.y"));
+        }
         let mut flag: Option<(Opnd, String)> = None;
         let e = match m {
             "v_add_f64" => res(format!("({} + {})", a(0)?, a(1)?)),
@@ -6886,6 +6906,11 @@ fn f16_native() -> bool {
 fn f32_native() -> bool {
     static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *N.get_or_init(|| std::env::var("TOMBOX_XS_F32_NATIVE").map(|v| v.trim() == "1").unwrap_or(false))
+}
+
+fn f64_native() -> bool {
+    static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("TOMBOX_XS_F64_NATIVE").map(|v| v.trim() == "1").unwrap_or(false))
 }
 
 pub fn loop_guard(default: u32) -> u32 {

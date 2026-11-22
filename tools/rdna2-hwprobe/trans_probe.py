@@ -8,7 +8,13 @@ def body32(op):
 
 def kernel(name, op, wide):
     sh = 3 if wide else 2
-    if wide:
+    if wide == 3:
+        gen = "  v_mul_lo_u32 v8, v1, s6\n  v_mov_b32 v9, s7"
+        body = f"  {op} v[10:11], v[8:9]\n  global_store_dwordx2 v[5:6], v[10:11], off"
+    elif wide == 2:
+        gen = "  s_movk_i32 s8, 0x1003\n  v_mul_lo_u32 v9, v1, s8\n  v_add_nc_u32 v9, s6, v9"
+        body = f"  v_mov_b32 v8, s7\n  {op} v[10:11], v[8:9]\n  global_store_dwordx2 v[5:6], v[10:11], off"
+    elif wide:
         gen = "  v_mov_b32 v9, s6\n  v_mad_u32_u24 v9, v1, 1, v9"
         body = f"  v_mov_b32 v8, s7\n  {op} v[10:11], v[8:9]\n  global_store_dwordx2 v[5:6], v[10:11], off"
     else:
@@ -76,5 +82,14 @@ for d in (0, 3):
         names.append(n)
         src.append(kernel(n, op, op in F64))
         src.append(kd(n, d if op in F32 else 3, d if op not in F32 else 3))
+    for op in F64:
+        n = f"{op}x_d{d}"
+        names.append(n)
+        src.append(kernel(n, op, 2))
+        src.append(kd(n, 3, d))
+        n = f"{op}m_d{d}"
+        names.append(n)
+        src.append(kernel(n, op, 3))
+        src.append(kd(n, 3, d))
 open(sys.argv[1], "w").write("\n".join(src) + "\n" + meta(names))
 print(len(names), "kernels")

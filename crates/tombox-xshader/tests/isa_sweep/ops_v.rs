@@ -413,6 +413,11 @@ fn h1(s: &mut Suite, m: &'static str, op: u32, class: Class, cmp: Cmp, g: fn(u32
     s.add(m, "VOP1", "e64", class, &[vmov(OUT, v(12))], &vop3(0x180 + op, OUT, [v(11), 0, 0]), &[], &[cmp], move |x| on(g(x.d[1] & 0xffff).map(|r| (x.d[2] & 0xffff_0000) | (r & 0xffff))));
 }
 
+fn d1x(s: &mut Suite, m: &'static str, op: u32, i: usize) {
+    s.add(m, "VOP1", "e32", Class::F64, &[], &[vop1(op, OUT, v(10))], &[], &[Cmp::X, Cmp::X], move |x| o64(tombox_xshader::trans32::eval64(i, ((x.d[1] as u64) << 32) | x.d[0] as u64)));
+    s.add(m, "VOP1", "e64 neg", Class::F64, &[], &vop3o(0x180 + op, OUT, [v(12), 0, 0], 0, 1, false, 0), &[], &[Cmp::X, Cmp::X], move |x| o64(tombox_xshader::trans32::eval64(i, (((x.d[3] as u64) << 32) | x.d[2] as u64) ^ (1 << 63))));
+}
+
 fn d1(s: &mut Suite, m: &'static str, op: u32, cmp: Cmp, g: fn(f64) -> Option<u64>) {
     s.add(m, "VOP1", "e32", Class::F64, &[], &[vop1(op, OUT, v(10))], &[], &[cmp, Cmp::F64Hi], move |x| g(d(x.d[0], x.d[1])).map_or(vec![None, None], o64));
     s.add(m, "VOP1", "e64 neg", Class::F64, &[], &vop3o(0x180 + op, OUT, [v(12), 0, 0], 0, 1, false, 0), &[], &[cmp, Cmp::F64Hi], move |x| g(-d(x.d[2], x.d[3])).map_or(vec![None, None], o64));
@@ -557,9 +562,9 @@ fn vop1_ops(s: &mut Suite) {
     d1(s, "v_rndne_f64", 0x19, Cmp::F64(0), |a| Some(f64q(rne64(a))));
     d1(s, "v_floor_f64", 0x1a, Cmp::F64(0), |a| Some(f64q(a.floor())));
     d1(s, "v_fract_f64", 0x3e, Cmp::F64(0), |a| if !a.is_finite() { Some(QNAN64) } else { Some((a - a.floor()).min(f64::from_bits(0x3fef_ffff_ffff_ffff)).to_bits()) });
-    d1(s, "v_rcp_f64", 0x2f, Cmp::F64(1 << 29), |a| if den64(a.to_bits()) { None } else { let r = 1.0 / a; if den64(r.to_bits()) { None } else { Some(f64q(r)) } });
-    d1(s, "v_rsq_f64", 0x31, Cmp::F64(1 << 29), |a| if den64(a.to_bits()) { None } else if a == 0.0 { Some(if a.is_sign_negative() { 0xfff0_0000_0000_0000 } else { 0x7ff0_0000_0000_0000 }) } else { Some(f64q(1.0 / a.sqrt())) });
-    d1(s, "v_sqrt_f64", 0x34, Cmp::F64(1 << 29), |a| if den64(a.to_bits()) { None } else { Some(f64q(a.sqrt())) });
+    d1x(s, "v_rcp_f64", 0x2f, 0);
+    d1x(s, "v_rsq_f64", 0x31, 1);
+    d1x(s, "v_sqrt_f64", 0x34, 2);
     d1(s, "v_frexp_mant_f64", 0x3d, Cmp::F64(0), |a| Some(frexp64(a.to_bits()).0));
     s.add("v_frexp_exp_i32_f64", "VOP1", "e32", Class::F64, &[], &[vop1(0x3c, OUT, v(10))], &[], &[Cmp::X], |x| o(frexp64(d(x.d[0], x.d[1]).to_bits()).1));
     s.add("v_cvt_i32_f64", "VOP1", "e32", Class::F64, &[], &[vop1(0x03, OUT, v(10))], &[], &[Cmp::X], |x| o(cvt_i32(d(x.d[0], x.d[1]))));

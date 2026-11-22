@@ -17,7 +17,8 @@ def table(path, n):
         f = line.split()
         if len(f) != 9 or f[1] != "0":
             raise SystemExit(f"{path}: unsolved or malformed row: {line.strip()}")
-        rows[int(f[0])] = [int(x) for x in f[2:]]
+        c0, c1, c2, q, m, _, dn = (int(x) for x in f[2:])
+        rows[int(f[0])] = [c0, c1, c2, q, m, dn]
     if sorted(rows) != list(range(n)):
         raise SystemExit(f"{path}: expected {n} rows")
     return [rows[i] for i in range(n)]
@@ -28,7 +29,7 @@ def words(path, n):
 
 
 def rust_rows(name, rows):
-    out = [f"pub const {name}: [[i64; 7]; {len(rows)}] = ["]
+    out = [f"pub const {name}: [[i64; 6]; {len(rows)}] = ["]
     for r in rows:
         out.append("    [" + ", ".join(str(v) for v in r) + "],")
     out.append("];")
@@ -71,6 +72,25 @@ def main():
         for m in (3, 0):
             ws = words(os.path.join(d, "data", f"edge_{op}_d{m}.bin"), 1 << 20)
             w.append(f'    ("v_{op}_f32", {m}, {fnv(ws):#018x}),')
+    w.append("];")
+    f64 = []
+    for op in ("rcp", "rsq", "sqrt"):
+        for m in (3, 0):
+            for lo in ("0", "0x9e3779b9", "0xffffffff"):
+                f64.append((op, 0, int(lo, 16) if lo != "0" else 0, 0, m, f"edge64_{op}_d{m}_{lo}", 1 << 20))
+        for hb in (0x3FF00000, 0x40000000):
+            f64.append((op, 1, hb, 0, 0, f"cz_{op}_{hb:#010x}", 1 << 23))
+        for hb in (0x3FFFFFFF, 0x400FFFFF):
+            f64.append((op, 2, hb, 0, 0, f"co_{op}_{hb:#010x}", 1 << 23))
+        for hb in (0x3FF00000, 0x40000000):
+            for ml in (0, 7):
+                for eh in range(4):
+                    lo = (ml << 29) | (eh << 27) | (15 << 23)
+                    f64.append((op, 3, hb, lo, 0, f"exh/{op}_{hb:#010x}_{lo}", 1 << 20))
+    w.append(f"pub const F64_DIGESTS: [(&str, u8, u32, u32, u8, u64); {len(f64)}] = [")
+    for op, kind, a, b, m, fn, n in f64:
+        ws = words(os.path.join(d, "data", fn + ".bin"), 2 * n)
+        w.append(f'    ("v_{op}_f64", {kind}, {a:#010x}, {b:#010x}, {m}, {fnv(ws):#018x}),')
     w.append("];")
     open(hw_out, "w").write("\n".join(w) + "\n")
 

@@ -162,7 +162,8 @@ internal LSB, with every rounding half-to-even:
     P      = c1 * t / 2^bits(t), held with a 24-bit significand (quantum q below the switch, 2q above)
     coarse = c0 + P, rounded to 2^-29
     S      = ((t >> k)^2) >> 10            k = 1 (rcp, rsq) or 2 (sqrt)
-    H      = c2 + Q * floor((M * t + phi) / Dn)
+    H      = c2 + Q * rne(M * (4t + 1) / (4 Dn))       (sqrt: M * (2t + 1) / (2 Dn))
+             (trans32_solve fits the f32-equivalent floor((M t + phi) / Dn); trans32_gen drops phi)
     fine   = H * S / 2^24, held with a 24-bit significand
     internal = coarse + fine
 
@@ -205,3 +206,31 @@ denormal modes. Denormal mode 0 equals mode 3 with denormal inputs and results f
     trans_runner k.co v_sin_f32_d3 8388608 0x39800000 1 data/x_sin_0x39800000.bin
     (log: 0x3f000000 0x00800000 0x7f000000; exp: 0x40000000 0xc0000000 0x42800000 0xc2800000 0x33800000;
      sin, cos: 0x3f000000 0x3f800000 0x40800000 0x4a800000 0x39800000 0x39000000 0xbe800000 0x00800000)
+
+
+f64 rcp, rsq, sqrt (trans32::eval64, tb_t64)
+--------------------------------------------
+
+v_rcp_f64, v_rsq_f64 and v_sqrt_f64 run the same unit and write its internal value unrounded
+(rcp A * 2^(-35-E), rsq A * 2^(-36-Eh), sqrt A * 2^(-35+Eh)). They read the top 29 mantissa bits
+(truncated), so the datapath above sees a 24-bit t: the linear term uses all of it (rsq table
+entry 31: the top two extra bits are ignored there), the cubic coefficient uses its top 20 bits
+(TH, in rne(M * (TH + 1) / (4 Dn)) above, or 2 Dn for sqrt), the square term the same 17 as f32.
+Other behaviour, from the whole-range sweeps in both denormal modes:
+
+    denormal inputs are normalized (mode 3) or flushed (mode 0); results are exact (mode 3) or flushed
+    rcp: mantissa top 29 bits zero, low bits not -> the power of two minus one ulp (of the result format)
+         mantissa all ones                         -> the power of two plus one ulp
+    rsq, even exponent: mantissa top 29 bits zero, low bits not -> the power of two minus one ulp
+    exact powers of two: rcp and rsq exact; sqrt one 2^-26 step above (sqrt(4.0) = 0x4000000004000000)
+    NaN in -> unchanged; rsq/sqrt of a negative -> 0xfff8000000000000
+
+Recorded: the whole-range sweep (x = (i * 4099) << 32 | lo, lo = 0, 0x9e3779b9, 0xffffffff, both modes),
+every mantissa of [1, 4) for each of the 32 combinations of the 3 mantissa bits and 2 extra bits the
+low word carries, and every low-bit pattern at both mantissa corners: 723,517,440 results, all reproduced.
+
+    trans_runner k.co v_rcp_f64x_d3 1048576 0 0x9e3779b9 data/edge64_rcp_d3_0x9e3779b9.bin 2      (hi = i * 4099, lo fixed)
+    trans_runner k.co v_rcp_f64_d0 1048576 0x3ff00000 $(( (ml << 29) | (eh << 27) | (15 << 23) )) \
+                 data/exh/rcp_0x3ff00000_$(( (ml << 29) | (eh << 27) | (15 << 23) )).bin 2       (hi = 0x3ff00000 + i)
+    trans_runner k.co v_rcp_f64m_d0 8388608 1 0x3ff00000 data/cz_rcp_0x3ff00000.bin 2            (lo = i, hi fixed)
+    trans_runner k.co v_rcp_f64m_d0 8388608 0xffffffff 0x3fffffff data/co_rcp_0x3fffffff.bin 2   (lo = -i)

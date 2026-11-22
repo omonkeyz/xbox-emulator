@@ -42,10 +42,6 @@ pub fn snan64(x: u64) -> bool {
     nan64(x) && x & 0x0008_0000_0000_0000 == 0
 }
 
-pub fn den64(x: u64) -> bool {
-    x & 0x7ff0_0000_0000_0000 == 0 && x & 0x000f_ffff_ffff_ffff != 0
-}
-
 pub const QNAN32: u32 = 0x7fc0_0000;
 pub const QNAN16: u32 = 0x7e00;
 pub const QNAN64: u64 = 0x7ff8_0000_0000_0000;
