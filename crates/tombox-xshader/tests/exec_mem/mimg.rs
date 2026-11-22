@@ -408,3 +408,120 @@ fn image_mimg_atomics() {
     }
     run_mem_cases("mimg_atomics", &cs);
 }
+
+fn tu4(_m: u32, _l: u32, x: u32, y: u32) -> [u32; 4] {
+    match (x, y) {
+        (0, 0) => [0x0000_1234, 0x0001_0000, 0xffff_ffff, 0x0000_0000],
+        (2, 5) => [0x0000_ffff, 0x0000_8000, 0x0002_0001, 0x0000_0001],
+        _ => [x * 10000, y * 20000, 0x1_2345, 0xabcd],
+    }
+}
+
+fn ti4(_m: u32, _l: u32, x: u32, y: u32) -> [u32; 4] {
+    let s = |v: i32| v as u32;
+    match (x, y) {
+        (0, 0) => [s(100), s(-100), s(50_000), s(-50_000)],
+        (2, 5) => [s(32_767), s(-32_768), s(32_768), s(-32_769)],
+        _ => [s(0), s(-1), s(i32::MAX), s(i32::MIN)],
+    }
+}
+
+const IMG_UINT4: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 1, fmt: R32G32B32A32_UINT, texel: tu4 };
+const IMG_SINT4: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 1, fmt: R32G32B32A32_SINT, texel: ti4 };
+const IMG_UINT4_U: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 1, fmt: R32G32B32A32_UINT, texel: tzero };
+const IMG_SINT4_U: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 1, fmt: R32G32B32A32_SINT, texel: tzero };
+
+fn pack_u16_sat(vals: &[u32]) -> Vec<u32> {
+    let s = |x: u32| x.min(0xffff);
+    vals.chunks(2).map(|p| s(p[0]) | p.get(1).map_or(0, |&v| s(v) << 16)).collect()
+}
+
+fn pack_i16_sat(vals: &[u32]) -> Vec<u32> {
+    let s = |x: u32| ((x as i32).clamp(-32768, 32767) as u32) & 0xffff;
+    vals.chunks(2).map(|p| s(p[0]) | p.get(1).map_or(0, |&v| s(v) << 16)).collect()
+}
+
+#[test]
+fn image_mimg_d16_integer_images() {
+    let mut cs = Vec::new();
+    for &(x, y) in &[(0u32, 0u32), (2, 5), (3, 1)] {
+        for &dmask in &[0xfu32, 0x7, 0x5, 0x3, 0x1, 0x9, 0xa] {
+            let op = d16(mimg(0x00, dmask, 1, 1, 4, 0, 12));
+            let n = dmask.count_ones().div_ceil(2);
+            let mut p = Prog::new();
+            p.raw(&smem(3, 0, P_SRV, 0, SNULL))
+                .vv(1, x)
+                .vv(2, y)
+                .raw(&op)
+                .raw(&[vop2(0x14, 10, v(4), 4)]);
+            for k in 0..n {
+                p.raw(&[vop1(1, k, v(4 + k))]);
+            }
+            cs.push(case(
+                "image_load",
+                op,
+                p.words(),
+                Env { tex: Some(&IMG_UINT4), ..Default::default() },
+                pack_u16_sat(&pick(tu4(0, 0, x, y), dmask)),
+            ));
+
+            let mut p = Prog::new();
+            p.raw(&smem(3, 0, P_SRV, 0, SNULL))
+                .vv(1, x)
+                .vv(2, y)
+                .raw(&op)
+                .raw(&[vop2(0x12, 10, v(4), 4)]);
+            for k in 0..n {
+                p.raw(&[vop1(1, k, v(4 + k))]);
+            }
+            cs.push(case(
+                "image_load",
+                op,
+                p.words(),
+                Env { tex: Some(&IMG_SINT4), ..Default::default() },
+                pack_i16_sat(&pick(ti4(0, 0, x, y), dmask)),
+            ));
+        }
+    }
+
+    let halves: [u16; 4] = [0x7fff, 0x8000, 0xff9c, 0xffff];
+    for &dmask in &[0xfu32, 0x7, 0x5, 0x3, 0x1, 0x9, 0xa] {
+        let (x, y) = (2u32, 3u32);
+        let op = d16(mimg(0x08, dmask, 1, 1, 4, 16, 0));
+        let on: Vec<u16> = (0..4).filter(|c| (dmask >> c) & 1 != 0).map(|c| halves[c]).collect();
+        let regs: Vec<u32> = on.chunks(2).map(|p| (p[0] as u32) | p.get(1).map_or(0, |&v| (v as u32) << 16)).collect();
+        let base = ((y * 8 + x) * 4) as usize;
+
+        for (signed, img, tag_op) in [(false, &IMG_UINT4_U, 0x14u32), (true, &IMG_SINT4_U, 0x12u32)] {
+            let mut pre = Prog::new();
+            pre.vv(1, x).vv(2, y);
+            for (k, r) in regs.iter().enumerate() {
+                pre.vv(4 + k as u32, *r);
+            }
+            pre.raw(&[vop2(tag_op, 4, v(4), 4)]);
+            let mut k = 0usize;
+            let uav = (0..4)
+                .map(|c| {
+                    let w = if (dmask >> c) & 1 != 0 {
+                        let h = on[k];
+                        k += 1;
+                        if signed { (h as i16 as i32) as u32 } else { h as u32 }
+                    } else {
+                        0
+                    };
+                    (0usize, base + c, w)
+                })
+                .collect();
+            cs.push(MCase {
+                m: "image_store",
+                op: op.to_vec(),
+                words: build(&pre, &op, 4, 0, true),
+                env: Env { uav: Some(img), ..Default::default() },
+                rt: vec![],
+                uav,
+                tol: 0.0,
+            });
+        }
+    }
+    run_mem_cases("mimg_d16_int", &cs);
+}

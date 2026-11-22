@@ -37,7 +37,8 @@ pub(super) fn half_to_lane(reg: &str, hi: bool, lane: Lane) -> String {
 pub(super) fn lane_to_half(bits: &str, lane: Lane) -> String {
     match lane {
         Lane::Float => format!("tb_f2h(asfloat({bits}))"),
-        Lane::Uint | Lane::Sint => format!("(({bits}) & 0xffffu)"),
+        Lane::Uint => format!("min(({bits}), 0xffffu)"),
+        Lane::Sint => format!("(asuint(clamp(asint({bits}), -32768, 32767)) & 0xffffu)"),
     }
 }
 
@@ -93,7 +94,12 @@ mod tests {
         let v = pack_halves(&["a".into(), "b".into(), "c".into()], Lane::Float);
         assert_eq!(v, vec!["(tb_f2h(asfloat(a)) | (tb_f2h(asfloat(b)) << 16u))".to_string(), "tb_f2h(asfloat(c))".to_string()]);
         let u = pack_halves(&["x".into(), "y".into()], Lane::Uint);
-        assert_eq!(u, vec!["(((x) & 0xffffu) | (((y) & 0xffffu) << 16u))".to_string()]);
+        assert_eq!(u, vec!["(min((x), 0xffffu) | (min((y), 0xffffu) << 16u))".to_string()]);
+        let s = pack_halves(&["p".into(), "q".into()], Lane::Sint);
+        assert_eq!(
+            s,
+            vec!["((asuint(clamp(asint(p), -32768, 32767)) & 0xffffu) | ((asuint(clamp(asint(q), -32768, 32767)) & 0xffffu) << 16u))".to_string()]
+        );
     }
 
     #[test]

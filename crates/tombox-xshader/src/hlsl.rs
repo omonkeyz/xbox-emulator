@@ -1588,6 +1588,25 @@ impl<'a> Emitter<'a> {
         fn follows(mn: &str) -> bool {
             ["v_mov_b32", "v_and_b32", "v_or_b32", "v_xor_b32", "v_cndmask_b32", "v_not_b32"].iter().any(|p| mn.starts_with(p))
         }
+        fn half_move(u: &Insn) -> bool {
+            let m = u.mnemonic.strip_suffix("_e64").unwrap_or(&u.mnemonic);
+            match m {
+                "v_mov_b32" | "v_cndmask_b32" | "v_or3_b32" | "v_and_or_b32" | "v_perm_b32"
+                | "v_alignbit_b32" | "v_alignbyte_b32" | "v_bfi_b32" => true,
+                "v_lshl_or_b32" => matches!(u.src.get(1), Some(Opnd::ConstInt(16))),
+                "v_or_b32" => u.src.iter().all(|o| matches!(o, Opnd::Vgpr(_))),
+                "v_and_b32" => u.src.iter().any(|o| matches!(o, Opnd::Literal(0xffff | 0xffff_0000))),
+                "v_lshrrev_b32" | "v_lshlrev_b32" => matches!(u.src.first(), Some(Opnd::ConstInt(16))),
+                _ => false,
+            }
+        }
+        fn result_class(mn: &str, d16: bool) -> Option<u8> {
+            match mn.strip_prefix("v_cvt_") {
+                Some(rest) if d16 && (rest.starts_with("pkrtz_") || rest.starts_with("pknorm_")) => Some(0),
+                Some(rest) => Some(if rest.starts_with('f') { 0 } else if rest.contains("i32") || rest.contains("i16") { 2 } else { 1 }),
+                None => class(mn),
+            }
+        }
         // Keys are (is image, is_uav, slot): typed buffers and textures are told apart.
         let mut votes: BTreeMap<(bool, bool, u32), [u32; 3]> = BTreeMap::new();
         // (stored-to resource, loaded-from resource): a store of registers loaded from another
@@ -1635,6 +1654,7 @@ impl<'a> Emitter<'a> {
             }
             let Some((key, regs, is_load, is_store)) = typed(self, i) else { continue };
             let v = votes.entry(key).or_insert([0; 3]);
+            let d16 = mimg_d16::mimg_d16(&self.insns[i]) || self.insns[i].mnemonic.contains("_d16_");
             if is_load {
                 // Forward: how are the loaded registers (and plain copies / masks of them) used?
                 let mut live = regs;
@@ -1655,6 +1675,7 @@ impl<'a> Emitter<'a> {
                         v[0] += 1;
                     } else if mem_index && !(u.mnemonic.contains("store") && matches!(u.enc, Enc::Mubuf)) {
                         v[1] += 1;
+                    } else if uses && d16 && half_move(u) {
                     } else if uses && !self.epilog_pack.contains_key(&j) {
                         // (The export tail packs whatever type the output has: no evidence.)
                         if let Some(c) = class(&u.mnemonic) {
@@ -1663,7 +1684,7 @@ impl<'a> Emitter<'a> {
                             v[1] += 1;
                         }
                     }
-                    let carry = uses && follows(&u.mnemonic);
+                    let carry = uses && (follows(&u.mnemonic) || (d16 && half_move(u)));
                     for d in &u.dst {
                         if let Opnd::Vgpr(r) = d {
                             if carry {
@@ -1675,21 +1696,26 @@ impl<'a> Emitter<'a> {
                     }
                 }
             } else if is_store {
-                // Backward: what produced each stored register?
-                for r in regs {
-                    for j in (0..i).rev() {
+                let mut work: Vec<(u8, usize, u32)> = regs.into_iter().map(|r| (r, i, 0)).collect();
+                while let Some((r, before, depth)) = work.pop() {
+                    for j in (0..before).rev() {
                         let d = &self.insns[j];
                         if d.dst.iter().any(|o| matches!(o, Opnd::Vgpr(x) if *x == r)) {
                             if let Some((k2, _, true, _)) = typed(self, j) {
                                 links.push((key, k2));
                                 break;
                             }
-                            // A conversion's result type is its first type token.
-                            let c = match d.mnemonic.strip_prefix("v_cvt_") {
-                                Some(rest) => Some(if rest.starts_with('f') { 0 } else if rest.contains("i32") || rest.contains("i16") { 2 } else { 1 }),
-                                None => class(&d.mnemonic),
-                            };
-                            if let Some(c) = c {
+                            if d16 && half_move(d) {
+                                if depth < 4 {
+                                    for o in &d.src {
+                                        if let Opnd::Vgpr(x) = o {
+                                            work.push((*x, j, depth + 1));
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            if let Some(c) = result_class(&d.mnemonic, d16) {
                                 v[c as usize] += 1;
                             }
                             break;
@@ -5618,6 +5644,14 @@ impl<'a> Emitter<'a> {
             } else {
                 format!("uav{slot}")
             };
+            let d16_bit = ins.raw.get(1).is_some_and(|w| (w >> 31) & 1 != 0);
+            if d16_bit && ins.mnemonic.starts_with("image_atomic_") {
+                return Err("D16 image atomic unsupported (16-bit atomic data is not specified)".into());
+            }
+            let uint_zero = store && as_uint && ins.aux.mask == 1 && self.const_vgpr(idx, vd) == Some(0);
+            if d16_bit && !uint_zero && as_uint {
+                return Err("D16 access to an image also used with image atomics unsupported (texel signedness unknown)".into());
+            }
             if let Some(op) = ins.mnemonic.strip_prefix("image_atomic_") {
                 if !as_uint {
                     return Err("image atomic on a non-UAV table".into());
