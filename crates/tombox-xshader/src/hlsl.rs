@@ -1,17 +1,17 @@
-//! RDNA2 â†’ HLSL translator (stage 3 of the shader pipeline).
+//! RDNA2 → HLSL translator (stage 3 of the shader pipeline).
 //!
 //! Model: one HLSL invocation == one RDNA2 *lane*. Every VGPR/SGPR is a `uint` holding the
 //! raw 32-bit pattern (floats via asfloat/asuint), so no type inference is needed. Lane
 //! masks (exec, vcc, compare results in SGPRs) are represented by their bit for *this*
 //! lane (0/1). Descriptor-table pointers in user SGPRs are tracked symbolically: an
 //! `s_load_dwordxN` from a never-written SGPR is a descriptor fetch from a root table, and
-//! the way the descriptor is consumed (s_buffer_load â†’ CBV, MIMG resource â†’ SRV, MIMG
-//! sampler â†’ sampler) classifies the table. Slots map 1:1 to HLSL registers because the
+//! the way the descriptor is consumed (s_buffer_load → CBV, MIMG resource → SRV, MIMG
+//! sampler → sampler) classifies the table. Slots map 1:1 to HLSL registers because the
 //! title's root signature (UE layout) uses one SRV/CBV/sampler table per stage from
 //! register 0.
 //!
 //! Scope: forward-only control flow (no loops yet). Anything not understood returns `Err`
-//! naming the instruction â€” the caller must fall back; nothing is guessed.
+//! naming the instruction — the caller must fall back; nothing is guessed.
 
 use crate::meta::SigElement;
 use crate::rdna2::{disassemble, Enc, Insn, Opnd};
@@ -81,7 +81,7 @@ enum Res {
 
 const XYZW: [&str; 4] = ["x", "y", "z", "w"];
 
-/// RDNA2 cube-map helpers. v_cube{ma,sc,tc,id}_f32 follow the ISA definition (major axis Ã—2,
+/// RDNA2 cube-map helpers. v_cube{ma,sc,tc,id}_f32 follow the ISA definition (major axis ×2,
 /// face-local S/T, face index 0..5 = +X,-X,+Y,-Y,+Z,-Z). Hardware cube sampling takes
 /// (s, t, face) with s,t = sc/|ma| + 1.5 (so each is in [1, 2]); `tb_cube_dir` inverts that
 /// to the direction vector HLSL TextureCube sampling expects.
@@ -938,7 +938,7 @@ fn translate_with(ex: &ShaderExtract, image_layouts: &[crate::psocache::BindingL
         body: String::new(),
         tmp: 0,
         // PS attribute slot k = the k-th input *register* that carries an interpolant and is
-        // read. A register counts as read if any element packed into it is read â€” including
+        // read. A register counts as read if any element packed into it is read — including
         // a system value sharing it (observed: PARTICLE_RANDOM unread + SV_IsFrontFace read
         // in the same register still occupies an attribute slot; d26fd88ff8712f9e).
         ps_attrs: distinct_regs(ex.input_sig.iter().filter(|e| {
@@ -1260,7 +1260,7 @@ impl<'a> Emitter<'a> {
             let (mut sym, mut written) = states[b].clone().unwrap();
             if let Err(e) = self.res_block(&mut sym, &mut written, ranges[b].clone()) {
                 // Unknown effect: forget everything and treat every SGPR as written. Keep
-                // the first failure â€” it is the root cause if the recording pass fails too.
+                // the first failure — it is the root cause if the recording pass fails too.
                 first_err.get_or_insert(e);
                 sym.clear();
                 written = (0u16..=105).collect();
@@ -2082,7 +2082,7 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    /// Registers read before any write in program order â€” i.e. the shader's entry ABI
+    /// Registers read before any write in program order — i.e. the shader's entry ABI
     /// (interpolation barycentrics, fragment position, user-data SGPRs, thread ids...).
     fn live_in(&self) -> Vec<String> {
         let mut written: BTreeSet<String> = BTreeSet::new();
@@ -2221,7 +2221,7 @@ impl<'a> Emitter<'a> {
     ///   [L..=B]. Flags for labels inside the body are reset each iteration; flags for
     ///   labels past B (loop exits) terminate the loop and keep skipping until their label.
     ///   Loops must be properly nested, have one back-edge per header, and must not be
-    ///   entered from outside except through the header â€” otherwise `Err`.
+    ///   entered from outside except through the header — otherwise `Err`.
     fn emit_body(&mut self, is_ps: bool) -> Result<(), String> {
         let mut off2idx: HashMap<usize, usize> = self.insns.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
         // A branch to the address just past the last instruction leaves the program (same as
@@ -2368,7 +2368,7 @@ impl<'a> Emitter<'a> {
     /// General control flow: a `while` + `switch` dispatcher over basic blocks, used when
     /// the CFG is not reducible to nested loops. Each block ends by setting the next block
     /// id (`tb_pc`); the program ends when it reaches the id one past the last instruction.
-    /// (Implicit-derivative sampling cannot live inside this loop â€” FXC rejects it, and the
+    /// (Implicit-derivative sampling cannot live inside this loop — FXC rejects it, and the
     /// shader then fails to compile rather than silently changing meaning.)
     fn emit_body_dispatch(&mut self, is_ps: bool) -> Result<(), String> {
         let n = self.insns.len();
@@ -3141,7 +3141,7 @@ impl<'a> Emitter<'a> {
                     }
                     "s_brev_b32" => self.ws(&d, &format!("reversebits({a})")),
                     "s_bcnt1_i32_b64" => {
-                        // Population count of a 64-bit value â€” typically the number of active
+                        // Population count of a 64-bit value — typically the number of active
                         // lanes (wave-level allocation). One invocation = one lane, so a lane
                         // mask counts as 0 or 1.
                         let ah = r(&hi(&s[0]))?;
@@ -3348,7 +3348,7 @@ impl<'a> Emitter<'a> {
                     if self.emit_rm_load(idx, ins)?.is_some() {
                         return Ok(());
                     }
-                    self.line("// (descriptor fetch from root table â€” resolved statically)");
+                    self.line("// (descriptor fetch from root table — resolved statically)");
                     return Ok(());
                 }
                 let n = 1u32 << (ins.op - 8);
@@ -3527,7 +3527,7 @@ impl<'a> Emitter<'a> {
                         "ds_read_b32" | "ds_read2_b32" | "ds_read2st64_b32" | "ds_write_b32" | "ds_write2_b32" | "ds_write2st64_b32"
                     ) =>
             {
-                // Compute: LDS is the thread group's shared memory â†’ an HLSL `groupshared`
+                // Compute: LDS is the thread group's shared memory → an HLSL `groupshared`
                 // array addressed by byte address / 4 (32 KiB, the D3D groupshared limit).
                 self.uses_lds = true;
                 let rd = m.starts_with("ds_read");
@@ -3656,7 +3656,7 @@ impl<'a> Emitter<'a> {
             }
             Enc::Ds if m == "ds_swizzle_b32" => {
                 // Quad swizzle (QDMode): each lane of a 2x2 pixel quad reads the lane selected
-                // by a 2-bit field of the 8-bit mask â€” how RDNA2 pixel shaders fetch neighbour
+                // by a 2-bit field of the 8-bit mask — how RDNA2 pixel shaders fetch neighbour
                 // values for derivatives. Per pixel: value at quad position (sx, sy) =
                 // v + (sx - px) * ddx_fine(v) + (sy - py) * ddy_fine(v), with (px, py) this
                 // pixel's position in its quad. Treats the register as float (derivative use).
@@ -4561,7 +4561,7 @@ impl<'a> Emitter<'a> {
         let fc = || fw(2);
         let (a, b) = (r(&s[0])?, s.get(1).map(r).transpose()?.unwrap_or_default());
         let c = s.get(2).map(|o| r(o)).transpose().unwrap_or(None).unwrap_or_default();
-        // `v_mul_legacy_f32` / `v_mad_legacy_f32`: DX9 multiply rules â€” the product is 0 when
+        // `v_mul_legacy_f32` / `v_mad_legacy_f32`: DX9 multiply rules — the product is 0 when
         // either operand is 0, even against infinity or NaN (`tb_mull`). A plain multiply
         // only matched under fast-math; with exact arithmetic it produced NaN positions.
         let legacy = m.ends_with("_legacy_f32");
@@ -4779,7 +4779,7 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         if ins.mnemonic.contains("_atomic_") {
-            // Buffer atomics â†’ HLSL Interlocked* on the UAV element. With GLC set the
+            // Buffer atomics → HLSL Interlocked* on the UAV element. With GLC set the
             // pre-operation value is returned in vdata.
             let (offen, idxen, glc) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0, ins.aux.mask & 4 != 0);
             if (offen && idxen) || !matches!(ins.src[2], Opnd::ConstInt(0)) {
@@ -5372,7 +5372,7 @@ impl<'a> Emitter<'a> {
                 format!("uav{slot}")
             };
             if ins.mnemonic.starts_with("image_atomic_") {
-                // Image atomics â†’ Interlocked* on a RWTexture<uint> texel; vdata carries the
+                // Image atomics → Interlocked* on a RWTexture<uint> texel; vdata carries the
                 // operand in and the previous value out.
                 if !as_uint {
                     return Err("image atomic on a non-UAV table".into());

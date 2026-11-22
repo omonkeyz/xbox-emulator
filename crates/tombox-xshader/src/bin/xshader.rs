@@ -2,7 +2,7 @@
 //!
 //! Usage: xshader <shader.dxbc> [--isa-out <file.bin>] [--fssm-out <file.bin>]
 //!
-//! Prints the DXBCâ†’XDATâ†’zlibâ†’FSSMâ†’RDNA2 chain it walked and a hex/word dump of the ISA.
+//! Prints the DXBC→XDAT→zlib→FSSM→RDNA2 chain it walked and a hex/word dump of the ISA.
 
 use std::process::ExitCode;
 use tombox_xshader::{extract, parse_root_signature, Stage};
