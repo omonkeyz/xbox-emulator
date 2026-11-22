@@ -1,5 +1,5 @@
 use crate::com::{self, Com, Obj, IID_XBTP_MESSAGE};
-use crate::msg::{deserialize_body, log_api, API_CPP, S_E_INVALIDARG};
+use crate::msg::{deserialize_body, log_api, serialize_body, API_CPP, S_E_INVALIDARG};
 use crate::sys::*;
 use crate::xbtp;
 
@@ -36,6 +36,10 @@ pub unsafe fn open_pipe_to_system(ext: *const GUID, iid: *const GUID, out: *mut 
 }
 
 pub unsafe fn send_json_message_timeout(session: Obj, op: u32, timeout: u32, reply: *mut Obj) -> HRESULT {
+    send_json_message_with_timeout(session, core::ptr::null_mut(), op, timeout, reply)
+}
+
+pub unsafe fn send_json_message_with_timeout(session: Obj, request_body: Obj, op: u32, timeout: u32, reply: *mut Obj) -> HRESULT {
     if session.is_null() {
         log_api(S_E_INVALIDARG, E_INVALIDARG, API_CPP, 0x26c);
         return E_INVALIDARG;
@@ -54,6 +58,12 @@ pub unsafe fn send_json_message_timeout(session: Obj, op: u32, timeout: u32, rep
     let hr = xbtp::create_message(&IID_XBTP_MESSAGE, req.put());
     if hr < 0 {
         return fail(hr, b"XbtpCreateMessage(IID_PPV_ARGS(&reqMsg))\0", 0x270);
+    }
+    if !request_body.is_null() {
+        let hr = serialize_body(request_body, req.get());
+        if hr < 0 {
+            return fail(hr, b"XtfSerializeJsonBody(body, reqMsg)\0", 0x274);
+        }
     }
     let mut exchange = 0u32;
     let hr = com::client_session::send_begin_message(session, op, req.get(), &mut exchange);
@@ -78,8 +88,8 @@ pub unsafe fn send_json_message_timeout(session: Obj, op: u32, timeout: u32, rep
     S_OK
 }
 
-pub unsafe fn send_json_message(session: Obj, _body: Obj, op: u32, reply: *mut Obj) -> HRESULT {
-    let hr = send_json_message_timeout(session, op, DEFAULT_RECEIVE_TIMEOUT, reply);
+pub unsafe fn send_json_message(session: Obj, body: Obj, op: u32, reply: *mut Obj) -> HRESULT {
+    let hr = send_json_message_with_timeout(session, body, op, DEFAULT_RECEIVE_TIMEOUT, reply);
     if hr < 0 {
         log_api(b"XtfSendJsonMessage( session, body, operationId, XbtpDefaultReceiveTimeout, reply)\0", hr, API_CPP, 0x255);
         return hr;

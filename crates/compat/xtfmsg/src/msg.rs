@@ -139,6 +139,29 @@ pub unsafe fn set_json_property64(body: Obj, name: *const u16, v: u64) -> HRESUL
     hr
 }
 
+// Build 19041 XtfGetJsonProperty64 (console-control RVA 0x91dc).
+pub unsafe fn get_json_property64(body: Obj, name: *const u16, out: *mut u64) -> HRESULT {
+    if body.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut number = Com::null();
+    let hr = json::get_object(body, name, number.put());
+    if hr < 0 {
+        return hr;
+    }
+    let mut low = 0.0;
+    let hr = json::get_number(number.get(), wide("L").as_ptr(), &mut low);
+    if hr < 0 {
+        return hr;
+    }
+    let mut high = 0.0;
+    let hr = json::get_number(number.get(), wide("H").as_ptr(), &mut high);
+    if hr >= 0 {
+        *out = ((cvtt64(high) as u64) << 32) | u64::from(cvtt64(low) as u32);
+    }
+    hr
+}
+
 pub fn cvtt64(v: f64) -> i64 {
     if v.is_nan() || v >= 9.223372036854775808e18 || v < -9.223372036854775808e18 {
         i64::MIN

@@ -1,6 +1,7 @@
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
 pub mod chk;
+pub mod client;
 pub mod op;
 pub mod config;
 pub mod privilege;

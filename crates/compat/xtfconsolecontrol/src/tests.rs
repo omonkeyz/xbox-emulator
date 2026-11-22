@@ -734,3 +734,77 @@ fn complete_operation_marks_success_or_result_code() {
         assert_eq!(hr, S_OK);
     }
 }
+
+#[test]
+fn standby_client_exchanges_operation_17_and_preserves_partial_results() {
+    use crate::client::{query_connected_standby, query_connected_standby_ex};
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        let (_, native_reply) = call(in_connected_standby_handler, None);
+        for (body, expected, status) in [
+            (native_reply.as_str(), [0, 0, 0], S_OK),
+            (r#"{"InConnectedStandby":1,"AllowsInstantOn":-1,"AllowXboxAppConnections":4}"#, [1, 1, 1], S_OK),
+            (r#"{"InConnectedStandby":1,"AllowsInstantOn":0}"#, [1, 0, 0], S_OK),
+            (r#"{"InConnectedStandby":1}"#, [1, 0, 0], E_JSON_NOT_FOUND),
+            (r#"{"XtfOperationError":{"ReturnCode":-2147467259,"Checkpoint":0,"Errors":[]}}"#, [0, 0, 0], E_FAIL),
+            (r#"{"XtfOperationError":{"ReturnCode":-2147467259}}"#, [0, 0, 0], E_JSON_NOT_FOUND),
+        ] {
+            let raw = client_session(S_OK, S_OK, 0, Some(body));
+            let session = Com(as_obj(raw));
+            let [mut a, mut b, mut c] = [9; 3];
+            assert_eq!(query_connected_standby_ex(session.get(), &mut a, &mut b, &mut c), status, "{body}");
+            assert_eq!([a, b, c], expected);
+            assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_IN_CONNECTED_STANDBY);
+            assert_eq!((*raw).requests.lock().unwrap()[0].as_deref(), Some("{}"));
+        }
+        let raw = client_session(E_FAIL, S_OK, 0, None);
+        let session = Com(as_obj(raw));
+        let (mut a, mut b) = (9, 9);
+        assert_eq!(query_connected_standby_ex(session.get(), &mut a, &mut b, std::ptr::null_mut()), 0x8000_4003u32 as i32);
+        assert_eq!((a, b), (9, 9));
+        assert!((*raw).calls.lock().unwrap().is_empty());
+        assert_eq!(query_connected_standby(session.get(), &mut a, &mut b), E_FAIL);
+        assert_eq!((a, b), (0, 0));
+    }
+}
+
+#[test]
+fn updates_pending_client_returns_flag_or_failure() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        assert_eq!(client::updates_pending(std::ptr::null_mut(), std::ptr::null_mut()), E_INVALIDARG);
+        for (response, expected_hr, expected) in [(r#"{"UpdatesPending":1}"#, S_OK, 1), ("{}", E_JSON_NOT_FOUND, 0)] {
+            let raw = client_session(S_OK, S_OK, 0, Some(response));
+            let session = Com(as_obj(raw));
+            let mut value = 9;
+            assert_eq!(client::updates_pending(session.get(), &mut value), expected_hr);
+            assert_eq!(value, expected);
+            assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_UPDATES_PENDING);
+        }
+    }
+}
+
+#[test]
+fn client_reads_console_filetime_and_preserves_operation_status() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        assert_eq!(client::get_system_time(std::ptr::null_mut(), std::ptr::null_mut()), E_INVALIDARG);
+        let epoch = SystemTime { year: 1970, month: 1, day_of_week: 4, day: 1, ..Default::default() };
+        for (response, status, expected) in [
+            (r#"{"ConsoleTime":{"L":3577643008,"H":27111902}}"#, S_OK, epoch),
+            (r#"{"ConsoleTime":{"L":0,"H":-1}}"#, S_OK, SystemTime::default()),
+            (r#"{"ConsoleTime":{"L":0}}"#, E_JSON_NOT_FOUND, SystemTime::default()),
+            (r#"{"XtfOperationError":{"ReturnCode":-2147467259,"Checkpoint":0,"Errors":[]}}"#, E_FAIL, SystemTime::default()),
+        ] {
+            let raw = client_session(S_OK, S_OK, 0, Some(response));
+            let session = Com(as_obj(raw));
+            let mut actual = SystemTime { year: 9999, ..Default::default() };
+            assert_eq!(client::get_system_time(session.get(), &mut actual), status);
+            assert_eq!(actual, expected);
+            assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_GET_SYSTEM_TIME);
+        }
+    }
+}

@@ -18,16 +18,16 @@ pub const PENDING_FILE_RENAME_OPERATIONS: &str = "PendingFileRenameOperations";
 pub const OPEN_SAMS: [u32; 3] = [0xf003f, 0x2001f, 0x20019];
 
 #[repr(C)]
-#[derive(Default)]
-struct SystemTime {
-    year: u16,
-    month: u16,
-    day_of_week: u16,
-    day: u16,
-    hour: u16,
-    minute: u16,
-    second: u16,
-    milliseconds: u16,
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SystemTime {
+    pub year: u16,
+    pub month: u16,
+    pub day_of_week: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub milliseconds: u16,
 }
 
 #[link(name = "kernel32")]

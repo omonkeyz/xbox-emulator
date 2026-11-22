@@ -244,6 +244,11 @@ fn send_json_message_follows_console_client_session() {
         assert_eq!(json::get_number(reply.get(), k.as_ptr(), &mut v), S_OK);
         assert_eq!(*(*s).calls.lock().unwrap(), vec![(0xe, 0, 0), (u32::MAX, 30000, 0x41)]);
         assert_eq!(send_json_message(as_obj(s), core::ptr::null_mut(), 0xf, core::ptr::null_mut()), S_OK);
+        let request = message_with_json(r#"{"ProcessId":1234}"#);
+        let mut body = Com::null();
+        assert_eq!(deserialize_body(request.get(), body.put()), S_OK);
+        assert_eq!(send_json_message(as_obj(s), body.get(), 0x10, core::ptr::null_mut()), S_OK);
+        assert_eq!(*(*s).requests.lock().unwrap(), [None, None, Some(r#"{"ProcessId":1234}"#.to_owned())]);
         com::release(as_obj(s));
         let st = client_session(S_OK, S_OK, 0x1234, None);
         assert_eq!(send_json_message(as_obj(st), core::ptr::null_mut(), 0xe, core::ptr::null_mut()), 0x8c11_0134u32 as i32);
@@ -257,5 +262,20 @@ fn send_json_message_follows_console_client_session() {
         com::release(as_obj(bad));
         assert_eq!(send_json_message(core::ptr::null_mut(), core::ptr::null_mut(), 0xe, core::ptr::null_mut()), E_INVALIDARG);
         assert_eq!(open_pipe_to_system(&GUID::default(), &crate::com::IID_XBTP_CLIENT_SESSION, core::ptr::null_mut()), E_INVALIDARG);
+    }
+}
+
+#[test]
+fn split_uint64_requires_both_words_before_writing_the_result() {
+    load_xbtp();
+    unsafe {
+        let mut body = Com::null();
+        let message = message_with_json(r#"{"Partial":{"L":7},"Signed":{"H":-2.5,"L":4294967295}}"#);
+        assert_eq!(deserialize_body(message.get(), body.put()), S_OK);
+        let mut value = 123;
+        assert_eq!(get_json_property64(body.get(), wide("Partial").as_ptr(), &mut value), E_JSON_NOT_FOUND);
+        assert_eq!(value, 123);
+        assert_eq!(get_json_property64(body.get(), wide("Signed").as_ptr(), &mut value), S_OK);
+        assert_eq!(value, 0xffff_fffe_ffff_ffff);
     }
 }
