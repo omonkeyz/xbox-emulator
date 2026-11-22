@@ -26,7 +26,7 @@ fn post64() -> Vec<u32> {
     w
 }
 
-fn bfe64(a: u64, b: u32, signed: bool, bits: u32) -> u64 {
+pub fn bfe64(a: u64, b: u32, signed: bool, bits: u32) -> u64 {
     let o = b & (bits - 1);
     let w = (b >> 16) & 127;
     let all = if bits == 32 { 0xffff_ffffu64 } else { u64::MAX };

@@ -1,8 +1,8 @@
 {
   "rdna2_verified": {
     "source": "emulator crates/tombox-xshader/tests/exec.rs: each opcode translated, compiled with DXC and executed on D3D12 WARP with known inputs; outputs compared against values computed from the RDNA2 ISA definitions; tests/exec_vop/vopc.rs vopc_{f16,f32,f64,i32,u32}: every v_cmp/v_cmpx condition as e32, e64 (abs/neg), SGPR destination, masked lanes and inline constants",
-    "evidence": "v_permlane16_b32 and v_permlanex16_b32 are verified on real hardware (RTX 5060, wave32) with TOMBOX_EXEC_HW=1: tests/exec_vop/lanes.rs permlane_lanes, 128 of 128 32-lane cases bit-exact against the ISA model; WARP runs 4-lane waves so it cannot execute them | 11-21 independent verify: 95 mnemonics (DS LDS atomics ext, flat/global byte/short/d16_hi, tbuffer d16, ds_append/consume, VOPC i16/u16/i64/u64/class_f16) not refuted; 10 tests pass on WARP, GDS also on RTX 5060. Caveats: i64/u64 compare literal extension rule unbacked by an in-repo source; tbuffer d16 refuses UNORM/SNORM and 32-bit-component formats; ds_append/consume LDS form unlowered, wave64 refused, relies on 32-lane host waves. | 11-21 batched ISA sweep (tests/isa_sweep.rs, CPU reference models from ISA semantics) passes 541/541 on RTX 5060; independent verifier hand-checked 25 references, injection test fails as expected, could not refute. Added 169 mnemonics. Held back: s_bfe_i32, s_bfe_i64, s_bfe_u32, s_bfe_u64, v_cvt_norm_i16_f16, v_cvt_norm_u16_f16, v_cvt_pknorm_i16_f16, v_cvt_pknorm_i16_f32, v_cvt_pknorm_u16_f16, v_cvt_pknorm_u16_f32 (s_bfe width>=32 rule disputed: translator returns 0, reference returns S0; cvt_pknorm exact rounding not confirmed against silicon).",
-    "updated": "2026-11-21",
+    "evidence": "v_permlane16_b32 and v_permlanex16_b32 are verified on real hardware (RTX 5060, wave32) with TOMBOX_EXEC_HW=1: tests/exec_vop/lanes.rs permlane_lanes, 128 of 128 32-lane cases bit-exact against the ISA model; WARP runs 4-lane waves so it cannot execute them | 11-21 independent verify: 95 mnemonics (DS LDS atomics ext, flat/global byte/short/d16_hi, tbuffer d16, ds_append/consume, VOPC i16/u16/i64/u64/class_f16) not refuted; 10 tests pass on WARP, GDS also on RTX 5060. Caveats: i64/u64 compare literal extension rule unbacked by an in-repo source; tbuffer d16 refuses UNORM/SNORM and 32-bit-component formats; ds_append/consume LDS form unlowered, wave64 refused, relies on 32-lane host waves. | 11-21 batched ISA sweep (tests/isa_sweep.rs, CPU reference models from ISA semantics) passes 541/541 on RTX 5060; independent verifier hand-checked 25 references, injection test fails as expected, could not refute. Added 169 mnemonics. Held back: s_bfe_i32, s_bfe_i64, s_bfe_u32, s_bfe_u64, v_cvt_norm_i16_f16, v_cvt_norm_u16_f16, v_cvt_pknorm_i16_f16, v_cvt_pknorm_i16_f32, v_cvt_pknorm_u16_f16, v_cvt_pknorm_u16_f32 (s_bfe width>=32 rule disputed: translator returns 0, reference returns S0; cvt_pknorm exact rounding not confirmed against silicon). | 11-22 RDNA2 hardware: the held s_bfe and normalized-conversion rules are confirmed on silicon. isa_sweep passes s_bfe_i32, s_bfe_i64, s_bfe_u32, s_bfe_u64, v_cvt_norm_i16_f16, v_cvt_norm_u16_f16, v_cvt_pknorm_i16_f16, v_cvt_pknorm_i16_f32, v_cvt_pknorm_u16_f16, v_cvt_pknorm_u16_f32 on WARP against ops_s::bfe64 / ops_v::norm16, and the new sweep_references_match_rdna2 checks those two models against results recorded on RDNA2 hardware (gfx1036 iGPU of a Ryzen 5 9600X, ROCm/HIP 5.7.1; tests/isa_sweep/rdna2_hw.rs, from the valu_probe.py sbfe/norm probes of community PR #72): all 152 s_bfe cases (7-bit width, a signed field reaching the top bit sign-fills, SCC = result != 0), every f16 input of the four f16 conversions (digest over 65536 inputs; v_cvt_norm_* keeps the upper half), the f32 edge grid and 512 random f32 pairs; 0 mismatches. Round to nearest, NaN -> 0. Six planted model changes each fail the test.",
+    "updated": "2026-11-22",
     "mnemonics": [
       "tbuffer_load_format_x",
       "tbuffer_load_format_xy",
@@ -726,7 +726,9 @@
       "v_swap_b32",
       "v_trunc_f32",
       "v_xad_u32",
-      "v_xor_b32"
+      "v_xor_b32",
+      "s_bfe_i32",
+      "s_bfe_u32"
     ]
   },
   "updated": "2026-11-21",
@@ -3096,18 +3098,7 @@
   },
   "rdna2_pending": {
     "source": "rdna2-dev batch 1 (awaiting independent verification): exec_mem::ds::ds_lds_atomics_ext, exec_mem::global::flat_global_mem, exec_mem::mtbuf::mtbuf_d16_load_formats, exec_mem::mtbuf::mtbuf_d16_store_formats on WARP",
-    "mnemonics": [
-      "s_bfe_i32",
-      "s_bfe_i64",
-      "s_bfe_u32",
-      "s_bfe_u64",
-      "v_cvt_norm_i16_f16",
-      "v_cvt_norm_u16_f16",
-      "v_cvt_pknorm_i16_f16",
-      "v_cvt_pknorm_i16_f32",
-      "v_cvt_pknorm_u16_f16",
-      "v_cvt_pknorm_u16_f32"
-    ],
+    "mnemonics": [],
     "tests": []
   },
   "console_pending": {
