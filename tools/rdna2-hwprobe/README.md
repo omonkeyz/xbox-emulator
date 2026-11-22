@@ -81,7 +81,8 @@ Same runner and kernel preamble, for questions outside MTBUF that the ISA text l
   junk in the unused bits of S1. `show` compares three candidates: 7-bit width with sign-fill past the
   top bit, 7-bit width with the literal ISA formula (zero-fill), and width modulo the operand size.
 - `nan`: which NaN `v_fma_f32`, `v_mul_f32`, `v_add_f32`, `v_sub_f32`, `v_fmac_f32`, `v_min_f32` and
-  `v_max_f32` return, with IEEE mode off and on.
+  `v_max_f32` return, with IEEE mode off and on. `show` checks the outputs against the rules measured on gfx1036
+  (below), so a different GPU or a changed kernel shows up as a nonzero count.
 - `norm`: rounding, NaN and range handling of `v_cvt_pknorm_{i,u}16_{f32,f16}` and
   `v_cvt_norm_{i,u}16_f16`.
 
@@ -113,9 +114,10 @@ This is RDNA2, not the console's gfx1013. Nothing here was measured on a console
   ignored, and so is offset bit 5 (32-bit forms) or bit 6 (64-bit forms). SCC = result != 0.
 - `norm`: **round to nearest**, 0 mismatches for all six instructions, NaN gives 0. Half-up
   (`floor(x + 0.5)`) fails on the signed forms. The upper half of D is preserved by `v_cvt_norm_*`.
-- `nan`: the single candidate that `show` prints ("first NaN operand, quieted") does **not** fit. The
-  rules below were fitted by @SchmashinPrunes against the raw outputs and reproduce every NaN result
-  in both IEEE modes; `show` has not been updated to check them.
+- `nan`: the first candidate ("first NaN operand, quieted") does **not** fit. The rules below were
+  fitted by @SchmashinPrunes against the raw outputs and reproduce every NaN result in both IEEE
+  modes. `show` now checks them (`nan_arith` / `nan_minmax` in `valu_probe.py`) and prints the number
+  of results that differ per instruction: 0 on gfx1036.
   - Arithmetic (`v_fma_f32`, `v_fmac_f32`, `v_mul_f32`, `v_add_f32`, `v_sub_f32`), operand order
     (a, b, c) or (src0, src1):
     1. `v_sub_f32` negates src1 first, so a NaN in src1 comes out with its sign flipped.
