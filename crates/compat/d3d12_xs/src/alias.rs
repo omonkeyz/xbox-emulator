@@ -348,6 +348,44 @@ unsafe fn allocation_info(real: *mut c_void, desc: &[u8; 0x38]) -> (u64, u64) {
     (r[0], r[1])
 }
 
+fn heap_properties(desc: &[u64; 6]) -> [u32; 5] {
+    let b: Vec<u8> = desc.iter().flat_map(|w| w.to_le_bytes()).collect();
+    core::array::from_fn(|i| u32::from_le_bytes(b[8 + i * 4..12 + i * 4].try_into().unwrap()))
+}
+
+pub(crate) unsafe fn committed_when_too_big(
+    real: *mut c_void,
+    heap: *mut c_void,
+    offset: u64,
+    desc: &[u8; 0x38],
+    init_state: u32,
+    pclear: *const c_void,
+    ppv: *mut *mut c_void,
+) -> Option<i32> {
+    if heap.is_null() || ppv.is_null() || u32::from_le_bytes(desc[0..4].try_into().unwrap()) < 2 {
+        return None;
+    }
+    let (pc_size, _) = unsafe { allocation_info(real, desc) };
+    let mut hd = [0u64; 6];
+    unsafe { vcall!(heap, 8, fn(*mut u64) -> *mut u64, hd.as_mut_ptr()) };
+    let heap_bytes = hd[0];
+    if pc_size == u64::MAX || pc_size == 0 || offset.saturating_add(pc_size) <= heap_bytes {
+        return None;
+    }
+    let props = heap_properties(&hd);
+    let hr = unsafe {
+        vcall!(real, 27, fn(*const u32, u32, *const u8, u32, *const c_void, *const Guid, *mut *mut c_void) -> i32,
+            props.as_ptr(), 0, desc.as_ptr(), init_state, pclear, &IID_RESOURCE, ppv)
+    };
+    static N: AtomicUsize = AtomicUsize::new(0);
+    if hr < 0 || N.fetch_add(1, Ordering::Relaxed) < 8 {
+        record("d3d12_xs", "CreatePlacedResource", &format!(
+            "texture needs {pc_size:#x} bytes on PC but the title heap has {heap_bytes:#x} at offset {offset:#x} (console size); created committed on heap type {} instead, not aliased with the title heap -> hr={hr:#010x}",
+            props[0]));
+    }
+    Some(hr)
+}
+
 unsafe fn open_title_heap(real: *mut c_void, base: u64) -> Option<(*mut c_void, u64)> {
     let d3 = unsafe { device3(real) };
     if d3.is_null() {
@@ -719,6 +757,47 @@ mod tests {
         d[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
         d[0x30..0x34].copy_from_slice(&flags.to_le_bytes());
         d
+    }
+
+    #[test]
+    fn placed_texture_that_outgrows_its_heap_becomes_committed() {
+        const BC1_UNORM: u32 = 71;
+        const HEAP_ALLOW_ONLY_NON_RT_DS_TEXTURES: u32 = 0x44;
+        unsafe {
+            let dev = device();
+            let desc = tex_desc(4096, 4096, BC1_UNORM, 0);
+            let (pc_size, _) = allocation_info(dev, &desc);
+            assert!(pc_size > PLACEMENT_ALIGN && pc_size != u64::MAX);
+            let mk_heap = |size: u64| {
+                let mut hd = [0u8; 48];
+                hd[0..8].copy_from_slice(&size.to_le_bytes());
+                hd[8..12].copy_from_slice(&1u32.to_le_bytes());
+                hd[40..44].copy_from_slice(&HEAP_ALLOW_ONLY_NON_RT_DS_TEXTURES.to_le_bytes());
+                let mut h: *mut c_void = core::ptr::null_mut();
+                let hr = vcall!(dev, 28, fn(*const u8, *const Guid, *mut *mut c_void) -> i32, hd.as_ptr(), &IID_HEAP, &mut h);
+                assert!(hr >= 0 && !h.is_null(), "CreateHeap hr={hr:#010x}");
+                h
+            };
+            let release = |o: *mut c_void| {
+                vcall!(o, 2, fn() -> u32);
+            };
+
+            let small = mk_heap(pc_size - PLACEMENT_ALIGN);
+            let mut res: *mut c_void = core::ptr::null_mut();
+            let hr = committed_when_too_big(dev, small, 0, &desc, 0, core::ptr::null(), &mut res).expect("texture does not fit");
+            assert!(hr >= 0 && !res.is_null(), "committed fallback hr={hr:#010x}");
+            release(res);
+
+            let big = mk_heap(pc_size);
+            let mut none: *mut c_void = core::ptr::null_mut();
+            assert!(committed_when_too_big(dev, big, 0, &desc, 0, core::ptr::null(), &mut none).is_none());
+            assert!(none.is_null());
+
+            assert!(committed_when_too_big(dev, small, 0, &buf_desc(0x1000, 0), 0, core::ptr::null(), &mut none).is_none());
+            release(small);
+            release(big);
+            release(dev);
+        }
     }
 
     struct Gpu {

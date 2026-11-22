@@ -1680,6 +1680,12 @@ unsafe extern "system" fn create_placed_resource(
             d = small;
         }
     }
+    if hr < 0 && d[0] >= 2 {
+        let da: [u8; 0x38] = d[..0x38].try_into().unwrap();
+        if let Some(h) = unsafe { crate::alias::committed_when_too_big(real, heap, offset, &da, init_state, pclear, ppv) } {
+            hr = h;
+        }
+    }
     if hr >= 0 && !ppv.is_null() {
         crate::map_x::ensure_patched(unsafe { *ppv });
         unsafe { crate::gpu_va::note_resource(real, *ppv, &d, init_state, None) };
