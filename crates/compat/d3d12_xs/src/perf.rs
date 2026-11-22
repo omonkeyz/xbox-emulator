@@ -8,8 +8,10 @@ pub const RTCAP: usize = 1;
 pub const COPY: usize = 2;
 pub const SHADER: usize = 3;
 pub const PSO: usize = 4;
-const SLOTS: usize = 5;
-const NAMES: [&str; SLOTS] = ["upload", "rtcap", "present_copy", "shader_xlat", "pso_create"];
+pub const PRESENT_FENCE: usize = 5;
+pub const SWAPCHAIN_PRESENT: usize = 6;
+const SLOTS: usize = 7;
+const NAMES: [&str; SLOTS] = ["upload", "rtcap", "present_copy", "shader_xlat", "pso_create", "present_fence", "swapchain_present"];
 const RING: usize = 1024;
 const WINDOW_SECONDS: i64 = 5;
 

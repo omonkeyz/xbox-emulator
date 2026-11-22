@@ -383,7 +383,7 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
     const COPY_DEST: u32 = 0x400;
     const COPY_SOURCE: u32 = 0x800;
     // Wait for the previous copy before reusing the allocator.
-    if !crate::present_wait::wait_fence(st.fence, st.fence_value, 5000) {
+    if !crate::perf::timed(crate::perf::PRESENT_FENCE, || crate::present_wait::wait_fence(st.fence, st.fence_value, 5000)) {
         return Err("timed out waiting for previous present copy".into());
     }
     let idx = vcall!(st.swapchain, 36, fn() -> u32);
@@ -440,7 +440,7 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
         if hr < 0 {
             return Err(format!("present list Close hr={hr:#010x}"));
         }
-        let hr = vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0);
+        let hr = crate::perf::timed(crate::perf::SWAPCHAIN_PRESENT, || vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0));
         if hr < 0 {
             return Err(format!("swapchain Present hr={hr:#010x}"));
         }
@@ -455,7 +455,7 @@ unsafe fn present_frame(st: &mut State, queue: *mut c_void, src: *mut c_void) ->
     vcall!(queue, 10, fn(u32, *const *mut c_void) -> (), 1, lists.as_ptr());
     st.fence_value += 1;
     vcall!(queue, 14, fn(*mut c_void, u64) -> i32, st.fence, st.fence_value);
-    let hr = vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0);
+    let hr = crate::perf::timed(crate::perf::SWAPCHAIN_PRESENT, || vcall!(st.swapchain, 8, fn(u32, u32) -> i32, 0, 0));
     if hr < 0 {
         return Err(format!("swapchain Present hr={hr:#010x}"));
     }
@@ -516,8 +516,10 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
             }
         }
         Err(e) => {
-            if n < 8 {
-                record("d3d12_xs", "PresentX", &format!("present FAILED: {e}"));
+            static FAILURES: AtomicUsize = AtomicUsize::new(0);
+            let failures = FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if failures <= 8 || failures.is_power_of_two() {
+                record("d3d12_xs", "PresentX", &format!("present FAILED (failure {failures}): {e}"));
             }
         }
     }
