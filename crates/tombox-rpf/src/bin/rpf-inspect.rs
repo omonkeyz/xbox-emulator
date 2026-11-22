@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         println!("    {:#08x}..{:#08x}  {:>8} bytes  entropy {:.2}  {kind}", g.start, g.end, g.end - g.start, g.entropy);
     }
     if r.regions.iter().skip(1).all(|g| g.kind != RegionKind::Plain) {
-        println!("  nothing after the header is readable as plain data: the table of contents and the contents are encrypted.");
+        println!("  no plain-data regions detected after the header in the inspected bytes.");
     }
     ExitCode::SUCCESS
 }

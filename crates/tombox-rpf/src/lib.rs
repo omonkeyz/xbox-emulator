@@ -14,9 +14,8 @@
 //!   everything after is either high-entropy data or zero padding. The header fields are
 //!   reported by offset. Names given to them below are guesses and are marked as such.
 //!
-//! This crate reads structure only. Package contents are encrypted with keys held by the
-//! title, and recovering or applying those keys is outside this project's scope: the title
-//! decrypts its own packages when it runs.
+//! This crate reads structure only. Entropy can identify candidate compressed or encrypted
+//! regions, but it cannot distinguish the two. The inspector does not decode protected data.
 //!
 //! Input is untrusted: every read is bounds-checked and nothing is allocated from sizes found
 //! in the file.
