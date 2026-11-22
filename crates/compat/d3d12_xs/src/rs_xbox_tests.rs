@@ -74,13 +74,16 @@ fn serialize_v10(flags: u32) -> (i32, Vec<u8>) {
 fn serialize_xdxr(flags: u32) -> Vec<u8> {
     let params = xdxr_params();
     let d = versioned_desc(&params, 3, flags);
+    serialize_versioned_desc(&d)
+}
+
+fn serialize_versioned_desc(d: &[u8; 48]) -> Vec<u8> {
     let (mut b, mut e): (*mut c_void, *mut c_void) = (core::ptr::null_mut(), core::ptr::null_mut());
     let hr = crate::D3D12SerializeVersionedRootSignature(d.as_ptr() as *const c_void, &mut b, &mut e);
-    assert!(hr >= 0, "versioned serialize flags {flags:#x} hr={hr:#010x}");
-    let out = unsafe { blob_bytes(b) };
+    let out = if hr >= 0 && !b.is_null() { Some(unsafe { blob_bytes(b) }) } else { None };
     unsafe { release(b) };
     unsafe { release(e) };
-    out
+    out.unwrap_or_else(|| panic!("versioned serialize hr={hr:#010x}"))
 }
 
 fn raw_rts0(flags: u32) -> Vec<u8> {
@@ -177,6 +180,34 @@ fn serialize_v10_keeps_each_xbox_bit_in_the_blob() {
         let (hr, blob) = serialize_v10(bits | 0x1);
         assert!(hr >= 0, "flags {bits:#x} hr={hr:#010x}");
         assert_eq!(blob_flags(&blob).unwrap().1, bits | 0x1);
+    }
+}
+
+#[test]
+fn versioned_serializer_round_trips_flags_through_legacy_deserializer() {
+    for version in [VERSION_1_0, VERSION_1_1] {
+        for flags in [1, 1 | XBOX_FORCE_MEMORY_BASED_ABI, 1 | XBOX_FORCE_COMPUTE_2_SPILL_AREA] {
+            let mut desc = [0u8; 48];
+            desc[..4].copy_from_slice(&version.to_le_bytes());
+            desc[VERSIONED_DESC_FLAGS..VERSIONED_DESC_FLAGS + 4].copy_from_slice(&flags.to_le_bytes());
+            let blob = serialize_versioned_desc(&desc);
+            let mut object = core::ptr::null_mut();
+            let hr = crate::xs_exports::D3D12CreateRootSignatureDeserializer(
+                blob.as_ptr().cast(),
+                blob.len(),
+                (&IID_DESERIALIZER as *const Guid).cast(),
+                &mut object,
+            );
+            assert!(hr >= 0 && !object.is_null(), "version {version} flags {flags:#x} hr={hr:#010x}");
+            let actual = unsafe {
+                let get: unsafe extern "system" fn(*mut c_void) -> *const u8 =
+                    core::mem::transmute(vslot(object, 3));
+                let actual = core::ptr::read_unaligned(get(object).add(DESC_FLAGS).cast::<u32>());
+                release(object);
+                actual
+            };
+            assert_eq!(actual, flags, "version {version}");
+        }
     }
 }
 
