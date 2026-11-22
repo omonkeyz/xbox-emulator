@@ -1,6 +1,7 @@
 //! CLI: extract native RDNA2 ISA from an Xbox Series shader DXBC blob.
 //!
-//! Usage: xshader <shader.dxbc> [--isa-out <file.bin>] [--fssm-out <file.bin>]
+//! Usage: xshader <shader.dxbc> [--root-signature <file>] [--hlsl-out <file>]
+//!                [--isa-out <file>] [--fssm-out <file>]
 //!
 //! Prints the DXBC→XDAT→zlib→FSSM→RDNA2 chain it walked and a hex/word dump of the ISA.
 
@@ -16,21 +17,26 @@ fn main() -> ExitCode {
     let path = &args[1];
     let mut isa_out = None;
     let mut fssm_out = None;
-    let mut hlsl_out: Option<String> = None;
+    let mut hlsl_out = None;
     let mut root_signature = None;
     let mut i = 2;
     while i < args.len() {
-        if i + 1 == args.len() {
-            eprintln!("missing file argument for {}", args[i]);
+        let flag = args[i].as_str();
+        let output = match flag {
+            "--isa-out" => &mut isa_out,
+            "--fssm-out" => &mut fssm_out,
+            "--hlsl-out" => &mut hlsl_out,
+            "--root-signature" => &mut root_signature,
+            _ => {
+                eprintln!("unknown option {flag}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(value) = args.get(i + 1).filter(|value| !value.starts_with("--")) else {
+            eprintln!("missing file argument for {flag}");
             return ExitCode::FAILURE;
-        }
-        match args[i].as_str() {
-            "--isa-out" => isa_out = Some(args[i + 1].clone()),
-            "--fssm-out" => fssm_out = Some(args[i + 1].clone()),
-            "--hlsl-out" => hlsl_out = Some(args[i + 1].clone()),
-            "--root-signature" => root_signature = Some(&args[i + 1]),
-            other => eprintln!("warning: ignoring unknown arg {other}"),
-        }
+        };
+        *output = Some(value);
         i += 2;
     }
 
