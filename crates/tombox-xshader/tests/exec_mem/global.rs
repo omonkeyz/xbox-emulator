@@ -334,3 +334,22 @@ fn flat_global_mem() {
     }
     run_global_cases("flat_global", &cs);
 }
+
+#[test]
+fn narrow_loads_at_window_end() {
+    let last = m1(W1.size as usize / 4 - 1);
+    let mut body = Vec::new();
+    for (op, offset, dst) in [(0x08, 3, 24), (0x09, 3, 25), (0x0a, 2, 26), (0x0b, 2, 27)] {
+        body.extend(g(op, 2, offset, 20, 0, 22, dst));
+        body.extend(g(0x1c, 2, 256 * (dst as i32 - 24), 1, dst, 20, 0));
+    }
+    let words = gprog(0, W1.size - 4, 0, &body);
+    let (w0, _, fault, _) = unsafe { run(&words) }.unwrap();
+    let byte = last >> 24;
+    let short = last >> 16;
+    let expected = [byte, byte as i8 as i32 as u32, short, short as i16 as i32 as u32];
+    for (lane_values, value) in w0.chunks_exact(64).zip(expected) {
+        assert!(lane_values.iter().all(|&actual| actual == value));
+    }
+    assert_eq!(fault_of(&fault).count, 0);
+}

@@ -18,19 +18,19 @@ const VA_HELPERS: &str = r#"uint2 tb_va(uint lo, uint hi, uint off, uint offhi) 
 #ifndef TB_GMEM
 RWByteAddressBuffer tb_gfault : register(u2, spaceTB_GLOBAL_SPACE);
 void tb_gmiss(uint2 va) { uint o; tb_gfault.InterlockedAdd(0, 1u, o); if (o == 0u) tb_gfault.Store2(4, va); }
-uint tb_gmem_load(uint2 va) { tb_gmiss(va); return 0u; }
+uint tb_gmem_load(uint2 va, uint nbytes) { tb_gmiss(va); return 0u; }
 void tb_gmem_store(uint2 va, uint v) { tb_gmiss(va); }
 void tb_gmem_store_n(uint2 va, uint v, uint n) { tb_gmiss(va); }
 #endif
-uint tb_gload(uint2 va) {
+uint tb_gload(uint2 va, uint nbytes) {
     uint s = (va.x & 3u) * 8u;
     uint2 a = uint2(va.x & ~3u, va.y);
     int k = tb_ring(a);
-    if (k == -1000) return tb_gmem_load(va);
+    if (k == -1000) return tb_gmem_load(va, nbytes);
     uint lo = tb_ring_get(k);
-    if (s == 0u) return lo;
+    if ((va.x & 3u) + nbytes <= 4u) return lo >> s;
     int k2 = tb_ring(tb_va(a.x, a.y, 4u, 0u));
-    uint hi = k2 == -1000 ? tb_gmem_load(tb_va(a.x, a.y, 4u, 0u)) : tb_ring_get(k2);
+    uint hi = k2 == -1000 ? tb_gmem_load(tb_va(a.x, a.y, 4u, 0u), 4u) : tb_ring_get(k2);
     return (lo >> s) | (hi << (32u - s));
 }
 void tb_gstore_m(uint2 a, uint v, uint m) {
@@ -143,7 +143,7 @@ impl<'a> Emitter<'a> {
                     _ => return Err("flat: bad vdst".into()),
                 };
                 for k in 0..n {
-                    self.line(&format!("uint tl{t}_{k} = (exec_lo & 1u) ? tb_gload({}) : 0u;", at(k)));
+                    self.line(&format!("uint tl{t}_{k} = (exec_lo & 1u) ? tb_gload({}, 4u) : 0u;", at(k)));
                 }
                 for k in 0..n {
                     self.wv(&Opnd::Vgpr(vd + k as u8), &format!("tl{t}_{k}"))?;
@@ -151,7 +151,8 @@ impl<'a> Emitter<'a> {
             }
             8..=11 => {
                 let vd = ins.dst.first().cloned().ok_or("flat: bad vdst")?;
-                let raw = format!("((exec_lo & 1u) ? tb_gload(ta{t}) : 0u)");
+                let bytes = if op < 10 { 1 } else { 2 };
+                let raw = format!("((exec_lo & 1u) ? tb_gload(ta{t}, {bytes}u) : 0u)");
                 let e = match op {
                     8 => format!("({raw} & 0xffu)"),
                     9 => format!("uint((int({raw} << 24u)) >> 24)"),

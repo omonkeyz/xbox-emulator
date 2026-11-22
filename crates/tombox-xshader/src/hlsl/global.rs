@@ -32,14 +32,14 @@ uint tb_gload_al(uint w, uint o) {
     if (w == 0u) return tb_gw0.Load(o);
     return tb_gw1.Load(o);
 }
-uint tb_gmem_load(uint2 va) {
+uint tb_gmem_load(uint2 va, uint nbytes) {
     uint2 a = tb_gva(va.x & ~3u, va.y, 0u, 0);
     uint o;
     uint w = tb_gwhich(a, o);
     if (w == 0xffffffffu) { tb_gmiss(va); return 0u; }
     uint sh = (va.x & 3u) * 8u;
     uint lo = tb_gload_al(w, o);
-    if (sh == 0u) return lo;
+    if ((va.x & 3u) + nbytes <= 4u) return lo >> sh;
     uint2 n = tb_gva(a.x, a.y, 4u, 0);
     uint o2;
     uint w2 = tb_gwhich(n, o2);
@@ -143,11 +143,11 @@ impl<'a> Emitter<'a> {
     pub(super) fn global_load_expr(&self, va: &str, k: u8, bytes: u8, signed: bool) -> String {
         let a = if k == 0 { va.to_string() } else { format!("tb_gva({va}.x, {va}.y, {}u, 0)", 4 * k as u32) };
         match (bytes, signed) {
-            (4, _) => format!("tb_gload({a})"),
-            (1, false) => format!("(tb_gload({a}) & 0xffu)"),
-            (2, false) => format!("(tb_gload({a}) & 0xffffu)"),
-            (1, true) => format!("(uint)(((int)(tb_gload({a}) << 24u)) >> 24u)"),
-            _ => format!("(uint)(((int)(tb_gload({a}) << 16u)) >> 16u)"),
+            (4, _) => format!("tb_gload({a}, {bytes}u)"),
+            (1, false) => format!("(tb_gload({a}, {bytes}u) & 0xffu)"),
+            (2, false) => format!("(tb_gload({a}, {bytes}u) & 0xffffu)"),
+            (1, true) => format!("(uint)(((int)(tb_gload({a}, {bytes}u) << 24u)) >> 24u)"),
+            _ => format!("(uint)(((int)(tb_gload({a}, {bytes}u) << 16u)) >> 16u)"),
         }
     }
 

@@ -570,3 +570,23 @@ fn warp_rejects_the_console_force_memory_based_abi_root_flag() {
         assert!(hr < 0, "PC accepted the console-only root signature flag bit 24");
     }
 }
+
+#[test]
+fn compile_amplification_payload_subword_loads() {
+    // flat_load_ubyte at byte 15 and flat_load_ushort at byte 14 of the payload.
+    let mut words = Vec::new();
+    for (op, offset) in [(8, 15), (10, 14)] {
+        words.extend([0xdc00_0000 | (op << 18) | offset, (0x7d << 16) | (4 << 24)]);
+    }
+    words.push(S_ENDPGM);
+    let mut info = mesh_info(1, 0, 0, 0);
+    info.stage = 14;
+    info.payload_bytes = 16;
+    let mut shader = ms(&words, info, vec![]);
+    shader.stage = Stage::Amplification;
+    let t = translate(&shader).unwrap();
+    for width in [1, 2] {
+        assert!(t.hlsl.lines().any(|line| line.contains("tb_gload(") && line.contains(&format!(", {width}u)"))), "{}", t.hlsl);
+    }
+    dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).unwrap();
+}
