@@ -563,11 +563,11 @@ fn vop1_ops(s: &mut Suite) {
     h1(s, "v_cvt_f16_i16", 0x51, Class::U32, Cmp::F16(0), |a| Some(d2h((a as u16 as i16) as f64)));
     h1(s, "v_cvt_u16_f16", 0x52, Class::F16, Cmp::X, |a| Some(if nan16(a) { 0 } else { h(a).clamp(0.0, 65535.0).trunc() as u32 }));
     h1(s, "v_cvt_i16_f16", 0x53, Class::F16, Cmp::X, |a| Some(if nan16(a) { 0 } else { (h(a).clamp(-32768.0, 32767.0).trunc() as i32 as u32) & 0xffff }));
-    h1(s, "v_rcp_f16", 0x54, Class::Trans16, Cmp::F16(1), |a| if den16(a) { None } else { let y = d2h(1.0 / h(a)); if den16(y) { None } else { Some(y) } });
-    h1(s, "v_sqrt_f16", 0x55, Class::Trans16, Cmp::F16(1), |a| if a & 0x7fff == 0 { Some(a) } else if den16(a) { None } else { Some(d2h(h(a).sqrt())) });
-    h1(s, "v_rsq_f16", 0x56, Class::Trans16, Cmp::F16(1), |a| if a & 0x7fff == 0 { Some(if a & 0x8000 != 0 { 0xfc00 } else { 0x7c00 }) } else if den16(a) { None } else { let y = d2h(1.0 / h(a).sqrt()); if den16(y) { None } else { Some(y) } });
-    h1(s, "v_log_f16", 0x57, Class::Trans16, Cmp::F16(1), |a| if a & 0x7fff == 0 { Some(0xfc00) } else if den16(a) { None } else { Some(d2h(h(a).log2())) });
-    h1(s, "v_exp_f16", 0x58, Class::Trans16, Cmp::F16(1), |a| { let y = d2h(2f64.powf(h(a))); if den16(y) || den16(a) { None } else { Some(y) } });
+    h1(s, "v_rcp_f16", 0x54, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(0, a as u16) as u32));
+    h1(s, "v_sqrt_f16", 0x55, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(2, a as u16) as u32));
+    h1(s, "v_rsq_f16", 0x56, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(1, a as u16) as u32));
+    h1(s, "v_log_f16", 0x57, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(3, a as u16) as u32));
+    h1(s, "v_exp_f16", 0x58, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(4, a as u16) as u32));
     h1(s, "v_frexp_mant_f16", 0x59, Class::F16, Cmp::F16(0), |a| Some(frexp16(a).0));
     h1(s, "v_frexp_exp_i16_f16", 0x5a, Class::F16, Cmp::X, |a| Some(frexp16(a).1));
     h1(s, "v_floor_f16", 0x5b, Class::F16, Cmp::F16(0), |a| Some(q16(d2h(h(a).floor()) | if a & 0x8000 != 0 && h(a).floor() == 0.0 { 0x8000 } else { 0 })));
@@ -582,8 +582,8 @@ fn vop1_ops(s: &mut Suite) {
         let r = d2h(v - v.floor());
         Some(if r == 0x3c00 { 0x3bff } else { r })
     });
-    h1(s, "v_sin_f16", 0x60, Class::Trans16, Cmp::F16Tol(1, 2.0e-3), |a| sin16(a, false));
-    h1(s, "v_cos_f16", 0x61, Class::Trans16, Cmp::F16Tol(1, 2.0e-3), |a| sin16(a, true));
+    h1(s, "v_sin_f16", 0x60, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(5, a as u16) as u32));
+    h1(s, "v_cos_f16", 0x61, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(6, a as u16) as u32));
     s.add("v_sat_pk_u8_i16", "VOP1", "e32 full", Class::U32, &[vmov(OUT, v(12))], &[vop1(0x62, OUT, v(10))], &[], &[Cmp::X], |x| {
         let a = x.d[0];
         o((x.d[2] & 0xffff_0000) | ((a as u16 as i16).clamp(0, 255) as u32) | (((((a >> 16) as u16 as i16).clamp(0, 255)) as u32) << 8))
@@ -624,25 +624,6 @@ fn vop1_ops(s: &mut Suite) {
     for (m, op) in [("v_nop", 0x00u32), ("v_pipeflush", 0x1b), ("v_clrexcp", 0x41)] {
         s.add(m, "VOP1", "no state change", Class::U32, &[vmov(OUT, v(10)), vmov(OUT + 1, v(11))], &[vop1(op, OUT + 3, 0)], &[], &[Cmp::X, Cmp::X], |x| o2(x.d[0], x.d[1]));
     }
-}
-
-fn sin16(a: u32, cos: bool) -> Option<u32> {
-    if nan16(a) || a & 0x7fff == 0x7c00 {
-        return Some(QNAN16);
-    }
-    if den16(a) {
-        return None;
-    }
-    let v = h(a);
-    if !cos && a & 0x7fff == 0 {
-        return Some(a);
-    }
-    if v.abs() > 256.0 {
-        return None;
-    }
-    let t = v - v.floor();
-    let ang = 2.0 * std::f64::consts::PI * t;
-    Some(d2h(if cos { ang.cos() } else { ang.sin() }))
 }
 
 pub fn norm16(v: f64, signed: bool, nan: bool) -> Option<u32> {

@@ -450,6 +450,7 @@ struct Emitter<'a> {
     bl_const: HashMap<u32, u32>,
     uses_f64: bool,
     uses_d16: bool,
+    uses_trans16: bool,
     uav_mips: BTreeSet<u32>,
     tex_mips: BTreeSet<u32>,
     sm6_minor: u32,
@@ -1085,6 +1086,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         bl_const: HashMap::new(),
         uses_f64: false,
         uses_d16: false,
+        uses_trans16: false,
         uav_mips: BTreeSet::new(),
         tex_mips: BTreeSet::new(),
         sm6_minor: 0,
@@ -4284,12 +4286,32 @@ impl<'a> Emitter<'a> {
             };
             return self.wv(&d, &hres(e));
         }
-        if matches!(m.as_str(), "v_rcp_f16" | "v_sqrt_f16" | "v_rsq_f16" | "v_floor_f16" | "v_ceil_f16" | "v_trunc_f16" | "v_rndne_f16" | "v_fract_f16") {
+        if let Some(op) = crate::trans16::op_index(m.as_str()) {
+            self.uses_trans16 = true;
+            let o = &s[0];
+            let hi_sel = ins.enc == Enc::Vop3 && (ins.raw[0] >> 11) & 1 != 0;
+            let mut x = match o {
+                Opnd::ConstF32(_) => format!("tb_f2h({})", f(o)?),
+                _ if hi_sel => format!("((({}) >> 16) & 0xffffu)", r(o)?),
+                _ => format!("(({}) & 0xffffu)", r(o)?),
+            };
+            if ins.enc == Enc::Vop3 {
+                if ins.aux.mask & 1 != 0 {
+                    x = format!("({x} & 0x7fffu)");
+                }
+                if (ins.aux.mask >> 3) & 1 != 0 {
+                    x = format!("({x} ^ 0x8000u)");
+                }
+            }
+            let e = format!("tb_t16({op}u, {x})");
+            if ins.enc == Enc::Vop3 && (ins.aux.imm2 != 0 || ins.aux.imm != 0) {
+                return self.wv(&d, &hres(format!("f16tof32({e})")));
+            }
+            return self.wv(&d, &e);
+        }
+        if matches!(m.as_str(), "v_floor_f16" | "v_ceil_f16" | "v_trunc_f16" | "v_rndne_f16" | "v_fract_f16") {
             let a = h16(&s[0])?;
             let e = match m.as_str() {
-                "v_rcp_f16" => format!("1.0 / {a}"),
-                "v_sqrt_f16" => format!("sqrt({a})"),
-                "v_rsq_f16" => format!("rsqrt({a})"),
                 "v_floor_f16" => format!("floor({a})"),
                 "v_ceil_f16" => format!("ceil({a})"),
                 "v_trunc_f16" => format!("trunc({a})"),
@@ -4389,16 +4411,6 @@ impl<'a> Emitter<'a> {
         }
         if m == "v_pipeflush" {
             return Ok(());
-        }
-        if matches!(m.as_str(), "v_log_f16" | "v_exp_f16" | "v_sin_f16" | "v_cos_f16") {
-            let a = h16(&s[0])?;
-            let e = match m.as_str() {
-                "v_log_f16" => format!("log2({a})"),
-                "v_exp_f16" => format!("exp2({a})"),
-                "v_sin_f16" => format!("sin({a} * 6.28318530718)"),
-                _ => format!("cos({a} * 6.28318530718)"),
-            };
-            return self.wv(&d, &hres(e));
         }
         if m == "v_ldexp_f16" {
             let e = format!("ldexp({}, (float)clamp(asint(({}) << 16) >> 16, -64, 64))", h16(&s[0])?, r(&s[1])?);
@@ -6243,6 +6255,9 @@ impl<'a> Emitter<'a> {
         }
         if self.uses_d16 {
             h.push_str(mtbuf::D16_HELPERS);
+        }
+        if self.uses_trans16 {
+            h.push_str(&crate::trans16::hlsl());
         }
         if self.uses_global {
             h.push_str(&global::helpers());

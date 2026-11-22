@@ -109,3 +109,39 @@ d16 stores
 Partial stores (d16 and 32-bit): storing fewer components than the format has writes the whole
 element, with the missing components as 0. For example, tbuffer_store_format_x of 0.25 to
 8_8_8_8_UNORM writes 40 00 00 00.
+
+
+Transcendental VALU ops (trans_probe.py, trans_runner.cpp, trans16_gen.py)
+---------------------------------------------------------------------------
+
+trans_probe.py writes one kernel per op and denormal mode (v_rcp/rcp_iflag/rsq/sqrt/log/exp/sin/cos_f32,
+the seven _f16 forms, v_rcp/rsq/sqrt_f64; .amdhsa_float_denorm_mode 0 and 3, IEEE mode 0). Each kernel makes
+its own input x = base + global_id * stride, so no input buffer is needed; the f16 kernels clear vdst
+first, because the f16 VALU ops keep its upper 16 bits.
+
+    python3 tools/rdna2-hwprobe/trans_probe.py k.s
+    clang-18 -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx1036 -c k.s -o k.o
+    ld.lld-18 -shared k.o -o k.co
+    g++ -O2 -D__HIP_PLATFORM_AMD__ tools/rdna2-hwprobe/trans_runner.cpp -o trans_runner -lamdhip64
+    ./trans_runner k.co v_rcp_f16_d3 65536 0 1 out/v_rcp_f16_d3.bin     (kernel, threads, base, stride, output)
+
+Run every sweep twice and keep it only if both outputs are identical (one early launch on gfx1036
+returned all zeros once and was not reproducible).
+
+trans16_gen.py <dir> tables.rs rdna2_hw.rs <gfx> <machine> reads v_<op>_f16_d3.bin for the seven f16 ops
+(all 65536 inputs), runs the same integer algorithm as crates/tombox-xshader/src/trans16, and writes
+the tables, the exception list (inputs where the algorithm and the hardware differ) and FNV-1a-64
+digests of the hardware results.
+
+Results (gfx1036):
+- f16 rcp, rsq, sqrt, log, exp: correctly rounded on every input. sin, cos: correctly rounded except
+  10 + 10 inputs within 2e-4 ulp of a rounding midpoint. Each f16 result equals the hardware's f32 result
+  for the same input rounded to f16 (one exp input sits on an exact f32 tie and rounds up in f16).
+- NaN inputs are returned unchanged; invalid operations (sqrt/rsq/log of a negative, sin/cos of an
+  infinity) give 0xfe00; log(+-0) = -inf; sin/cos give +0 for every exact zero except sin(-0) = -0.
+- Denormal mode 0 equals mode 3 with denormal inputs and outputs flushed to signed zero (all 7 ops).
+- f32 rcp, rsq, sqrt are faithful, not correctly rounded (rcp: 89.3% correctly rounded, |error| < 0.89
+  ulp), mantissa-only for rcp, v_rcp_iflag_f32 == v_rcp_f32 on normal inputs. rcp and rsq fit a
+  32-segment cubic in the low 18 mantissa bits (sqrt 16 segments) with the square and cube terms
+  taken from the mantissa without its lowest bit; the remaining ~0.015 ulp is not modelled yet.
+
