@@ -317,6 +317,7 @@ pub fn arg_size(ty: u32) -> Option<u32> {
         6 | 7 | 8 => Some(8),
         9 => Some(104),
         10 => Some(12),
+        11 => Some(0),
         _ => None,
     }
 }
@@ -361,16 +362,18 @@ pub unsafe extern "system" fn get_copyable_footprints_x(
 }
 
 pub const XBOX_ARG_DISPATCH_X: u32 = 105;
+pub const XBOX_ARG_DISPATCH_MESH_X: u32 = 107;
 
 pub fn pc_argument_type(xbox: u32) -> u32 {
     match xbox {
         XBOX_ARG_DISPATCH_X => 2,
+        XBOX_ARG_DISPATCH_MESH_X => 10,
         t => t,
     }
 }
 
 pub fn signature_needs_root(args: &[[u32; 4]]) -> bool {
-    args.iter().any(|a| matches!(a[0], 5 | 6 | 7 | 8))
+    args.iter().any(|a| matches!(a[0], 5 | 6 | 7 | 8 | 11))
 }
 
 pub fn signature_min_stride(args: &[[u32; 4]]) -> Option<u32> {
@@ -404,6 +407,13 @@ pub unsafe extern "system" fn create_command_signature_x(this: *mut c_void, desc
     if hr < 0 || once(&N, 6) {
         record("d3d12_xs", "CreateCommandSignature", &format!(
             "stride={stride} xboxArgs={xargs:?} pcArgs={args:?} minStride={:?} root={root:p} passedRoot={pass_root:p} -> hr={hr:#010x}", signature_min_stride(&args)));
+    }
+    if xargs.iter().any(|a| a[0] == XBOX_ARG_DISPATCH_MESH_X) {
+        static MESH_NOTE: AtomicUsize = AtomicUsize::new(0);
+        if once(&MESH_NOTE, 1) {
+            record("d3d12_xs", "CreateCommandSignature", &format!(
+                "0x6b -> DISPATCH_MESH (hypothesis: {stride}-byte record, group counts first) -> hr={hr:#010x}"));
+        }
     }
     hr
 }
@@ -609,8 +619,98 @@ mod tests {
         let with_const = [[5u32, 0, 0, 2], [2, 0, 0, 0]];
         assert!(signature_needs_root(&with_const));
         assert_eq!(signature_min_stride(&with_const), Some(20));
+        let rays = [[9u32, 0, 0, 0]];
+        assert!(!signature_needs_root(&rays));
+        assert_eq!(signature_min_stride(&rays), Some(104));
+        let mesh = [[10u32, 0, 0, 0]];
+        assert!(!signature_needs_root(&mesh));
+        assert_eq!(signature_min_stride(&mesh), Some(12));
+        let inc_const = [[11u32, 0, 0, 0], [2, 0, 0, 0]];
+        assert!(signature_needs_root(&inc_const));
+        assert_eq!(signature_min_stride(&inc_const), Some(12));
         assert_eq!(pc_argument_type(105), 2);
-        assert_eq!(pc_argument_type(1), 1);
+        assert_eq!(pc_argument_type(107), 10);
+        for t in 0..=11 {
+            assert_eq!(pc_argument_type(t), t);
+        }
+        assert_eq!(pc_argument_type(0x70), 0x70);
+    }
+
+    #[test]
+    fn command_signature_translation_on_real_device() {
+        const IID_DEVICE: Guid = Guid { d1: 0x189819f1, d2: 0x1db6, d3: 0x4b57, d4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7] };
+        const IID_SIGNATURE: Guid = Guid { d1: 0xc36a797c, d2: 0xec80, d3: 0x4f0a, d4: [0x89, 0x85, 0xa7, 0xb2, 0x47, 0x50, 0x82, 0xd1] };
+        const IID_ROOT_SIGNATURE: Guid = Guid { d1: 0xc54a6b66, d2: 0x72df, d3: 0x4ee8, d4: [0x8b, 0xe5, 0xa9, 0x46, 0xa1, 0x42, 0x92, 0x14] };
+        const D3D12_FEATURE_D3D12_OPTIONS7: u32 = 32;
+        let create = crate::host_proc(b"D3D12CreateDevice\0");
+        if create == 0 {
+            eprintln!("skipped: no d3d12.dll");
+            return;
+        }
+        unsafe {
+            let create: unsafe extern "system" fn(*mut c_void, u32, *const Guid, *mut *mut c_void) -> i32 =
+                core::mem::transmute(create);
+            let mut dev = core::ptr::null_mut();
+            if create(core::ptr::null_mut(), 0xb000, &IID_DEVICE, &mut dev) < 0 || dev.is_null() {
+                eprintln!("skipped: no D3D12 device");
+                return;
+            }
+            type CreateSig = unsafe extern "system" fn(*mut c_void, *const u8, *mut c_void, *const Guid, *mut *mut c_void) -> i32;
+            let real_create: CreateSig = core::mem::transmute(*vt(dev).add(41));
+            let wrapper = crate::device_wrap::wrap_device(dev);
+            let xbox_create: CreateSig = core::mem::transmute(*vt(wrapper).add(41));
+            let release = |obj: *mut c_void| {
+                let r: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(*vt(obj).add(2));
+                r(obj);
+            };
+
+            let mut arg = [0u8; 16];
+            arg[..4].copy_from_slice(&XBOX_ARG_DISPATCH_X.to_le_bytes());
+            let mut desc = [0u8; 24];
+            desc[0..4].copy_from_slice(&12u32.to_le_bytes());
+            desc[4..8].copy_from_slice(&1u32.to_le_bytes());
+            desc[8..16].copy_from_slice(&(arg.as_ptr() as u64).to_le_bytes());
+            desc[16..20].copy_from_slice(&1u32.to_le_bytes());
+            let mut sig = core::ptr::null_mut();
+            assert!(real_create(dev, desc.as_ptr(), core::ptr::null_mut(), &IID_SIGNATURE, &mut sig) < 0, "desktop rejects 105");
+            assert_eq!(xbox_create(wrapper, desc.as_ptr(), core::ptr::null_mut(), &IID_SIGNATURE, &mut sig), S_OK, "wrapper translates 105");
+            assert!(!sig.is_null());
+            assert_eq!(u32::from_le_bytes(arg[..4].try_into().unwrap()), XBOX_ARG_DISPATCH_X, "caller desc untouched");
+            release(sig);
+
+            arg[..4].copy_from_slice(&XBOX_ARG_DISPATCH_MESH_X.to_le_bytes());
+            desc[0..4].copy_from_slice(&16u32.to_le_bytes());
+            sig = core::ptr::null_mut();
+            assert!(real_create(dev, desc.as_ptr(), core::ptr::null_mut(), &IID_SIGNATURE, &mut sig) < 0, "desktop rejects 107");
+            let mut opts7 = [0u32; 2];
+            let check: unsafe extern "system" fn(*mut c_void, u32, *mut c_void, u32) -> i32 = core::mem::transmute(*vt(dev).add(13));
+            let has_mesh = check(dev, D3D12_FEATURE_D3D12_OPTIONS7, opts7.as_mut_ptr().cast(), 8) >= 0 && opts7[0] != 0;
+            if has_mesh {
+                assert_eq!(xbox_create(wrapper, desc.as_ptr(), core::ptr::null_mut(), &IID_SIGNATURE, &mut sig), S_OK, "wrapper translates 107");
+                assert!(!sig.is_null());
+                assert_eq!(u32::from_le_bytes(arg[..4].try_into().unwrap()), XBOX_ARG_DISPATCH_MESH_X, "caller desc untouched");
+                release(sig);
+            }
+
+            let empty = [0u8; 0x28];
+            let (mut blob, mut err) = (core::ptr::null_mut(), core::ptr::null_mut());
+            assert_eq!(crate::D3D12SerializeRootSignature(empty.as_ptr().cast(), 1, &mut blob, &mut err), S_OK);
+            let ptr: unsafe extern "system" fn(*mut c_void) -> *const c_void = core::mem::transmute(*vt(blob).add(3));
+            let len: unsafe extern "system" fn(*mut c_void) -> usize = core::mem::transmute(*vt(blob).add(4));
+            let create_rs: unsafe extern "system" fn(*mut c_void, u32, *const c_void, usize, *const Guid, *mut *mut c_void) -> i32 =
+                core::mem::transmute(*vt(dev).add(16));
+            let mut rs = core::ptr::null_mut();
+            assert_eq!(create_rs(dev, 0, ptr(blob), len(blob), &IID_ROOT_SIGNATURE, &mut rs), S_OK);
+            arg[..4].copy_from_slice(&2u32.to_le_bytes());
+            desc[0..4].copy_from_slice(&12u32.to_le_bytes());
+            sig = core::ptr::null_mut();
+            assert!(real_create(dev, desc.as_ptr(), rs, &IID_SIGNATURE, &mut sig) < 0, "desktop rejects unused root signature");
+            assert_eq!(xbox_create(wrapper, desc.as_ptr(), rs, &IID_SIGNATURE, &mut sig), S_OK, "wrapper drops unused root signature");
+            assert!(!sig.is_null());
+            for obj in [sig, rs, blob, wrapper] {
+                release(obj);
+            }
+        }
     }
 
     #[test]
