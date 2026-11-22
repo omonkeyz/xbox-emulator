@@ -361,3 +361,50 @@ fn image_mimg_d16_packs_halves() {
     }
     run_mem_cases("mimg_d16", &cs);
 }
+
+const AT_INIT: [u32; 8] = [5, 0x10, 0x8000_0000, 0xffff_ffff, 0x20, 0, 0x7fff_ffff, 0x1234_5678];
+
+fn tat(_m: u32, _l: u32, x: u32, y: u32) -> [u32; 4] {
+    [if y == 0 { AT_INIT[x as usize] } else { 0x0bad_0000 | (y * 8 + x) }, 0, 0, 0]
+}
+
+const IMG_AT: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 1, fmt: R32_UINT, texel: tat };
+
+#[test]
+fn image_mimg_atomics() {
+    type At = fn(u32, u32, u32) -> u32;
+    let atoms: [(&'static str, u32, At); 13] = [
+        ("image_atomic_swap", 0x0f, |_, s, _| s),
+        ("image_atomic_cmpswap", 0x10, |m, s, c| if m == c { s } else { m }),
+        ("image_atomic_add", 0x11, |m, s, _| m.wrapping_add(s)),
+        ("image_atomic_sub", 0x12, |m, s, _| m.wrapping_sub(s)),
+        ("image_atomic_smin", 0x14, |m, s, _| (m as i32).min(s as i32) as u32),
+        ("image_atomic_umin", 0x15, |m, s, _| m.min(s)),
+        ("image_atomic_smax", 0x16, |m, s, _| (m as i32).max(s as i32) as u32),
+        ("image_atomic_umax", 0x17, |m, s, _| m.max(s)),
+        ("image_atomic_and", 0x18, |m, s, _| m & s),
+        ("image_atomic_or", 0x19, |m, s, _| m | s),
+        ("image_atomic_xor", 0x1a, |m, s, _| m ^ s),
+        ("image_atomic_inc", 0x1b, |m, s, _| if m >= s { 0 } else { m + 1 }),
+        ("image_atomic_dec", 0x1c, |m, s, _| if m == 0 || m > s { s } else { m - 1 }),
+    ];
+    let mut cs = Vec::new();
+    for (m, opc, f) in atoms {
+        let dmask = if opc == 0x10 { 0x3 } else { 0x1 };
+        for &(x, s, cmp) in &[(0u32, 5u32, 0xffff_fff0u32), (1, 0x10, 0x10), (2, 0x8000_0000, 0x8000_0000), (3, 7, 0xffff_ffff), (4, 0x20, 1), (5, 0, 0), (6, 0xffff_ffff, 0x7fff_ffff), (7, 0x1234_5678, 3)] {
+            let old = AT_INIT[x as usize];
+            let mut pre = Prog::new();
+            pre.vv(1, x).vv(2, 0).vv(4, s).vv(5, cmp);
+            let uav = vec![(0usize, x as usize, f(old, s, cmp)), (0, (x ^ 1) as usize, AT_INIT[(x ^ 1) as usize]), (0, 8 + x as usize, 0x0bad_0008 + x)];
+            for glc in [true, false] {
+                let mut op = mimg(opc, dmask, 1, 1, 4, 16, 0);
+                if glc {
+                    op[0] |= 1 << 13;
+                }
+                let rt = vec![if glc { old } else { s }];
+                cs.push(MCase { m, op: op.to_vec(), words: build(&pre, &op, 4, 1, true), env: Env { uav: Some(&IMG_AT), ..Default::default() }, rt, uav: uav.clone(), tol: 0.0 });
+            }
+        }
+    }
+    run_mem_cases("mimg_atomics", &cs);
+}

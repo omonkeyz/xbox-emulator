@@ -33,6 +33,7 @@ mod centroid;
 mod durango;
 mod mixed;
 mod mimg_d16;
+mod atomic;
 use mimg_d16::{mimg_data_regs, Lane};
 
 pub struct Translated {
@@ -5089,59 +5090,10 @@ impl<'a> Emitter<'a> {
                 _ => return Err("unresolved atomic target".into()),
             };
             let vdata = ins.dst[0];
-            self.touch(&vdata);
-            let val = r(&vdata)?;
-            if matches!(
-                ins.mnemonic.as_str(),
-                "buffer_atomic_smin" | "buffer_atomic_smax" | "buffer_atomic_cmpswap" | "buffer_atomic_inc" | "buffer_atomic_dec"
-            ) {
-                let t = self.tmp;
-                self.tmp += 1;
-                if ins.mnemonic == "buffer_atomic_cmpswap" {
-                    let cmp = match vdata {
-                        Opnd::Vgpr(n) => Opnd::Vgpr(n + 1),
-                        _ => return Err("bad vdata".into()),
-                    };
-                    self.touch(&cmp);
-                    self.line(&format!(
-                        "uint t{t} = 0u; if (exec_lo & 1u) {{ InterlockedCompareExchange({target}, {}, {val}, t{t}); }}",
-                        r(&cmp)?
-                    ));
-                } else {
-                    let c = format!("t{t}c");
-                    let new = match ins.mnemonic.as_str() {
-                        "buffer_atomic_smin" => format!("asuint(min(asint({c}), asint({val})))"),
-                        "buffer_atomic_smax" => format!("asuint(max(asint({c}), asint({val})))"),
-                        "buffer_atomic_inc" => format!("(({c} >= {val}) ? 0u : ({c} + 1u))"),
-                        _ => format!("((({c} == 0u) || ({c} > {val})) ? {val} : ({c} - 1u))"),
-                    };
-                    self.line(&format!(
-                        "uint t{t} = 0u; if (exec_lo & 1u) {{ uint {c} = {target}; [allow_uav_condition] for (uint t{t}i = 0u; t{t}i < 1024u; t{t}i++) {{ uint t{t}p = 0u; InterlockedCompareExchange({target}, {c}, {new}, t{t}p); if (t{t}p == {c}) break; {c} = t{t}p; }} t{t} = {c}; }}"
-                    ));
-                }
-                if glc {
-                    self.wv(&vdata, &format!("t{t}"))?;
-                }
-                return Ok(());
-            }
-            let (func, arg) = match ins.mnemonic.as_str() {
-                "buffer_atomic_add" => ("InterlockedAdd", val),
-                "buffer_atomic_sub" => ("InterlockedAdd", format!("(0u - {val})")),
-                "buffer_atomic_inc" => ("InterlockedAdd", "1u".to_string()),
-                "buffer_atomic_dec" => ("InterlockedAdd", "0xffffffffu".to_string()),
-                "buffer_atomic_umin" => ("InterlockedMin", val),
-                "buffer_atomic_umax" => ("InterlockedMax", val),
-                "buffer_atomic_and" => ("InterlockedAnd", val),
-                "buffer_atomic_or" => ("InterlockedOr", val),
-                "buffer_atomic_xor" => ("InterlockedXor", val),
-                "buffer_atomic_swap" => ("InterlockedExchange", val),
-                other => return Err(format!("{other} unsupported")),
-            };
-            let t = self.tmp;
-            self.tmp += 1;
-            self.line(&format!("uint t{t} = 0u; if (exec_lo & 1u) {{ {func}({target}, {arg}, t{t}); }}"));
+            let op = ins.mnemonic.strip_prefix("buffer_atomic_").ok_or_else(|| format!("{} unsupported", ins.mnemonic))?;
+            let old = self.atomic_rmw(op, &target, vdata).map_err(|_| format!("{} unsupported", ins.mnemonic))?;
             if glc {
-                self.wv(&vdata, &format!("t{t}"))?;
+                self.wv(&vdata, &old)?;
             }
             return Ok(());
         }
@@ -5621,7 +5573,7 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         // Texel-addressed ops (no sampler): image_load / image_store, on SRVs or UAVs.
-        if matches!(ins.mnemonic.as_str(), "image_load" | "image_load_mip" | "image_store" | "image_store_mip" | "image_atomic_add" | "image_atomic_umax") {
+        if matches!(ins.mnemonic.as_str(), "image_load" | "image_load_mip" | "image_store" | "image_store_mip") || ins.mnemonic.starts_with("image_atomic_") {
             let with_mip = ins.mnemonic == "image_load_mip" || ins.mnemonic == "image_store_mip";
             let store = ins.mnemonic.starts_with("image_store");
             let (slot, dim, is_uav) = match rs.first() {
@@ -5664,20 +5616,21 @@ impl<'a> Emitter<'a> {
             } else {
                 format!("uav{slot}")
             };
-            if ins.mnemonic.starts_with("image_atomic_") {
-                // Image atomics → Interlocked* on a RWTexture<uint> texel; vdata carries the
-                // operand in and the previous value out.
+            if let Some(op) = ins.mnemonic.strip_prefix("image_atomic_") {
                 if !as_uint {
                     return Err("image atomic on a non-UAV table".into());
                 }
-                let func = if ins.mnemonic == "image_atomic_add" { "InterlockedAdd" } else { "InterlockedMax" };
+                let dmask_32 = if op == "cmpswap" { 0x3 } else { 0x1 };
+                if ins.aux.mask != dmask_32 {
+                    return Err(format!("{} with dmask {:#x}: only 32-bit image atomics are supported", ins.mnemonic, ins.aux.mask));
+                }
+                let glc = ins.raw.first().is_some_and(|w| (w >> 13) & 1 != 0);
                 let o = Opnd::Vgpr(vd);
-                self.touch(&o);
-                let t = self.tmp;
-                self.tmp += 1;
-                self.line(&format!("uint t{t} = 0u;"));
-                self.line(&format!("if (exec_lo & 1u) {func}({uobj}[uint{ncoord}({})], {}, t{t});", c.join(", "), r(&o)?));
-                return self.wv(&o, &format!("t{t}"));
+                let old = self.atomic_rmw(op, &format!("{uobj}[uint{ncoord}({})]", c.join(", ")), o)?;
+                if glc {
+                    self.wv(&o, &old)?;
+                }
+                return Ok(());
             }
             if store && as_uint {
                 let v = self.mimg_store_lanes(ins, vd, Lane::Uint, "0u")?;

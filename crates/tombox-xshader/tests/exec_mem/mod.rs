@@ -15,6 +15,7 @@ mod rootmem;
 
 pub const R32G32B32A32_FLOAT: u32 = 2;
 pub const R32_FLOAT: u32 = 41;
+pub const R32_UINT: u32 = 42;
 
 pub struct Img {
     pub w: u32,
@@ -28,7 +29,7 @@ pub struct Img {
 
 impl Img {
     fn bpp(&self) -> usize {
-        if self.fmt == R32_FLOAT { 4 } else { 16 }
+        if self.fmt == R32_FLOAT || self.fmt == R32_UINT { 4 } else { 16 }
     }
     fn tex_desc(&self, uav: bool) -> [u8; 0x38] {
         let mut td = [0u8; 0x38];
