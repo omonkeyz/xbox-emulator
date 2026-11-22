@@ -8,7 +8,15 @@ extern "system" {
 }
 
 pub fn is_xbox_one() -> bool {
-    unsafe { !GetModuleHandleA(b"d3d12_x.dll\0".as_ptr()).is_null() }
+    static IS_XONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if IS_XONE.load(core::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    if unsafe { !GetModuleHandleA(b"d3d12_x.dll\0".as_ptr()).is_null() } {
+        IS_XONE.store(true, core::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 pub unsafe fn xg_module() -> (*mut c_void, usize) {

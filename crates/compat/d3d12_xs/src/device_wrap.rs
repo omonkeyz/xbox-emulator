@@ -229,6 +229,9 @@ unsafe extern "system" fn create_command_queue_x(
         // Give the queue an Xbox-sized vtable (PresentX at slot 30, other extensions no-op).
         crate::present::apply_queue_vtable(unsafe { *ppv });
         crate::map_x::set_queue(unsafe { *ppv });
+        if qtype == 0 {
+            crate::upload::register_direct_queue(unsafe { *ppv });
+        }
     }
     record("d3d12_xs", "CreateCommandQueueX", &format!("type={qtype} flags={qflags} -> hr={hr:#010x}"));
     hr

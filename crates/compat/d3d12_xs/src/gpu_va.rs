@@ -158,11 +158,23 @@ unsafe extern "system" fn get_gpu_va_x(this: *mut c_void) -> u64 {
 }
 
 pub fn expose_texture_va() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match std::env::var("TOMBOX_TEXTURE_VA") {
-        Ok(v) => v == "1",
-        Err(_) => crate::xone_tex::is_xbox_one(),
-    })
+    static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let env = *ENV.get_or_init(|| match std::env::var("TOMBOX_TEXTURE_VA") {
+        Ok(v) => Some(v == "1"),
+        Err(_) => None,
+    });
+    if let Some(v) = env {
+        return v;
+    }
+    static IS_XONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if IS_XONE.load(Ordering::Relaxed) {
+        return true;
+    }
+    if crate::xone_tex::is_xbox_one() {
+        IS_XONE.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 unsafe fn ensure_patched(res: *mut c_void) {

@@ -549,6 +549,7 @@ unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes
     crate::gpuprof::on_present();
     crate::hot_reload::on_present();
     crate::present_probe::on_present(src, plane_count, planes);
+    crate::upload::register_direct_queue(queue);
     crate::slowcall::time("PresentX upload pump", || crate::perf::timed(crate::perf::UPLOAD, || crate::upload::pump(queue)));
     crate::slowcall::time("PresentX replay/rtcap", || crate::perf::timed(crate::perf::RTCAP, || {
         crate::replay::on_present(queue);
@@ -744,6 +745,7 @@ unsafe extern "system" fn exec_lists_x(queue: *mut c_void, n: u32, lists: *const
     let split = crate::cl2_state::before_execute(queue, &real);
     crate::title_heap::sync_for_execute(&real);
     crate::title_shadow::before_execute();
+    crate::slowcall::time("ExecuteCommandLists upload pump", || crate::upload::pump_if_needed(queue));
     crate::slowcall::time("queue ExecuteCommandLists replay hook", || crate::replay::on_execute(queue, &real));
     crate::slowcall::time("queue ExecuteCommandLists", || crate::gpu_wait::submit(queue, &real, f, REAL_QVT[14].load(Ordering::Relaxed), REAL_QVT[15].load(Ordering::Relaxed)));
     crate::ecl_probe::check("ExecuteCommandLists", queue, REAL_QVT[18].load(Ordering::Relaxed), &title, &real, before);

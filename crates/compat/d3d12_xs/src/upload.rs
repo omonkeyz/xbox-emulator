@@ -360,7 +360,7 @@ static NOTES: Mutex<Vec<(usize, usize, u32)>> = Mutex::new(Vec::new());
 
 fn poll_mode() -> bool {
     static SW: crate::live_sw::Sw = crate::live_sw::Sw::new("TOMBOX_UPLOAD_POLL", "upload_poll", false);
-    SW.on()
+    SW.on() || crate::xone_tex::is_xbox_one()
 }
 
 #[no_mangle]
@@ -826,6 +826,56 @@ impl PumpPhases {
     }
 }
 
+static DIRECT_QUEUES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+pub fn register_direct_queue(queue: *mut c_void) {
+    if !queue.is_null() {
+        let mut g = DIRECT_QUEUES.lock().unwrap_or_else(|e| e.into_inner());
+        let addr = queue as usize;
+        if !g.contains(&addr) {
+            g.push(addr);
+        }
+    }
+}
+
+pub fn is_direct_queue(queue: *mut c_void) -> bool {
+    if queue.is_null() {
+        return false;
+    }
+    DIRECT_QUEUES.lock().unwrap_or_else(|e| e.into_inner()).contains(&(queue as usize))
+}
+
+pub fn direct_queue() -> Option<*mut c_void> {
+    DIRECT_QUEUES.lock().unwrap_or_else(|e| e.into_inner()).first().copied().map(|q| q as *mut c_void)
+}
+
+pub fn has_notes() -> bool {
+    NOTES.lock().map(|g| !g.is_empty()).unwrap_or(false)
+}
+
+pub fn has_pending_work() -> bool {
+    if crate::placed::has_new() || has_notes() {
+        return true;
+    }
+    let Ok(g) = UP.try_lock() else { return false };
+    let Some(up) = g.as_ref() else { return false };
+    !up.backlog.is_empty() || up.tracked.iter().any(|t| t.hashes.iter().any(|h| h.is_none()))
+}
+
+pub unsafe fn pump_if_needed(queue: *mut c_void) {
+    if !has_pending_work() {
+        return;
+    }
+    let target = if is_direct_queue(queue) {
+        Some(queue)
+    } else {
+        direct_queue()
+    };
+    if let Some(q) = target {
+        pump(q);
+    }
+}
+
 /// Called once per `PresentX`, on the presenting thread, before the frame is copied out.
 pub unsafe fn pump(queue: *mut c_void) {
     let t0 = std::time::Instant::now();
@@ -1179,5 +1229,36 @@ mod detile_speed_tests {
         let per = t.elapsed().as_secs_f64() * 100.0;
         eprintln!("single-thread detile of 1 MB: {per:.2} ms");
         assert!(per < 20.0, "{per} ms");
+    }
+}
+
+#[cfg(test)]
+mod direct_queue_and_pending_tests {
+    use super::*;
+
+    #[test]
+    fn direct_queue_registration_and_detection() {
+        let fake_q = 0xdead_beefusize as *mut c_void;
+        assert!(!is_direct_queue(fake_q));
+        register_direct_queue(fake_q);
+        assert!(is_direct_queue(fake_q));
+        assert!(!is_direct_queue((fake_q as usize + 8) as *mut c_void));
+        assert!(direct_queue().is_some());
+    }
+
+    #[test]
+    fn pending_work_detects_notes_and_placed() {
+        let _ = take_notes();
+        assert!(!has_notes());
+        TomboxNoteTitleMemory(0x1000, 0x100, NOTE_WRITTEN);
+        assert!(has_notes());
+        assert!(has_pending_work());
+        let _ = take_notes();
+        assert!(!has_notes());
+    }
+
+    #[test]
+    fn pump_if_needed_on_null_queue_is_safe() {
+        unsafe { pump_if_needed(core::ptr::null_mut()) };
     }
 }

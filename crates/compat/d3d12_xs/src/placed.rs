@@ -82,6 +82,10 @@ pub fn drain_new() -> Vec<(usize, Placed)> {
     core::mem::take(&mut *NEW.lock().unwrap())
 }
 
+pub fn has_new() -> bool {
+    NEW.lock().map(|g| !g.is_empty()).unwrap_or(false)
+}
+
 pub fn forget(res: *mut c_void) {
     if let Some(m) = REG.lock().unwrap().as_mut() {
         m.remove(&(res as usize));
@@ -125,4 +129,28 @@ pub fn gpu_written(res: usize) -> bool {
 
 pub fn gpu_write_stats() -> (u64, usize) {
     (GPU_WRITE_HITS.load(core::sync::atomic::Ordering::Relaxed), GPU_WRITTEN.lock().unwrap().as_ref().map_or(0, |s| s.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placed_new_tracking() {
+        let _ = drain_new();
+        assert!(!has_new());
+
+        let p = Placed {
+            va: 0x1234_0000,
+            desc: [0u8; 0x38],
+            init_state: 0,
+        };
+        register(core::ptr::null_mut(), p);
+        assert!(has_new());
+
+        let drained = drain_new();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].1.va, 0x1234_0000);
+        assert!(!has_new());
+    }
 }
