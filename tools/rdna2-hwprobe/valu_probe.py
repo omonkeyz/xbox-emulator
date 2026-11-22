@@ -208,12 +208,56 @@ def isnan(b):
     return b & 0x7fffffff > 0x7f800000
 def f32(b):
     return struct.unpack('<f', struct.pack('<I', b))[0]
-def nan_first(ops):
-    """Candidate rule: the first NaN operand, quieted; a generated NaN is the default quiet NaN."""
+DEFAULT_NAN = 0xffc00000
+def isinf(b):
+    return b & 0x7fffffff == 0x7f800000
+def iszero(b):
+    return b & 0x7fffffff == 0
+def issnan(b):
+    return isnan(b) and not b & 0x400000
+def nan_arith(ops, kind, ieee):
+    """NaN result of fma / fmac / mul / add / sub as measured on gfx1036, or None if the result is
+    not a NaN. ops: (a, b, c) for fma, (src0, src1) otherwise.
+      1. v_sub_f32 negates src1 first, so a NaN src1 comes out with its sign flipped.
+      2. fma: if neither a nor b is NaN and a * b is invalid (0 * inf), the default NaN wins over a NaN c.
+      3. Otherwise the first NaN operand: unchanged in IEEE mode 0 (sNaN stays signalling), quieted in mode 1.
+      4. An invalid operation without a NaN input gives the default NaN 0xffc00000 in both modes."""
+    q = (lambda x: x | 0x400000) if ieee else (lambda x: x)
+    if kind == "sub":
+        ops = (ops[0], ops[1] ^ 0x80000000)
+    a, b = ops[0], ops[1]
+    prod_invalid = (isinf(a) and iszero(b)) or (iszero(a) and isinf(b))
+    if kind == "fma" and prod_invalid and not isnan(a) and not isnan(b):
+        return DEFAULT_NAN
     for x in ops:
         if isnan(x):
-            return x | 0x400000
-    return 0x7fc00000
+            return q(x)
+    if kind in ("fma", "mul") and prod_invalid:
+        return DEFAULT_NAN
+    if kind in ("add", "sub") and isinf(a) and isinf(b) and a >> 31 != b >> 31:
+        return DEFAULT_NAN
+    if kind == "fma":
+        p = f32(a) * f32(b)
+        c = ops[2]
+        if abs(p) == float("inf") and isinf(c) and (p < 0) != bool(c >> 31):
+            return DEFAULT_NAN
+    return None
+
+def nan_minmax(a, b, ieee):
+    """NaN-related result of v_min_f32 / v_max_f32 as measured on gfx1036, or None if neither operand
+    is a NaN. IEEE mode 0: a NaN loses to a number, two NaNs give src0 unchanged. IEEE mode 1: an sNaN
+    wins and is quieted (src0 checked first), otherwise as mode 0."""
+    if ieee:
+        for x in (a, b):
+            if issnan(x):
+                return x | 0x400000
+    if isnan(a) and isnan(b):
+        return a
+    if isnan(a):
+        return b
+    if isnan(b):
+        return a
+    return None
 
 NRM_F32 = [0x38400180, 0x38e001c0, 0xb8400180, 0xb8e001c0, 0x37c000c0, 0x386000e0, 0x3effffff, 0x3f000001, 0x3f000000, 0xbf000000, 0x3f800000,
            0xbf800000, 0x3f800001, 0xbf800001, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000, 0x7f800001, 0xff800001, 0x80000000, 0x00000001,
@@ -347,33 +391,27 @@ def show_sbfe(out):
 
 def show_nan(out):
     x = ins(out, "nan.in")
+    ops_t = (("v_fma_f32 (a,b,c)", 0, (0, 1, 2), "fma"), ("v_mul_f32 (a,b)", 1, (0, 1), "mul"), ("v_add_f32 (a,c)", 2, (0, 2), "add"),
+             ("v_min_f32 (a,b)", 3, (0, 1), "min"), ("v_max_f32 (a,b)", 4, (0, 1), "max"),
+             ("v_fmac_f32 (a,b,D=c)", 5, (0, 1, 2), "fma"), ("v_sub_f32 (a,c)", 6, (0, 2), "sub"))
     for m in (0, 1):
         r = rows(out, f"nan_ieee{m}")
-        print(f"== nan, IEEE mode {m}: candidate = first NaN operand in source order, quieted; generated NaN = 0x7fc00000")
-        for label, col, sel, fn in (("v_fma_f32 (a,b,c)", 0, (0, 1, 2), lambda a, b, c: a * b + c), ("v_mul_f32 (a,b)", 1, (0, 1), lambda a, b: a * b),
-                                    ("v_add_f32 (a,c)", 2, (0, 2), lambda a, c: a + c), ("v_fmac_f32 (a,b,D=c)", 5, (0, 1, 2), lambda a, b, c: a * b + c),
-                                    ("v_sub_f32 (a,c)", 6, (0, 2), lambda a, c: a - c)):
+        print(f"== nan, IEEE mode {m}: against the rules fitted on gfx1036 (nan_arith / nan_minmax)")
+        for label, col, sel, kind in ops_t:
             n = bad = 0
             first = []
             for t, o in zip(x, r):
                 ops = [t[i] for i in sel]
-                if not any(map(isnan, ops)):
-                    v = fn(*map(f32, ops))
-                    if v == v:
+                want = nan_minmax(*ops, m) if kind in ("min", "max") else nan_arith(ops, kind, m)
+                if want is None:
+                    if kind in ("min", "max") or not isnan(o[col]):
                         continue
                 n += 1
-                if o[col] != nan_first(ops):
+                if o[col] != want:
                     bad += 1
                     if len(first) < 6:
-                        first.append("(" + ",".join(f"{q:#010x}" for q in ops) + f")->{o[col]:#010x}")
-            print(f"  {label}: {n} NaN cases, {bad} differ from the candidate" + (": " + " ".join(first) if first else ""))
-        n = len(SPECIAL)
-        for label, col in (("v_min_f32", 3), ("v_max_f32", 4)):
-            print(f"  {label}(a,b) on the special values with at least one NaN:")
-            for i in range(n * n):
-                a, b = x[i][0], x[i][1]
-                if isnan(a) or isnan(b):
-                    print(f"    {a:#010x} {b:#010x} -> {r[i][col]:#010x}")
+                        first.append("(" + ",".join(f"{q:#010x}" for q in ops) + f")->{o[col]:#010x}" + (f" want {want:#010x}" if want is not None else " (unexpected NaN)"))
+            print(f"  {label}: {n} NaN-related results, {bad} differ from the rules" + (": " + " ".join(first) if first else ""))
 
 def show_norm(out):
     print("== normalized conversions: mismatches per rounding rule (nearest, halfup = floor(x + 0.5), trunc)")
