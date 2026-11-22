@@ -300,6 +300,44 @@ fn loops_translate_deterministically() {
 }
 
 #[test]
+fn vertex_fetch_packs_read_attributes_into_consecutive_vgprs() {
+    let words = [
+        0xbe84_2104,
+        0xf800_00cf, 0x0706_0504,
+        0xf800_0a0f, 0x0b0a_0908,
+        S_ENDPGM,
+    ];
+    let mut position = sig("POSITION", 0, 3, 0, 0x3);
+    position.rw_mask = 0x3;
+    let unused = sig("NORMAL", 0, 3, 1, 0xf);
+    let mut attribute = sig("TEXCOORD", 0, 1, 3, 0x4);
+    attribute.rw_mask = 0x4;
+    let ex = shader(
+        Stage::Vertex,
+        &words,
+        vec![position, unused, attribute],
+        vec![sig("SV_Position", 1, 3, 0, 0xf), sig("TEXCOORD", 0, 1, 1, 0xf)],
+        None,
+    );
+    let t = translate(&ex).expect("vertex fetch translates");
+    for assignment in [
+        "v4 = asuint(i.i0.x);",
+        "v5 = asuint(i.i0.y);",
+        "v6 = 0u;",
+        "v7 = 0x3f800000u;",
+        "v8 = 0u;",
+        "v9 = 0u;",
+        "v10 = (uint)(i.i2.x);",
+        "v11 = 0x3f800000u;",
+    ] {
+        assert!(t.hlsl.contains(assignment), "missing {assignment}\n{}", t.hlsl);
+    }
+    assert!(!t.hlsl.contains("i.i1."), "{}", t.hlsl);
+    #[cfg(windows)]
+    tombox_xshader::dxc::compile(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile)).unwrap();
+}
+
+#[test]
 fn vertex_misc_vector_export_feeds_the_render_target_array_index() {
     let words = [0xf800_00cf, 0x0403_0200, 0xf800_08df, 0x0200_0101, S_ENDPGM];
     let ex = shader(
