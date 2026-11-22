@@ -13,6 +13,7 @@
 //! (offsets normalised). With --examples, one sample blob per distinct failure is saved.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::{self, BufRead, BufReader, Read};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -448,8 +449,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let data = match std::fs::read(&args[1]) {
-        Ok(d) => d,
+    let mut input = match std::fs::File::open(&args[1]) {
+        Ok(file) => BufReader::new(file),
         Err(e) => {
             eprintln!("cannot read {}: {e}", args[1]);
             return ExitCode::FAILURE;
@@ -473,51 +474,93 @@ fn main() -> ExitCode {
             jobs = jobs.min(4);
         }
     }
-    // Gather candidate blobs: UE shader-archive entries (LZ4 blocks) if the file holds
-    // an archive, otherwise raw DXBC containers found by magic.
-    let mut blobs: Vec<Vec<u8>> = Vec::new();
-    let archives = find_archives(&data);
-    let mut lz_fail = 0usize;
-    for a in &archives {
-        for &(off, size, usize_) in &a.entries {
-            let src = &data[off..off + size];
-            let dec = if size == usize_ { Some(src.to_vec()) } else { lz4_block(src, usize_) };
-            match dec {
-                Some(d) => blobs.push(d),
-                None => lz_fail += 1,
+    let mut seen = HashSet::new();
+    let mut found = 0usize;
+    let mut work = Vec::new();
+    let is_rpf = match input.fill_buf() {
+        Ok(bytes) => bytes.starts_with(b"9FPR"),
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", args[1]);
+            return ExitCode::FAILURE;
+        }
+    };
+    if is_rpf {
+        if limit > 0 {
+            let mut reached_limit = false;
+            let result = tombox_xshader::rpf::scan(input, |record| {
+                found += 1;
+                let hash = fnv1a(record.dxbc);
+                if seen.insert(hash) {
+                    work.push((hash, record.dxbc.to_vec()));
+                    if work.len() == limit {
+                        reached_limit = true;
+                        return Err(io::ErrorKind::Interrupted.into());
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                if !reached_limit {
+                    eprintln!("cannot scan {}: {e}", args[1]);
+                    return ExitCode::FAILURE;
+                }
             }
         }
-    }
-    if !archives.is_empty() {
-        eprintln!("decompressed {} archive entries ({lz_fail} LZ4 failures)", blobs.len());
     } else {
-        blobs.push(data.clone());
-    }
-    // Unique containers.
-    let mut seen: HashSet<u64> = HashSet::new();
-    let mut found = 0usize;
-    let mut work: Vec<(u64, &[u8])> = Vec::new();
-    for buf in &blobs {
-        let data = &buf[..];
-        let mut p = 0usize;
-        while p + 32 <= data.len() && seen.len() < limit {
-            if &data[p..p + 4] != b"DXBC" {
-                p += 1;
-                continue;
+        let mut data = Vec::new();
+        if let Err(e) = input.read_to_end(&mut data) {
+            eprintln!("cannot read {}: {e}", args[1]);
+            return ExitCode::FAILURE;
+        }
+        let archives = find_archives(&data);
+        let mut collect = |data: &[u8]| {
+            let mut p = 0usize;
+            while p + 32 <= data.len() && work.len() < limit {
+                if &data[p..p + 4] != b"DXBC" {
+                    p += 1;
+                    continue;
+                }
+                let total = u32::from_le_bytes(data[p + 24..p + 28].try_into().unwrap()) as usize;
+                let nchunks = u32::from_le_bytes(data[p + 28..p + 32].try_into().unwrap()) as usize;
+                if total < 64 || total > 0x40_0000 || p + total > data.len() || nchunks == 0 || nchunks > 32 {
+                    p += 4;
+                    continue;
+                }
+                let blob = &data[p..p + total];
+                found += 1;
+                p += total;
+                let h = fnv1a(blob);
+                if seen.insert(h) {
+                    work.push((h, blob.to_vec()));
+                }
             }
-            let total = u32::from_le_bytes(data[p + 24..p + 28].try_into().unwrap()) as usize;
-            let nchunks = u32::from_le_bytes(data[p + 28..p + 32].try_into().unwrap()) as usize;
-            if total < 64 || total > 0x40_0000 || p + total > data.len() || nchunks == 0 || nchunks > 32 {
-                p += 4;
-                continue;
+
+            work.len() >= limit
+        };
+        if archives.is_empty() {
+            collect(&data);
+        } else {
+            let mut decoded = 0usize;
+            let mut lz_fail = 0usize;
+            'archives: for archive in &archives {
+                for &(off, size, raw_size) in &archive.entries {
+                    if limit == 0 { break 'archives; }
+                    let src = &data[off..off + size];
+                    let inflated;
+                    let entry = if size == raw_size {
+                        src
+                    } else if let Some(bytes) = lz4_block(src, raw_size) {
+                        inflated = bytes;
+                        &inflated
+                    } else {
+                        lz_fail += 1;
+                        continue;
+                    };
+                    decoded += 1;
+                    if collect(entry) { break 'archives; }
+                }
             }
-            let blob = &data[p..p + total];
-            found += 1;
-            p += total;
-            let h = fnv1a(blob);
-            if seen.insert(h) {
-                work.push((h, blob));
-            }
+            eprintln!("decoded {decoded} archive entries ({lz_fail} LZ4 failures)");
         }
     }
     if let Some(d) = &dump {
@@ -539,7 +582,7 @@ fn main() -> ExitCode {
                 if i >= work.len() {
                     break;
                 }
-                let (h, blob) = work[i];
+                let (h, blob) = &work[i];
                 let (stage, res, compiled) = process(blob, compile);
                 let mut t = tally.lock().unwrap();
                 if compiled {
@@ -551,7 +594,7 @@ fn main() -> ExitCode {
                     Err(msg) => {
                         e.1 += 1;
                         let key = normalise(&msg);
-                        let ent = t.1.entry(key).or_insert((0, h));
+                        let ent = t.1.entry(key).or_insert((0, *h));
                         if ent.0 < 3 {
                             if let Some(d) = &examples {
                                 let _ = std::fs::write(format!("{d}/{h:016x}.dxbc"), blob);
