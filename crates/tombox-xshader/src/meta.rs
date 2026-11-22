@@ -130,6 +130,14 @@ pub fn parse_psv0_gs(body: &[u8]) -> Option<GsInfo> {
     })
 }
 
+pub(crate) fn parse_compute_threads(body: &[u8]) -> Option<[u32; 3]> {
+    let size = u32_at(body, 0).ok()? as usize;
+    let info = body.get(4..)?.get(..size)?;
+    let dims = [u32_at(info, 36).ok()?, u32_at(info, 40).ok()?, u32_at(info, 44).ok()?];
+    let threads = dims.into_iter().try_fold(1u32, u32::checked_mul)?;
+    (threads > 0 && threads <= 1024 && dims[2] <= 64).then_some(dims)
+}
+
 pub fn parse_psv0(body: &[u8]) -> Result<Vec<PsvResource>, String> {
     let info_size = u32_at(body, 0)? as usize;
     let mut p = 4 + info_size;
@@ -244,4 +252,25 @@ pub fn parse_rts0(body: &[u8]) -> Result<RootSig, String> {
         params.push(RootParam { visibility, kind });
     }
     Ok(RootSig { version, flags, params, num_static_samplers })
+}
+
+#[cfg(test)]
+mod compute_threads_tests {
+    use super::parse_compute_threads;
+
+    #[test]
+    fn reads_dimensions_only_inside_declared_runtime_info() {
+        let mut psv = [0u8; 52];
+        psv[..4].copy_from_slice(&48u32.to_le_bytes());
+        for (offset, value) in [(40, 8u32), (44, 8), (48, 1)] {
+            psv[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(parse_compute_threads(&psv), Some([8, 8, 1]));
+        assert_eq!(parse_compute_threads(&psv[..51]), None);
+        psv[..4].copy_from_slice(&36u32.to_le_bytes());
+        assert_eq!(parse_compute_threads(&psv), None);
+        psv[..4].copy_from_slice(&48u32.to_le_bytes());
+        psv[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(parse_compute_threads(&psv), None);
+    }
 }

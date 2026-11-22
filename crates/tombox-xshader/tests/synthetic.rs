@@ -38,7 +38,7 @@ fn shader(stage: Stage, words: &[u32], input_sig: Vec<SigElement>, output_sig: V
         isa_data: isa.clone(),
         isa,
         isa_offset_in_fssm: 0,
-        isa_preamble: [0; 4],
+        isa_preamble: [0; 4], compute_threads: None,
         has_input_sig: true,
         has_output_sig: true,
         has_psv0: false,
@@ -296,5 +296,28 @@ fn loops_translate_deterministically() {
     assert_eq!(first.matches("do {").count(), 6, "{first}");
     for _ in 0..16 {
         assert!(translate(&ex).expect("translate").hlsl == first, "translation differs between runs");
+    }
+}
+
+#[test]
+fn single_wave_compute_orders_consecutive_lds_stores() {
+    let words = [
+        0xd834_0000, 0x0000_0909, // ds_write_b32 v9, v9
+        0xbf8c_c07f,              // s_waitcnt lgkmcnt(0)
+        0xd834_0000, 0x0000_0609, // ds_write_b32 v9, v6
+        S_ENDPGM,
+    ];
+    let mut ex = shader(Stage::Compute, &words, vec![], vec![], None);
+    ex.isa_preamble = [0, 16, 16, 1];
+    for (dims, expected) in [(Some([8, 8, 1]), true), (None, false)] {
+        ex.compute_threads = dims;
+        let t = translate(&ex).unwrap();
+        let (_, tail) = t.hlsl.split_once("] = v9;").unwrap();
+        let (between, _) = tail.split_once("] = v6;").unwrap();
+        assert_eq!(between.contains("GroupMemoryBarrierWithGroupSync();"), expected);
+        let size = if expected { "8, 8, 1" } else { "16, 16, 1" };
+        assert!(t.hlsl.contains(&format!("numthreads({size})")));
+        #[cfg(windows)]
+        tombox_xshader::dxc::compile(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile)).unwrap();
     }
 }

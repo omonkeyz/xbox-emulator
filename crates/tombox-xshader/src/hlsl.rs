@@ -305,6 +305,7 @@ struct Emitter<'a> {
     is_gs: bool,
     /// Compute shader uses LDS (groupshared memory).
     uses_lds: bool,
+    wave_lds_sync: bool,
     lds_w_pending: bool,
     lds_r_pending: bool,
     brace_depth: i32,
@@ -910,6 +911,7 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
         is_cs: matches!(ex.stage, Stage::Compute | Stage::Mesh | Stage::Amplification),
         is_gs: ex.stage == Stage::Geometry,
         uses_lds: false,
+        wave_lds_sync: false,
         lds_w_pending: false,
         lds_r_pending: false,
         brace_depth: 0,
@@ -955,6 +957,11 @@ fn translate_with(ex: &ShaderExtract, user_base_override: Option<usize>, uav_for
         mode_use: mode::ModeUse::default(),
     };
     em.vreg_array = em.insns.iter().any(|i| i.mnemonic.starts_with("v_movrel"));
+    if ex.stage == Stage::Compute {
+        let (x, y, z) = em.cs_threads();
+        em.wave_lds_sync = x.saturating_mul(y).saturating_mul(z) <= 64
+            && !em.insns.iter().any(|i| i.enc == Enc::Sopp && i.op == 0x0a);
+    }
     em.mode_use = mode::analyze(&em.insns);
     if em.mode_use.sp || em.mode_use.dp {
         em.hw_regs.insert(1);
@@ -2129,7 +2136,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn lds_order(&mut self, writes: bool, reads: bool) {
-        let hazard = (reads && self.lds_w_pending) || (writes && self.lds_r_pending);
+        // Console lanes in a single wave can rely on lockstep between stores to the
+        // same LDS word. Host waves may otherwise execute those stores out of order.
+        let hazard = (reads && self.lds_w_pending) || (writes && (self.lds_r_pending || self.wave_lds_sync && self.lds_w_pending));
         if hazard && self.brace_depth == 0 && self.loop_depth == 0 {
             self.line("GroupMemoryBarrierWithGroupSync();");
             self.lds_w_pending = false;
@@ -6091,8 +6100,7 @@ impl<'a> Emitter<'a> {
             // Compute ABI (from ClearCS + FSSM metadata): local thread id in v0..v2, the
             // thread-group id in the three SGPRs following the user-data (root-parameter)
             // registers, thread-group size in the ISA preamble dwords 1..3.
-            let p = ex.isa_preamble;
-            let (tx, ty_, tz) = (p[1].max(1), p[2].max(1), p[3].max(1));
+            let (tx, ty_, tz) = self.cs_threads();
             let nparams = ex.root_sig.as_ref().map(|r| r.params.len()).unwrap_or(4);
             let g = self.cs_tgid_base(nparams);
             let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]

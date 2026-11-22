@@ -81,7 +81,7 @@ fn ms(words: &[u32], mi: MeshInfo, outs: Vec<SigElement>) -> ShaderExtract {
         isa_data: isa.clone(),
         isa,
         isa_offset_in_fssm: 0,
-        isa_preamble: [0; 4],
+        isa_preamble: [0; 4], compute_threads: None,
         has_input_sig: false,
         has_output_sig: true,
         has_psv0: true,

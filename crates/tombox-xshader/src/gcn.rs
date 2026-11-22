@@ -485,7 +485,7 @@ pub fn extract_durango(
         entry: None,
         isa: lowered.isa.clone(),
         isa_offset_in_fssm: d.code_start,
-        isa_preamble: [0; 4],
+        isa_preamble: [0; 4], compute_threads: None,
         isa_data: lowered.isa,
         has_input_sig: container.chunk(b"ISG1").is_some() || container.chunk(b"ISGN").is_some(),
         has_output_sig: container.chunk(b"OSG1").is_some() || container.chunk(b"OSGN").is_some(),
