@@ -116,10 +116,43 @@ unsafe fn mesh_gpu() -> (Gpu, &'static str) {
         assert!(mesh_tier(d) != 0, "WARP reports MeshShaderTier 0: rerun with TOMBOX_EXEC_HW=1 to use the hardware adapter");
         return (gpu_on(d), "WARP");
     }
-    let mut g = Gpu::new(false).expect("hardware d3d12 device");
-    g.open = false;
-    assert!(mesh_tier(g.device) != 0, "neither WARP nor the hardware adapter supports mesh shaders");
-    (g, "hardware")
+    let d = hw_mesh_device().expect("no hardware adapter supports mesh shaders");
+    (gpu_on(d), "hardware")
+}
+
+/// The default adapter of a hybrid laptop is usually the integrated GPU, which may lack mesh
+/// shaders while the discrete one has them, so walk the adapters in high-performance order.
+unsafe fn hw_mesh_device() -> Option<*mut c_void> {
+    const IID_FACTORY6: Guid = Guid(0xc1b6694f, 0xff09, 0x44a9, [0xb0, 0x3c, 0x77, 0x90, 0x0a, 0x0a, 0x1d, 0x17]);
+    const IID_ADAPTER1: Guid = Guid(0x29038f61, 0x3839, 0x4626, [0x91, 0xfd, 0x08, 0x68, 0x79, 0x01, 0x1a, 0x05]);
+    const DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE: u32 = 2;
+    const DXGI_ADAPTER_FLAG_SOFTWARE: u32 = 2;
+    let dxgi = LoadLibraryA(b"dxgi.dll\0".as_ptr());
+    let cf: unsafe extern "system" fn(*const Guid, *mut *mut c_void) -> i32 = core::mem::transmute(GetProcAddress(dxgi, b"CreateDXGIFactory1\0".as_ptr()));
+    let mut f: *mut c_void = core::ptr::null_mut();
+    assert!(cf(&IID_FACTORY6, &mut f) >= 0, "CreateDXGIFactory1(IDXGIFactory6)");
+    let d3d = LoadLibraryA(b"d3d12.dll\0".as_ptr());
+    let create: unsafe extern "system" fn(*mut c_void, u32, *const Guid, *mut *mut c_void) -> i32 = core::mem::transmute(GetProcAddress(d3d, b"D3D12CreateDevice\0".as_ptr()));
+    for i in 0.. {
+        let mut ad: *mut c_void = core::ptr::null_mut();
+        if vcall!(f, 29, fn(u32, u32, *const Guid, *mut *mut c_void) -> i32, i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, &IID_ADAPTER1, &mut ad) < 0 {
+            return None;
+        }
+        // DXGI_ADAPTER_DESC1: Flags at byte 304 of 312.
+        let mut desc = [0u32; 78];
+        vcall!(ad, 10, fn(*mut c_void) -> i32, desc.as_mut_ptr() as *mut c_void);
+        if desc[76] & DXGI_ADAPTER_FLAG_SOFTWARE != 0 {
+            continue;
+        }
+        let mut device: *mut c_void = core::ptr::null_mut();
+        if create(ad, 0xc100, &d3d::IID_DEVICE, &mut device) >= 0 {
+            if mesh_tier(device) != 0 {
+                return Some(device);
+            }
+            vcall!(device, 2, fn() -> u32);
+        }
+    }
+    None
 }
 
 fn sub(stream: &mut Vec<u8>, ty: u32, body: &[u8]) {
