@@ -5172,24 +5172,54 @@ impl<'a> Emitter<'a> {
             // Buffer atomics → HLSL Interlocked* on the UAV element. With GLC set the
             // pre-operation value is returned in vdata.
             let (offen, idxen, glc) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0, ins.aux.mask & 4 != 0);
-            if (offen && idxen) || !matches!(ins.src[2], Opnd::ConstInt(0)) {
-                return Err("atomic MUBUF addressing unsupported".into());
-            }
+            let soff = match ins.src[2] {
+                Opnd::ConstInt(0) | Opnd::Null => None,
+                Opnd::Sgpr(_) | Opnd::M0 | Opnd::ConstInt(_) | Opnd::Literal(_) => {
+                    self.touch(&ins.src[2]);
+                    Some(r(&ins.src[2])?)
+                }
+                other => return Err(format!("atomic MUBUF SOFFSET operand {other:?} is unsupported")),
+            };
             // Without IDXEN the address is just the immediate offset: element 0 (the usual
             // wave-level counter allocation `InterlockedAdd(buf[0], n)`). With OFFEN alone the
             // address register is a byte offset.
             let index = if idxen { r(&ins.src[0])? } else { "0u".to_string() };
-            let target = match (self.res.get(&idx).and_then(|v| v.first()).copied(), offen) {
-                (Some(Res::TBuf(slot, true)), false) if ins.aux.imm == 0 => format!("utb{slot}[{index}]"),
-                (Some(Res::TBuf(slot, true)), true) => format!("utb{slot}[(({}) + {:#x}u) >> 2]", r(&ins.src[0])?, ins.aux.imm as u32),
-                (Some(Res::Buf(slot, true)), false) => {
-                    let (nwords, w) = (self.sbuf_words((true, slot)), ins.aux.imm as u32 / 4);
+            let voff = match (idxen, offen) {
+                (_, false) => None,
+                (false, true) => Some(r(&ins.src[0])?),
+                (true, true) => {
+                    let a1 = match ins.src[0] {
+                        Opnd::Vgpr(v) => Opnd::Vgpr(v + 1),
+                        _ => return Err("atomic MUBUF IDXEN+OFFEN without a VGPR address pair".into()),
+                    };
+                    self.touch(&a1);
+                    Some(r(&a1)?)
+                }
+            };
+            let dyn_off = match (voff, soff) {
+                (v, None) => v,
+                (None, Some(s)) => Some(s),
+                (Some(v), Some(s)) => Some(format!("({v}) + ({s})")),
+            };
+            let imm = ins.aux.imm as u32;
+            let target = match (self.res.get(&idx).and_then(|v| v.first()).copied(), dyn_off) {
+                (Some(Res::TBuf(slot, true)), None) if imm == 0 => format!("utb{slot}[{index}]"),
+                (Some(Res::TBuf(slot, true)), None) if imm % 4 == 0 => format!("utb{slot}[{index} + {}u]", imm / 4),
+                (Some(Res::TBuf(slot, true)), Some(d)) if !idxen => format!("utb{slot}[(({d}) + {imm:#x}u) >> 2]"),
+                (Some(Res::TBuf(slot, true)), Some(d)) => format!("utb{slot}[{index} + ((({d}) + {imm:#x}u) >> 2)]"),
+                (Some(Res::Buf(slot, true)), None) => {
+                    let (nwords, w) = (self.sbuf_words((true, slot)), imm / 4);
                     format!("ubuf{slot}[{index} + {}u].w[{}]", w / nwords, w % nwords)
                 }
-                (Some(Res::Buf(slot, true)), true) => {
+                (Some(Res::Buf(slot, true)), Some(d)) if !idxen => {
                     let nwords = self.sbuf_words((true, slot));
-                    let w = format!("((({}) + {:#x}u) >> 2)", r(&ins.src[0])?, ins.aux.imm as u32);
+                    let w = format!("((({d}) + {imm:#x}u) >> 2)");
                     format!("ubuf{slot}[{w} / {nwords}u].w[{w} % {nwords}u]")
+                }
+                (Some(Res::Buf(slot, true)), Some(d)) => {
+                    let nwords = self.sbuf_words((true, slot));
+                    let w = format!("((({d}) + {imm:#x}u) >> 2)");
+                    format!("ubuf{slot}[{index} + {w} / {nwords}u].w[{w} % {nwords}u]")
                 }
                 _ => return Err("unresolved atomic target".into()),
             };

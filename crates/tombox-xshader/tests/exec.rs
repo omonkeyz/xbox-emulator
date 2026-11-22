@@ -463,8 +463,21 @@ pub fn run_res(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Option<&
 }
 
 pub fn run_res_ex(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Option<&[u32]>, tex: Option<&Tex>, samp: [u8; 52], pos: bool) -> Result<ResOut, String> {
+    run_res_psv(words, root, buf, tex, samp, pos, &[])
+}
+
+fn shader_psv(words: &[u32], root: tombox_xshader::meta::RootSig, psv: &[tombox_xshader::meta::PsvResource]) -> ShaderExtract {
+    let mut ex = shader_root(words, root);
+    if !psv.is_empty() {
+        ex.has_psv0 = true;
+        ex.resources = psv.to_vec();
+    }
+    ex
+}
+
+pub fn run_res_psv(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Option<&[u32]>, tex: Option<&Tex>, samp: [u8; 52], pos: bool, psv: &[tombox_xshader::meta::PsvResource]) -> Result<ResOut, String> {
     use tombox_xshader::meta::RootParamKind;
-    let mut ex = shader_root(words, root.clone());
+    let mut ex = shader_psv(words, root.clone(), psv);
     if pos {
         ex.input_sig = vec![sig("SV_Position", 1, 3, 0, 0xf)];
     }
@@ -1411,6 +1424,10 @@ struct BufCase {
 }
 
 fn run_buf_cases(group: &str, cs: &[BufCase]) {
+    run_buf_cases_psv(group, cs, &[]);
+}
+
+fn run_buf_cases_psv(group: &str, cs: &[BufCase], psv: &[tombox_xshader::meta::PsvResource]) {
     let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut fails = Vec::new();
     let mut all: std::collections::BTreeSet<&str> = Default::default();
@@ -1427,7 +1444,7 @@ fn run_buf_cases(group: &str, cs: &[BufCase]) {
         }
         let mut p = Prog::new();
         p.raw(&if rt { vop::opaque(&c.pre) } else { c.pre.clone() }).raw(&[0xf408_0004, 0xfa00_0000]).raw(&c.op).raw(&[vop1(1, 0, v(4)), vop1(1, 1, v(5))]);
-        match run_res_ex(&p.words(), root.clone(), Some(&BUF), None, sampler(0, 3, 0), rt) {
+        match run_res_psv(&p.words(), root.clone(), Some(&BUF), None, sampler(0, 3, 0), rt, psv) {
             Ok(o) => {
                 let mut ok = o.rt[..c.rt.len()] == c.rt[..];
                 let mut got = Vec::new();
@@ -1436,7 +1453,7 @@ fn run_buf_cases(group: &str, cs: &[BufCase]) {
                     ok &= o.buf[k] == want;
                 }
                 if !ok {
-                    let h = translate(&shader_root(&p.words(), root.clone())).map(|t| t.hlsl).unwrap_or_default();
+                    let h = translate(&shader_psv(&p.words(), root.clone(), psv)).map(|t| t.hlsl).unwrap_or_default();
                     let body: String = h.lines().filter(|l| l.starts_with("    ") && !l.contains("TB_RTFMT")).collect::<Vec<_>>().join("\n");
                     fails.push(format!("#{i} {}{tag}: rt {:08x?} want {:08x?}; mem {:08x?} want {:08x?}\n{body}", c.m, &o.rt[..c.rt.len()], c.rt, got, c.mem));
                     bad.insert(c.m);
@@ -1513,6 +1530,51 @@ fn mubuf_scalar_offset() {
         });
     }
     run_buf_cases("mubuf_soffset", &cases);
+}
+
+#[test]
+fn mubuf_atomic_scalar_offset() {
+    type At = fn(u32, u32, u32) -> u32;
+    let atoms: [(&'static str, u32, At); 3] = [
+        ("buffer_atomic_add", 0x32, |m, s, _| m.wrapping_add(s)),
+        ("buffer_atomic_umax", 0x38, |m, s, _| m.max(s)),
+        ("buffer_atomic_cmpswap", 0x31, |m, s, c| if m == c { s } else { m }),
+    ];
+    let forms: [(u32, u32, u32, u32, bool, bool, Option<u32>); 7] = [
+        (0, 0, 0, 20, false, false, Some(12)),
+        (0, 0, 4, 8, false, false, Some(12)),
+        (8, 0, 4, 8, true, false, Some(12)),
+        (1, 8, 0, 0, true, true, None),
+        (2, 4, 4, 8, true, true, Some(12)),
+        (3, 0, 16, 0, false, true, None),
+        (1, 0, 0, 12, false, true, Some(12)),
+    ];
+    let raw = tombox_xshader::meta::PsvResource { res_type: 7, space: 0, lower: 0, upper: 7, kind: 1 };
+    for (group, psv) in [("mubuf_atomic_soffset_typed", Vec::new()), ("mubuf_atomic_soffset_raw", vec![raw])] {
+        let mut cs = Vec::new();
+        for (m, op, f) in atoms {
+            for &(a1, a2, imm, scalar, offen, idxen, sreg) in &forms {
+                let stride = match (psv.is_empty(), imm / 4 + 1) {
+                    (true, _) | (false, 1) => 1,
+                    (false, 2..=7) => 4,
+                    (false, words) => words.div_ceil(4) * 4,
+                };
+                let w = if idxen { a1 * stride + (a2 * offen as u32 + scalar + imm) / 4 } else { (a1 * offen as u32 + scalar + imm) / 4 } as usize;
+                let at = |k: usize| BUF.get(k).copied().unwrap_or(0);
+                let (old, data) = (at(w), 0x10);
+                for glc in [true, false] {
+                    let mut p = Prog::new();
+                    p.vv(1, a1).vv(2, a2).vv(4, data).vv(5, old).sv(12, scalar);
+                    let mut word = mubuf(op, imm, offen, idxen, glc, 1, 4);
+                    if let Some(s) = sreg {
+                        word[1] = (word[1] & 0x00ff_ffff) | (s << 24);
+                    }
+                    cs.push(BufCase { m, pre: p.w, op: word, rt: vec![if glc { old } else { data }], mem: vec![(w, f(old, data, old)), (w ^ 1, at(w ^ 1))] });
+                }
+            }
+        }
+        run_buf_cases_psv(group, &cs, &psv);
+    }
 }
 
 #[test]
