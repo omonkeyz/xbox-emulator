@@ -13,10 +13,10 @@ fn check(hr: HRESULT) -> Result<(), HRESULT> {
 
 // ConsoleControlClient::CheckTaskErrors (19041 RVA 0x77c0) and its
 // XtfOperationError reader (0xcc60). A successful reply can omit the envelope.
-unsafe fn check_task_errors(reply: Obj) -> Result<(), HRESULT> {
+unsafe fn task_result(reply: Obj) -> Result<HRESULT, HRESULT> {
     let mut envelope = Com::null();
     if json::get_object(reply, wide("XtfOperationError").as_ptr(), envelope.put()) < 0 {
-        return Ok(());
+        return Ok(S_OK);
     }
     let mut result = 0.0;
     let mut checkpoint = 0.0;
@@ -24,18 +24,76 @@ unsafe fn check_task_errors(reply: Obj) -> Result<(), HRESULT> {
     check(json::get_number(envelope.get(), wide("ReturnCode").as_ptr(), &mut result))?;
     check(json::get_number(envelope.get(), wide("Checkpoint").as_ptr(), &mut checkpoint))?;
     check(json::get_array(envelope.get(), wide("Errors").as_ptr(), errors.put()))?;
-    // The native double-to-i32 conversion yields INT_MIN outside the signed range.
-    let code = result.trunc();
-    check(if code >= i32::MIN as f64 && code <= i32::MAX as f64 { code as i32 } else { i32::MIN })
+    Ok(xtfmsg::msg::cvtt32(result))
+}
+
+unsafe fn new_request() -> Result<Com, HRESULT> {
+    let mut request = Com::null();
+    check(xbtp::create_json_object(request.put()))?;
+    Ok(request)
+}
+
+unsafe fn send_request(session: Obj, op: u32, request: &Com) -> Result<Com, HRESULT> {
+    let mut reply = Com::null();
+    check(send_json_message(session, request.get(), op, reply.put()))?;
+    Ok(reply)
 }
 
 unsafe fn request_status(session: Obj, op: u32) -> Result<Com, HRESULT> {
-    let mut request = Com::null();
-    let mut reply = Com::null();
-    check(xbtp::create_json_object(request.put()))?;
-    check(send_json_message(session, request.get(), op, reply.put()))?;
-    check_task_errors(reply.get())?;
+    let reply = send_request(session, op, &new_request()?)?;
+    check(task_result(reply.get())?)?;
     Ok(reply)
+}
+
+unsafe fn key_matches(key: *const u16, name: &str) -> bool {
+    !key.is_null() && xtfcommon::sys::_wcsicmp(key, wide(name).as_ptr()) == 0
+}
+
+// ConsoleConfig::VerifySessionKey (19041 RVA 0x80ac).
+unsafe fn valid_session_key(value: *const u16) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    for i in 0..=31 {
+        let c = *value.add(i);
+        if c == 0 {
+            return true;
+        }
+        if xtfcommon::sys::iswalnum(c) == 0 {
+            return false;
+        }
+    }
+    false
+}
+
+// Session exchanges used by GetConfigValue and SetConfigValue (0x29f0 and 0x2c40).
+pub unsafe fn get_config_value(session: Obj, key: *const u16, value: *mut BSTR) -> HRESULT {
+    let result = (|| {
+        let request = new_request()?;
+        check(json::set_string(request.get(), wide("ConfigKey").as_ptr(), key))?;
+        let reply = send_request(session, crate::OP_GET_CONFIG_VALUE, &request)?;
+        check(task_result(reply.get())?)?;
+        Ok(json::get_string(reply.get(), wide("ConfigValue").as_ptr(), value))
+    })();
+    result.unwrap_or_else(|hr| hr)
+}
+
+pub unsafe fn set_config_value(session: Obj, key: *const u16, value: *const u16) -> HRESULT {
+    if (key_matches(key, "AccessKey") || key_matches(key, "SessionKey")) && !valid_session_key(value) {
+        return E_INVALIDARG;
+    }
+    let result = (|| {
+        let request = new_request()?;
+        check(json::set_string(request.get(), wide("ConfigKey").as_ptr(), key))?;
+        check(json::set_string(request.get(), wide("ConfigValue").as_ptr(), value))?;
+        match send_request(session, crate::OP_SET_CONFIG_VALUE, &request) {
+            // Changing the address can reset the connection before the reply arrives.
+            Err(hr) if hr == 0x8007_2746u32 as i32 && key_matches(key, "IPAddress") => Ok(S_OK),
+            Err(hr) => Err(hr),
+            Ok(reply) => task_result(reply.get()),
+        }
+    })();
+    result.unwrap_or_else(|hr| hr)
 }
 
 #[link(name = "kernel32")]

@@ -808,3 +808,56 @@ fn client_reads_console_filetime_and_preserves_operation_status() {
         }
     }
 }
+
+#[test]
+fn config_client_reads_and_writes_string_properties() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        let raw = client_session(S_OK, S_OK, 0, Some(r#"{"ConfigValue":"console-\u03bb"}"#));
+        let session = Com(as_obj(raw));
+        let key = wide("hostname");
+        let mut value = Bstr::null();
+        assert_eq!(client::get_config_value(session.get(), key.as_ptr(), value.put()), S_OK);
+        assert_eq!(value.text().as_deref(), Some("console-λ"));
+        assert_eq!(client::set_config_value(session.get(), key.as_ptr(), value.ptr()), S_OK);
+        let reqs = (*raw).requests.lock().unwrap();
+        let get = parse(reqs[0].as_ref().unwrap());
+        let set = parse(reqs[1].as_ref().unwrap());
+        assert_eq!(get.keys(), ["ConfigKey"]);
+        assert_eq!(get.get("ConfigKey").str(), "hostname");
+        assert_eq!(set.get("ConfigKey").str(), "hostname");
+        assert_eq!(set.get("ConfigValue").str(), "console-λ");
+        let calls = (*raw).calls.lock().unwrap();
+        assert_eq!((calls[0].0, calls[2].0), (OP_GET_CONFIG_VALUE, OP_SET_CONFIG_VALUE));
+    }
+}
+
+#[test]
+fn config_set_validates_keys_and_distinguishes_transport_from_operation_errors() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        let raw = client_session(S_OK, S_OK, 0, Some("{}"));
+        let session = Com(as_obj(raw));
+        for key in ["accessKEY", "sessionKEY"] {
+            for invalid in ["a/b".to_string(), "x".repeat(32)] {
+                assert_eq!(client::set_config_value(session.get(), wide(key).as_ptr(), wide(&invalid).as_ptr()), E_INVALIDARG);
+            }
+        }
+        assert!((*raw).calls.lock().unwrap().is_empty());
+        for valid in ["", &"a9Z".repeat(10), &"x".repeat(31)] {
+            assert_eq!(client::set_config_value(session.get(), wide("SessionKey").as_ptr(), wide(valid).as_ptr()), S_OK);
+        }
+        let reset = 0x8007_2746u32 as i32;
+        let lost = Com(as_obj(client_session(S_OK, reset, 0, None)));
+        assert_eq!(client::set_config_value(lost.get(), wide("ipADDRESS").as_ptr(), wide("127.0.0.1").as_ptr()), S_OK);
+        assert_eq!(client::set_config_value(lost.get(), wide("hostname").as_ptr(), wide("local").as_ptr()), reset);
+        let response = format!(r#"{{"XtfOperationError":{{"ReturnCode":{reset},"Checkpoint":0,"Errors":[]}}}}"#);
+        let server_error = Com(as_obj(client_session(S_OK, S_OK, 0, Some(&response))));
+        assert_eq!(client::set_config_value(server_error.get(), wide("ipaddress").as_ptr(), wide("127.0.0.1").as_ptr()), reset);
+        let mut prior = Bstr::from_str("previous");
+        assert_eq!(client::get_config_value(server_error.get(), wide("hostname").as_ptr(), &mut prior.0), reset);
+        assert_eq!(prior.text().as_deref(), Some("previous"));
+    }
+}
