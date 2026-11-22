@@ -890,3 +890,37 @@ fn config_settings_callback_receives_ordered_pairs_and_can_stop_enumeration() {
         assert_eq!((*raw).calls.lock().unwrap()[0].0, OP_GET_ALL_SETTINGS);
     }
 }
+
+#[test]
+fn get_all_settings_transfers_bstrs_and_publishes_only_complete_arrays() {
+    use xtfmsg::fixture::{as_obj, client_session};
+    let _g = guard();
+    unsafe {
+        for (records, expected) in [
+            (r#"[{"SettingName":"A","SettingValue":"α"},{"SettingName":"B","SettingValue":""}]"#, Some(2)),
+            ("[]", Some(0)),
+            (r#"[{"SettingName":"A","SettingValue":"α"},{"SettingName":"B"}]"#, None),
+        ] {
+            let data = format!(r#"{{"SettingsArrayObject":{{"AllSettings":{records}}}}}"#);
+            let session = Com(as_obj(client_session(S_OK, S_OK, 0, Some(&data))));
+            let mut rows = core::ptr::null_mut();
+            let mut count = u32::MAX;
+            let hr = client::get_all_settings(session.get(), &mut rows, &mut count);
+            drop(session);
+            if let Some(expected) = expected {
+                assert_eq!((hr, count), (S_OK, expected));
+                for index in 0..count as usize {
+                    let [name, value] = *rows.add(index);
+                    assert_eq!((from_wide(name), from_wide(value)), [("A".into(), "α".into()), ("B".into(), "".into())][index]);
+                    SysFreeString(name);
+                    SysFreeString(value);
+                }
+                client::CoTaskMemFree(rows.cast());
+            } else {
+                assert!(hr < 0);
+                assert!(rows.is_null());
+                assert_eq!(count, u32::MAX);
+            }
+        }
+    }
+}

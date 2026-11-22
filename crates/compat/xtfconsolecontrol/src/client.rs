@@ -157,6 +157,18 @@ pub unsafe fn query_connected_standby(session: Obj, in_standby: *mut i32, instan
     query_connected_standby_ex(session, in_standby, instant_on, &mut 0)
 }
 
+unsafe fn settings_array(session: Obj) -> Result<(Com, u32, HRESULT), HRESULT> {
+    let reply = request_status(session, crate::OP_GET_ALL_SETTINGS)?;
+    let mut settings = Com::null();
+    check(json::get_object(reply.get(), wide("SettingsArrayObject").as_ptr(), settings.put()))?;
+    let mut entries = Com::null();
+    check(json::get_array(settings.get(), wide("AllSettings").as_ptr(), entries.put()))?;
+    let mut count = 0;
+    let hr = xtfmsg::com::array::get_count(entries.get(), &mut count);
+    check(hr)?;
+    Ok((entries, count, hr))
+}
+
 // ConsoleControlClient::GetConfigSettings (19041 RVA 0x1f60), after opening the session.
 pub unsafe fn get_config_settings(session: Obj, callback: Obj) -> HRESULT {
     if callback.is_null() {
@@ -166,14 +178,7 @@ pub unsafe fn get_config_settings(session: Obj, callback: Obj) -> HRESULT {
         use xtfmsg::com::{array, slot};
         use crate::op::{Bstr, get_string};
 
-        let reply = request_status(session, crate::OP_GET_ALL_SETTINGS)?;
-        let mut settings = Com::null();
-        check(json::get_object(reply.get(), wide("SettingsArrayObject").as_ptr(), settings.put()))?;
-        let mut entries = Com::null();
-        check(json::get_array(settings.get(), wide("AllSettings").as_ptr(), entries.put()))?;
-        let mut count = 0;
-        let mut hr = array::get_count(entries.get(), &mut count);
-        check(hr)?;
+        let (entries, count, mut hr) = settings_array(session)?;
         let visit: unsafe extern "system" fn(Obj, *const [*const u16; 2]) -> HRESULT =
             core::mem::transmute(slot(callback, 3));
         for index in 0..count {
@@ -189,6 +194,58 @@ pub unsafe fn get_config_settings(session: Obj, callback: Obj) -> HRESULT {
                 break;
             }
         }
+        Ok(hr)
+    })();
+    result.unwrap_or_else(|hr| hr)
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoTaskMemAlloc(bytes: usize) -> Obj;
+    pub(crate) fn CoTaskMemFree(ptr: Obj);
+}
+
+// GetAllSettings (19041 RVA 0x2400) transfers both BSTRs in each pair
+// and the COM task-allocated outer array to the caller on success.
+pub unsafe fn get_all_settings(session: Obj, out: *mut *mut [BSTR; 2], len: *mut u32) -> HRESULT {
+    use crate::op::{get_string, Bstr};
+    use xtfmsg::com::array;
+
+    if out.is_null() || len.is_null() {
+        return E_POINTER;
+    }
+    let result = (|| {
+        let (entries, count, mut hr) = settings_array(session)?;
+        let bytes = (count as usize).checked_mul(core::mem::size_of::<[BSTR; 2]>()).ok_or(E_OUTOFMEMORY)?;
+        let rows = CoTaskMemAlloc(bytes).cast::<[BSTR; 2]>();
+        if rows.is_null() && count != 0 {
+            return Err(E_OUTOFMEMORY);
+        }
+        for index in 0..count {
+            let row = (|| {
+                let mut entry = Com::null();
+                check(array::get_object(entries.get(), index, entry.put()))?;
+                let mut name = Bstr::null();
+                let mut value = Bstr::null();
+                check(get_string(entry.get(), "SettingName", &mut name))?;
+                hr = get_string(entry.get(), "SettingValue", &mut value);
+                check(hr)?;
+                Ok([name.detach(), value.detach()])
+            })();
+            match row {
+                Ok(pair) => rows.add(index as usize).write(pair),
+                Err(error) => {
+                    for prior in core::slice::from_raw_parts(rows, index as usize) {
+                        SysFreeString(prior[0]);
+                        SysFreeString(prior[1]);
+                    }
+                    CoTaskMemFree(rows.cast());
+                    return Err(error);
+                }
+            }
+        }
+        *out = rows;
+        *len = count;
         Ok(hr)
     })();
     result.unwrap_or_else(|hr| hr)

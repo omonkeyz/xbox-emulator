@@ -31,6 +31,10 @@ impl Bstr {
         }
     }
 
+    pub fn detach(&mut self) -> BSTR {
+        core::mem::replace(&mut self.0, core::ptr::null_mut())
+    }
+
     pub fn ptr(&self) -> *const u16 {
         self.0
     }
