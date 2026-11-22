@@ -1355,22 +1355,22 @@ fn bytes_of(b: &[u32]) -> Vec<u8> {
 }
 
 #[test]
-fn mubuf_scalar_byte_offset() {
+fn mubuf_scalar_offset() {
     let mut cases = Vec::new();
     let source = bytes_of(&BUF);
+    let with_soffset = |opcode, immediate, offen| {
+        let mut words = mubuf(opcode, immediate, offen, false, false, 1, 4);
+        words[1] = (words[1] & 0x00ff_ffff) | (12 << 24);
+        words
+    };
     for (scalar, vector, immediate, offen) in [(5, 0, 0, false), (0, 4, 2, true), (8, 3, 2, true)] {
         let offset = (scalar + vector + immediate) as usize;
         let mut pre = Prog::new();
         pre.sv(12, scalar).vv(1, vector).vv(4, 0xab);
-        let with_soffset = |opcode| {
-            let mut words = mubuf(opcode, immediate, offen, false, false, 1, 4);
-            words[1] = (words[1] & 0x00ff_ffff) | (12 << 24);
-            words
-        };
         cases.push(BufCase {
             m: "buffer_load_ubyte",
             pre: pre.w.clone(),
-            op: with_soffset(0x08),
+            op: with_soffset(0x08, immediate, offen),
             rt: vec![u32::from(source[offset])],
             mem: vec![],
         });
@@ -1380,9 +1380,29 @@ fn mubuf_scalar_byte_offset() {
         cases.push(BufCase {
             m: "buffer_store_byte",
             pre: pre.w,
-            op: with_soffset(0x18),
+            op: with_soffset(0x18, immediate, offen),
             rt: vec![],
             mem: vec![(word, expected), (word ^ 1, BUF[word ^ 1])],
+        });
+    }
+    let value = 0x1234_56ab;
+    for (scalar, vector, immediate, offen) in [(8, 0, 0, false), (0, 4, 4, true), (8, 4, 4, true)] {
+        let word = ((scalar + vector + immediate) / 4) as usize;
+        let mut pre = Prog::new();
+        pre.sv(12, scalar).vv(1, vector).vv(4, value);
+        cases.push(BufCase {
+            m: "buffer_load_dword",
+            pre: pre.w.clone(),
+            op: with_soffset(0x0c, immediate, offen),
+            rt: vec![BUF[word]],
+            mem: vec![],
+        });
+        cases.push(BufCase {
+            m: "buffer_store_dword",
+            pre: pre.w,
+            op: with_soffset(0x1c, immediate, offen),
+            rt: vec![],
+            mem: vec![(word, value), (word ^ 1, BUF[word ^ 1])],
         });
     }
     run_buf_cases("mubuf_soffset", &cases);
