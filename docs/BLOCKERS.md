@@ -822,7 +822,8 @@ elease`, the log shows one install and every interface is emulated.
     - On WARP it checks the counter total, that inactive lanes are untouched, and that no other GDS dword changes.
     - With TOMBOX_EXEC_HW=1 on the RTX 5060 (wave32) it also checks the per-wave return values.
   - Limits: a wave64 source is refused, because it spans two host waves. The LDS (GDS=0) form is not lowered.
-- OPEN, ds_gws_init / ds_gws_sema_v / ds_gws_sema_br / ds_gws_sema_p / ds_gws_sema_release_all / ds_gws_barrier: these remain translator refusals.
+- VERIFIED for Windows translation, ds_gws_init / ds_gws_sema_v / ds_gws_sema_br for straight-line wave32 compute shaders. The first active lane supplies the initial or bulk-release count. A GDS readback test covers inactive waves, partial waves, multidimensional groups, 12-bit wrap and independent resources. Mesa's GFX103 register description places GDS_GWS_RESOURCE.COUNTER at bits 1–12. Native Xbox verification remains open.
+- OPEN, ds_gws_sema_p / ds_gws_sema_release_all / ds_gws_barrier remain translator refusals.
   - The XML describes them as GWS resources that queue the wave until a semaphore release or a barrier count is reached, across waves and thread groups.
   - D3D12 has no cross-group blocking primitive and no forward-progress guarantee for spin waits, so a lowering could hang or would only appear to work.
   - No title shader uses them (mnemonics.txt: 0 uses).

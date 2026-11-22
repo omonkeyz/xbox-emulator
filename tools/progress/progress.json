@@ -4,6 +4,9 @@
     "evidence": "v_permlane16_b32 and v_permlanex16_b32 are verified on real hardware (RTX 5060, wave32) with TOMBOX_EXEC_HW=1: tests/exec_vop/lanes.rs permlane_lanes, 128 of 128 32-lane cases bit-exact against the ISA model; WARP runs 4-lane waves so it cannot execute them | 11-21 independent verify: 95 mnemonics (DS LDS atomics ext, flat/global byte/short/d16_hi, tbuffer d16, ds_append/consume, VOPC i16/u16/i64/u64/class_f16) not refuted; 10 tests pass on WARP, GDS also on RTX 5060. Caveats: i64/u64 compare literal extension rule unbacked by an in-repo source; tbuffer d16 refuses UNORM/SNORM and 32-bit-component formats; ds_append/consume LDS form unlowered, wave64 refused, relies on 32-lane host waves. | 11-21 batched ISA sweep (tests/isa_sweep.rs, CPU reference models from ISA semantics) passes 541/541 on RTX 5060; independent verifier hand-checked 25 references, injection test fails as expected, could not refute. Added 169 mnemonics. Held back: s_bfe_i32, s_bfe_i64, s_bfe_u32, s_bfe_u64, v_cvt_norm_i16_f16, v_cvt_norm_u16_f16, v_cvt_pknorm_i16_f16, v_cvt_pknorm_i16_f32, v_cvt_pknorm_u16_f16, v_cvt_pknorm_u16_f32 (s_bfe width>=32 rule disputed: translator returns 0, reference returns S0; cvt_pknorm exact rounding not confirmed against silicon).",
     "updated": "2026-11-21",
     "mnemonics": [
+      "ds_gws_init",
+      "ds_gws_sema_v",
+      "ds_gws_sema_br",
       "tbuffer_load_format_x",
       "tbuffer_load_format_xy",
       "tbuffer_load_format_xyz",

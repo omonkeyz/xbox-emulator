@@ -6377,6 +6377,10 @@ impl<'a> Emitter<'a> {
         if let Some(x) = self.xlane_header()? {
             let _ = writeln!(h, "{x}");
         }
+        if self.body.contains("tb_gws_counter_first") {
+            let [_, x, y, z] = ex.isa_preamble;
+            let _ = writeln!(h, "groupshared uint tb_gws_counter_first[{}];", (x * y * z).div_ceil(32));
+        }
         if let Some(x) = gds::gds_header(&self.body) {
             let _ = writeln!(h, "{x}");
         }
