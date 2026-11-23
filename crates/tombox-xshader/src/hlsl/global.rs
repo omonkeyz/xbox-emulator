@@ -3,8 +3,8 @@ use crate::global_abi::{TB_GLOBAL_FAULT_UAV, TB_GLOBAL_SPACE, TB_GLOBAL_WINDOWS}
 use crate::rdna2::{Enc, Insn, Opnd};
 
 pub const HELPERS: &str = r#"cbuffer TbGlobal : register(bCBV, spaceSPACE) { uint4 tb_gwin[NWIN]; uint4 tb_msin; };
-RWByteAddressBuffer tb_gw0 : register(u0, spaceSPACE);
-RWByteAddressBuffer tb_gw1 : register(u1, spaceSPACE);
+ByteAddressBuffer tb_gr[NWIN] : register(t0, spaceSPACE);
+RWByteAddressBuffer tb_gw[NWIN] : register(u0, spaceSPACE);
 RWByteAddressBuffer tb_gfault : register(uFAULT, spaceSPACE);
 uint2 tb_gva(uint lo, uint hi, uint add, int off) {
     uint a = lo + add;
@@ -14,7 +14,8 @@ uint2 tb_gva(uint lo, uint hi, uint add, int off) {
     return uint2(b, hi + c + d);
 }
 uint tb_gwhich(uint2 va, out uint o) {
-    [unroll] for (uint i = 0u; i < NWINu; i++) {
+    uint nwin = tb_msin.z != 0u ? min(tb_msin.z, NWINu) : NWINu;
+    for (uint i = 0u; i < nwin; i++) {
         uint2 b = tb_gwin[i].xy;
         uint lo = va.x - b.x;
         uint hi = va.y - b.y - (va.x < b.x ? 1u : 0u);
@@ -29,8 +30,12 @@ void tb_gmiss(uint2 va) {
     if (p == 0u) tb_gfault.Store2(4, va);
 }
 uint tb_gload_al(uint w, uint o) {
-    if (w == 0u) return tb_gw0.Load(o);
-    return tb_gw1.Load(o);
+    bool rw = (tb_gwin[w].w & 1u) != 0u;
+#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6
+    return rw ? tb_gw[NonUniformResourceIndex(w)].Load(o) : tb_gr[NonUniformResourceIndex(w)].Load(o);
+#else
+    return rw ? tb_gw[w].Load(o) : tb_gr[w].Load(o);
+#endif
 }
 uint tb_gmem_load(uint2 va, uint nbytes) {
     uint2 a = tb_gva(va.x & ~3u, va.y, 0u, 0);
@@ -50,18 +55,27 @@ void tb_gstore_bits(uint2 va, uint v, uint nbytes) {
     uint2 a = tb_gva(va.x & ~3u, va.y, 0u, 0);
     uint o;
     uint w = tb_gwhich(a, o);
-    if (w == 0xffffffffu) { tb_gmiss(va); return; }
+    if (w == 0xffffffffu || (tb_gwin[w].w & 1u) == 0u) { tb_gmiss(va); return; }
     uint sh = (va.x & 3u) * 8u;
     uint m = (nbytes >= 4u ? 0xffffffffu : ((1u << (nbytes * 8u)) - 1u)) << sh;
     uint p;
     if (m == 0xffffffffu) {
-        if (w == 0u) tb_gw0.Store(o, v); else tb_gw1.Store(o, v);
+#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6
+        tb_gw[NonUniformResourceIndex(w)].Store(o, v);
+#else
+        tb_gw[w].Store(o, v);
+#endif
         return;
     }
     uint keep = ~m;
     uint put = (v << sh) & m;
-    if (w == 0u) { tb_gw0.InterlockedAnd(o, keep, p); tb_gw0.InterlockedOr(o, put, p); }
-    else { tb_gw1.InterlockedAnd(o, keep, p); tb_gw1.InterlockedOr(o, put, p); }
+#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6
+    tb_gw[NonUniformResourceIndex(w)].InterlockedAnd(o, keep, p);
+    tb_gw[NonUniformResourceIndex(w)].InterlockedOr(o, put, p);
+#else
+    tb_gw[w].InterlockedAnd(o, keep, p);
+    tb_gw[w].InterlockedOr(o, put, p);
+#endif
 }
 void tb_gmem_store_n(uint2 va, uint v, uint nbytes) {
     uint sh = (va.x & 3u) * 8u;

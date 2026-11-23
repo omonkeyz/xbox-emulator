@@ -45,6 +45,7 @@ pub unsafe fn install(xbox_vt: &[AtomicUsize], real_vt: *const usize) {
     crate::cl_ext::install(xbox_vt);
     crate::cl_fw::install_null_slots(xbox_vt);
     crate::gds::install(xbox_vt);
+    crate::global_bind::install(xbox_vt);
     crate::centroid_bind::install(xbox_vt);
     let prev_close = xbox_vt[9].load(Ordering::Relaxed);
     REAL_CLOSE.store(if prev_close != 0 { prev_close } else { *real_vt.add(9) }, Ordering::Relaxed);
@@ -108,6 +109,7 @@ pub unsafe fn dump_device_messages(dev: *mut c_void, tag: &str) {
 unsafe extern "system" fn close_x(this: *mut c_void) -> i32 {
     let f: unsafe extern "system" fn(*mut c_void) -> i32 = core::mem::transmute(REAL_CLOSE.load(Ordering::Relaxed));
     crate::gds::on_close(this);
+    crate::global_bind::on_close(this);
     crate::centroid_bind::on_close(this);
     let hr = f(this);
     crate::ecl_probe::on_close(this, hr);

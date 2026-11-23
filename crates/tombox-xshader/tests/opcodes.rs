@@ -616,6 +616,18 @@ fn bvh_intersect_ray_reads_guest_bvh() {
     for (label, body, expect) in cases {
         check(label, &program(&body), None, &expect);
     }
+    let combined = program(&[
+        0xdc30_8000, 0x057d_0001,
+        0xf19c_0f01, 0x0000_1401,
+        vop1(1, 0, v(20)),
+        vop1(1, 1, v(5)),
+    ]);
+    let ex = shader(&combined, None);
+    let t = translate(&ex).expect("translate a shader with a global load and a BVH intersect");
+    assert!(t.needs_global);
+    assert!(!t.needs_gmem);
+    assert!(t.hlsl.contains("tb_bvh_load1(uint64_t va) { return tb_gmem_load("), "{}", t.hlsl);
+    assert!(!t.hlsl.contains("space4000001"), "{}", t.hlsl);
 }
 
 fn sopc_eq(a: u32, b: u32) -> u32 {

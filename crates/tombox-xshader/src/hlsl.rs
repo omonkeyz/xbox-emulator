@@ -648,28 +648,38 @@ fn bl_name(table: u8, key: usize) -> String {
     }
 }
 
-const BVH_HELPERS: &str = r#"ByteAddressBuffer tb_gmem : register(t0, spaceTB_GMEM_SPACE);
+const BVH_GMEM_DECL: &str = r#"ByteAddressBuffer tb_gmem : register(t0, spaceTB_GMEM_SPACE);
 cbuffer TbGmem : register(b0, spaceTB_GMEM_SPACE) { uint4 tb_gmem_base; };
 uint tb_gmoff(uint64_t va) { return (uint)(va - ((((uint64_t)tb_gmem_base.y) << 32) | (uint64_t)tb_gmem_base.x)); }
-float3 tb_gm3(uint o) { return asfloat(tb_gmem.Load3(o)); }
+uint tb_bvh_load1(uint64_t va) { return tb_gmem.Load(tb_gmoff(va)); }
+uint3 tb_bvh_load3(uint64_t va) { return tb_gmem.Load3(tb_gmoff(va)); }
+uint4 tb_bvh_load4(uint64_t va) { return tb_gmem.Load4(tb_gmoff(va)); }
+"#;
+
+const BVH_GLOBAL_DECL: &str = r#"uint tb_bvh_load1(uint64_t va) { return tb_gmem_load(uint2((uint)va, (uint)(va >> 32)), 4u); }
+uint3 tb_bvh_load3(uint64_t va) { return uint3(tb_bvh_load1(va), tb_bvh_load1(va + 4ULL), tb_bvh_load1(va + 8ULL)); }
+uint4 tb_bvh_load4(uint64_t va) { return uint4(tb_bvh_load1(va), tb_bvh_load1(va + 4ULL), tb_bvh_load1(va + 8ULL), tb_bvh_load1(va + 12ULL)); }
+"#;
+
+const BVH_HELPERS: &str = r#"float3 tb_bvh_f3(uint64_t va) { return asfloat(tb_bvh_load3(va)); }
 void tb_bvh_swap(inout float da, inout uint ia, inout float db, inout uint ib) { if (db < da) { float tf = da; da = db; db = tf; uint ti = ia; ia = ib; ib = ti; } }
 uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir, float3 inv) {
     uint64_t base = (((uint64_t)d.x) << 8) | (((uint64_t)(d.y & 0xffu)) << 40);
     uint ty = (uint)node & 7u;
-    uint off = tb_gmoff(base + ((node >> 3) << 6));
+    uint64_t addr = base + ((node >> 3) << 6);
     float inf = asfloat(0x7f800000u);
     if (ty == 4u || ty == 5u) {
         inv = clamp(inv, -asfloat(0x7f7fffffu), asfloat(0x7f7fffffu));
-        uint4 ch = tb_gmem.Load4(off);
+        uint4 ch = tb_bvh_load4(addr);
         uint id[4] = { ch.x, ch.y, ch.z, ch.w };
         float dist[4];
         [unroll] for (uint i = 0u; i < 4u; i++) {
             float3 mn, mx;
             if (ty == 5u) {
-                mn = tb_gm3(off + 16u + 24u * i);
-                mx = tb_gm3(off + 28u + 24u * i);
+                mn = tb_bvh_f3(addr + (uint64_t)(16u + 24u * i));
+                mx = tb_bvh_f3(addr + (uint64_t)(28u + 24u * i));
             } else {
-                uint3 w = tb_gmem.Load3(off + 16u + 12u * i);
+                uint3 w = tb_bvh_load3(addr + (uint64_t)(16u + 12u * i));
                 mn = float3(f16tof32(w.x), f16tof32(w.x >> 16), f16tof32(w.y));
                 mx = float3(f16tof32(w.y >> 16), f16tof32(w.z), f16tof32(w.z >> 16));
             }
@@ -691,8 +701,8 @@ uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir,
         return uint4(id[0], id[1], id[2], id[3]);
     }
     if (ty < 4u) {
-        float3 v0 = tb_gm3(off), v1 = tb_gm3(off + 12u), v2 = tb_gm3(off + 24u);
-        uint tri = tb_gmem.Load(off + 48u);
+        float3 v0 = tb_bvh_f3(addr), v1 = tb_bvh_f3(addr + 12ULL), v2 = tb_bvh_f3(addr + 24ULL);
+        uint tri = tb_bvh_load1(addr + 48ULL);
         float3 ad = abs(dir);
         uint kz = (ad.x >= ad.y && ad.x >= ad.z) ? 0u : (ad.y >= ad.z ? 1u : 2u);
         uint kx = kz == 2u ? 0u : kz + 1u;
@@ -1378,7 +1388,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh && !em.uses_global, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
 }
 
 impl<'a> Emitter<'a> {
@@ -6987,7 +6997,12 @@ impl<'a> Emitter<'a> {
             h.push_str(&global::helpers());
         }
         if self.uses_bvh {
-            h.push_str(&BVH_HELPERS.replace("TB_GMEM_SPACE", &TB_GMEM_SPACE.to_string()));
+            if self.uses_global {
+                h.push_str(BVH_GLOBAL_DECL);
+            } else {
+                h.push_str(&BVH_GMEM_DECL.replace("TB_GMEM_SPACE", &TB_GMEM_SPACE.to_string()));
+            }
+            h.push_str(BVH_HELPERS);
         }
         for id in &self.hw_regs {
             let _ = writeln!(h, "static uint tb_hw{id} = {:#x}u;", if *id == 1 { 0xf0u32 } else { 0 });

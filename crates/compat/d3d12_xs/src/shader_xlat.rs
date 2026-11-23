@@ -1310,11 +1310,12 @@ mod tests {
             let vt: &'static [usize; 3] = Box::leak(Box::new([qi, short_ref as usize, short_ref as usize]));
             let p = Box::leak(Box::new(vt.as_ptr())) as *mut *const usize as *mut c_void;
             let before = SHORT_QI.load(Ordering::SeqCst);
+            let root_check = !crate::device_wrap::root_signature_hooked() as usize;
             assert_eq!(unsafe { query_typed_atomic64(p) }, None);
             unsafe { probe_typed_atomic64(p) };
             let w = crate::device_wrap::wrap_device(p);
             assert!(!w.is_null());
-            assert_eq!(SHORT_QI.load(Ordering::SeqCst) - before, 3);
+            assert_eq!(SHORT_QI.load(Ordering::SeqCst) - before, 3 + root_check);
         }
         assert_eq!(unsafe { query_typed_atomic64(core::ptr::null_mut()) }, None);
     }

@@ -1,5 +1,8 @@
 use super::*;
-use tombox_xshader::global_abi::{fault_of, window_cb, Window, TB_GLOBAL_SPACE};
+use tombox_xshader::global_abi::{
+    fault_of, window_cb_flags, Window, TB_GLOBAL_CB_BYTES, TB_GLOBAL_FAULT_OFFSET, TB_GLOBAL_SPACE, TB_GLOBAL_SRV_OFFSET,
+    TB_GLOBAL_TABLE_DESCRIPTORS, TB_GLOBAL_UAV_OFFSET, TB_GLOBAL_WINDOWS,
+};
 
 fn g(op: u32, seg: u32, off: i32, addr: u32, data: u32, saddr: u32, vdst: u32) -> [u32; 2] {
     [0xdc00_0000 | (op << 18) | (seg << 14) | (off as u32 & 0xfff), addr | (data << 8) | (saddr << 16) | (vdst << 24)]
@@ -38,12 +41,17 @@ fn prog() -> Vec<u32> {
     p.raw(&[vop2(0x1a, 10, ic(3), 0)]);
     p.raw(&g(0x1d, 2, 0, 10, 2, 26, 0));
     p.raw(&g(0x1c, 2, 0, 1, 2, 24, 0));
+    p.raw(&g(0x1c, 2, 0, 1, 2, 22, 0));
     let mut w = p.w;
     w.push(S_ENDPGM);
     w
 }
 
 unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), String> {
+    unsafe { run_with(words, false) }
+}
+
+unsafe fn run_with(words: &[u32], ro1: bool) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), String> {
     let ex = cs_extract(words, 64);
     let t = translate(&ex)?;
     if !t.needs_global {
@@ -53,7 +61,11 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
     let m = CTX.get_or_init(|| Mutex::new(ctx_new()));
     let c = m.lock().unwrap_or_else(|e| e.into_inner());
     let g = &c.gpu;
-    let blob = ser_ranges(&[vec![[2, 1, 0, TB_GLOBAL_SPACE, 0xffff_ffff], [1, 3, 0, TB_GLOBAL_SPACE, 0xffff_ffff]]])?;
+    let blob = ser_ranges(&[vec![
+        [2, 1, 0, TB_GLOBAL_SPACE, 0xffff_ffff],
+        [0, TB_GLOBAL_WINDOWS as u32, 0, TB_GLOBAL_SPACE, 0xffff_ffff],
+        [1, (TB_GLOBAL_WINDOWS + 1) as u32, 0, TB_GLOBAL_SPACE, 0xffff_ffff],
+    ]])?;
     let mut rs: *mut c_void = core::ptr::null_mut();
     let hr = vcall!(g.device, 16, fn(u32, *const u8, usize, *const Guid, *mut *mut c_void) -> i32, 0, blob.as_ptr(), blob.len(), &d3d::IID_ROOTSIG, &mut rs);
     if hr < 0 {
@@ -69,11 +81,29 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
         d3d::release(rs);
         return Err(format!("CreateComputePipelineState hr={:#010x}{}\n{}", hr as u32, g.messages(), t.hlsl));
     }
-    let (vh, vcpu, vgpu, vinc) = g.heap(0, 4, true)?;
+    let (vh, vcpu, vgpu, vinc) = g.heap(0, TB_GLOBAL_TABLE_DESCRIPTORS as u32, true)?;
     let sizes = [W0.size as u64, W1.size as u64, 256u64];
+    let slots = [TB_GLOBAL_UAV_OFFSET, TB_GLOBAL_UAV_OFFSET + 1, TB_GLOBAL_FAULT_OFFSET];
     let init: [Vec<u32>; 3] = [vec![0; W0.size as usize / 4], (0..W1.size as usize / 4).map(m1).collect(), vec![0; 64]];
     let mut kill = vec![pso, rs, vh];
     let mut bufs = Vec::new();
+    let mut null_sd = [0u8; 40];
+    null_sd[0..4].copy_from_slice(&39u32.to_le_bytes());
+    null_sd[4..8].copy_from_slice(&1u32.to_le_bytes());
+    null_sd[8..12].copy_from_slice(&0x1688u32.to_le_bytes());
+    null_sd[24..28].copy_from_slice(&1u32.to_le_bytes());
+    null_sd[32..36].copy_from_slice(&1u32.to_le_bytes());
+    for slot in 0..TB_GLOBAL_WINDOWS {
+        vcall!(g.device, 18, fn(*mut c_void, *const u8, usize) -> (), core::ptr::null_mut(), null_sd.as_ptr(), vcpu + (TB_GLOBAL_SRV_OFFSET + slot) * vinc);
+    }
+    let mut null_ud = [0u8; 40];
+    null_ud[0..4].copy_from_slice(&39u32.to_le_bytes());
+    null_ud[4..8].copy_from_slice(&1u32.to_le_bytes());
+    null_ud[16..20].copy_from_slice(&1u32.to_le_bytes());
+    null_ud[32..36].copy_from_slice(&1u32.to_le_bytes());
+    for slot in (if ro1 { 1 } else { 2 })..TB_GLOBAL_WINDOWS {
+        vcall!(g.device, 19, fn(*mut c_void, *mut c_void, *const u8, usize) -> (), core::ptr::null_mut(), core::ptr::null_mut(), null_ud.as_ptr(), vcpu + (TB_GLOBAL_UAV_OFFSET + slot) * vinc);
+    }
     for k in 0..3 {
         let b = g.buffer(sizes[k], 1, d3d::COPY_DEST, true)?;
         let up = g.buffer(sizes[k], 2, d3d::GENERIC_READ, false)?;
@@ -86,17 +116,23 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
         ud[4..8].copy_from_slice(&1u32.to_le_bytes());
         ud[16..20].copy_from_slice(&((sizes[k] / 4) as u32).to_le_bytes());
         ud[32..36].copy_from_slice(&1u32.to_le_bytes());
-        vcall!(g.device, 19, fn(*mut c_void, *mut c_void, *const u8, usize) -> (), b, core::ptr::null_mut(), ud.as_ptr(), vcpu + (1 + k) * vinc);
+        if k == 1 && ro1 {
+            let mut sd = null_sd;
+            sd[24..28].copy_from_slice(&((sizes[k] / 4) as u32).to_le_bytes());
+            vcall!(g.device, 18, fn(*mut c_void, *const u8, usize) -> (), b, sd.as_ptr(), vcpu + (TB_GLOBAL_SRV_OFFSET + 1) * vinc);
+        } else {
+            vcall!(g.device, 19, fn(*mut c_void, *mut c_void, *const u8, usize) -> (), b, core::ptr::null_mut(), ud.as_ptr(), vcpu + slots[k] * vinc);
+        }
         kill.extend([b, up, rb]);
         bufs.push((b, up, rb));
     }
-    let cb = g.buffer(256, 2, d3d::GENERIC_READ, false)?;
+    let cb = g.buffer(TB_GLOBAL_CB_BYTES as u64, 2, d3d::GENERIC_READ, false)?;
     kill.push(cb);
-    let cbw = window_cb(&[W0, W1], [0, 0]);
+    let cbw = window_cb_flags(&[(W0, true), (W1, !ro1)], [0, 0]);
     let mut cbd: Vec<u8> = cbw.iter().flat_map(|w| w.to_le_bytes()).collect();
-    cbd.resize(256, 0);
+    cbd.resize(TB_GLOBAL_CB_BYTES, 0);
     Gpu::map_write(cb, &cbd);
-    let cv = [Gpu::gpu_va(cb), 256u64];
+    let cv = [Gpu::gpu_va(cb), TB_GLOBAL_CB_BYTES as u64];
     vcall!(g.device, 17, fn(*const u64, usize) -> (), cv.as_ptr(), vcpu);
     drop(c);
     let mut c = m.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,7 +140,7 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
     let l = c.gpu.list;
     for (k, &(b, up, _)) in bufs.iter().enumerate() {
         vcall!(l, 15, fn(*mut c_void, u64, *mut c_void, u64, u64) -> (), b, 0, up, 0, sizes[k]);
-        c.gpu.barrier(b, d3d::COPY_DEST, 8);
+        c.gpu.barrier(b, d3d::COPY_DEST, if k == 1 && ro1 { 0x40 } else { 8 });
     }
     let heaps = [vh];
     vcall!(l, 28, fn(u32, *const *mut c_void) -> (), 1, heaps.as_ptr());
@@ -113,7 +149,7 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
     vcall!(l, 25, fn(*mut c_void) -> (), pso);
     vcall!(l, 14, fn(u32, u32, u32) -> (), 1, 1, 1);
     for (k, &(b, _, rb)) in bufs.iter().enumerate() {
-        c.gpu.barrier(b, 8, d3d::COPY_SOURCE);
+        c.gpu.barrier(b, if k == 1 && ro1 { 0x40 } else { 8 }, d3d::COPY_SOURCE);
         vcall!(l, 15, fn(*mut c_void, u64, *mut c_void, u64, u64) -> (), rb, 0, b, 0, sizes[k]);
     }
     let r = c.gpu.submit();
@@ -131,7 +167,7 @@ unsafe fn run(words: &[u32]) -> Result<(Vec<u32>, Vec<u32>, [u32; 4], String), S
 #[test]
 fn global_windows_load_store_and_fault() {
     let words = prog();
-    let (w0, w1, fault, hlsl) = unsafe { run(&words) }.unwrap_or_else(|e| panic!("{e}"));
+    let (w0, w1, fault, hlsl) = unsafe { run_with(&words, true) }.unwrap_or_else(|e| panic!("{e}"));
     let mut bad = Vec::new();
     let mut chk = |what: &str, k: usize, got: u32, want: u32| {
         if got != want {
@@ -160,8 +196,10 @@ fn global_windows_load_store_and_fault() {
         chk("window1 untouched", k, x, m1(k));
     }
     let f = fault_of(&fault);
-    chk("fault count", 0, f.count, 64);
-    if !(MISS..MISS + 256).contains(&f.first_va) || f.first_va % 4 != 0 {
+    chk("fault count", 0, f.count, 128);
+    let in_miss = (MISS..MISS + 256).contains(&f.first_va);
+    let in_ro = (W1.base..W1.base + 256).contains(&f.first_va);
+    if !(in_miss || in_ro) || f.first_va % 4 != 0 {
         bad.push(format!("fault first_va {:#x}", f.first_va));
     }
     assert!(bad.is_empty(), "{}\n{hlsl}", bad.join("\n"));
