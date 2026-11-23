@@ -256,3 +256,12 @@ dword, then ds_write_b16_d16_hi at byte offset 0 or 2, and reads the dword back.
     format stores, 3- and 1-component formats: only the format's components are written
     s_bfe width >= 32: S0 >> offset (all remaining bits)
     v_fma*_f16 with a signalling NaN operand (IEEE mode off): the NaN comes back unquieted
+
+image_probe.py (image atomics): each workgroup fills an 8-texel linear R32_UINT image (T# built in
+s[12:19], dim 2D, height 1) with the initial texels of exec_mem::mimg::image_mimg_atomics, runs one
+image_atomic_* (with and without glc) and reads the texels back.
+
+    python3 image_probe.py k.s cases.in       (then assemble as above)
+    ./verify_runner k.co ia_add_1 cases.in rec/add_1.bin 8 256                       (each ia_<op>_<glc> kernel)
+    python3 image_probe.py check rec                                                (208/208 on gfx1036)
+    python3 image_probe.py rust rec crates/tombox-xshader/tests/exec_mem/mimg_rdna2.rs "<machine>"

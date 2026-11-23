@@ -10,6 +10,7 @@ mod exp;
 mod flat;
 mod global;
 mod mimg;
+mod mimg_rdna2;
 mod mtbuf;
 mod mtbuf_hw;
 mod trans16;

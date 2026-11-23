@@ -625,3 +625,21 @@ fn image_mimg_unorm_a16_and_refusals() {
         assert!(err.contains(needle), "expected {needle} in error: {err}");
     }
 }
+
+#[test]
+fn image_mimg_atomics_rdna2_silicon() {
+    let mut cs = Vec::new();
+    for &(m, opc, glc, x, s, cmp, texels, ret) in super::mimg_rdna2::ATOMICS {
+        let dmask = if opc == 0x10 { 0x3 } else { 0x1 };
+        let mut pre = Prog::new();
+        pre.vv(1, x).vv(2, 0).vv(4, s).vv(5, cmp);
+        let mut op = mimg(opc, dmask, 1, 1, 4, 16, 0);
+        if glc {
+            op[0] |= 1 << 13;
+        }
+        let uav = texels.iter().enumerate().map(|(i, &w)| (0usize, i, w)).collect();
+        cs.push(MCase { m, op: op.to_vec(), words: build(&pre, &op, 4, 1, true), env: Env { uav: Some(&IMG_AT), ..Default::default() }, rt: vec![ret], uav, tol: 0.0 });
+    }
+    println!("expected values recorded on {}", super::mimg_rdna2::SOURCE);
+    run_mem_cases("mimg_atomics_rdna2_silicon", &cs);
+}
