@@ -2359,6 +2359,89 @@ fn f16_omod_follows_mode() {
     c.run_both("f16_omod_follows_mode");
 }
 
+fn run_rsrc1(words: &[u32], rsrc1: u32) -> Result<[u32; 4], String> {
+    let t = tombox_xshader::hlsl::translate_with_pgm_rsrc1(&shader(words), None, rsrc1)?;
+    if !t.unknowns.is_empty() {
+        return Err(format!("unknowns reported with a known PGM_RSRC1: {:?}", t.unknowns));
+    }
+    let code = dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("dxc: {e}
+{}", t.hlsl))?;
+    let m = CTX.get_or_init(|| Mutex::new(unsafe { ctx_new() }));
+    let mut c = m.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe { draw(&mut c, &code) }.map_err(|e| format!("{e}
+{}", t.hlsl))
+}
+
+#[test]
+fn f16_omod_follows_initial_mode_from_pgm_rsrc1() {
+    let hw = |id: u32, off: u32, size: u32| (id | (off << 6) | ((size - 1) << 11)) as u16;
+    let om = |op: u32, a: u32, b: u32, omod: u32, clamp: bool| {
+        let mut w = vop3m(op, 12, [v(a), v(b), 0], 0, 0, 0, clamp);
+        w[1] |= omod << 27;
+        w
+    };
+    let ins = [(1, 0x3a00), (2, 0), (3, 0x8000), (4, 0x3e00), (5, 0x3c00)];
+    let prog = |ins: &[(u32, u32)], pre: &[u32], op: &[u32]| -> Vec<u32> {
+        let mut p = Prog::new();
+        p.vv(10, D16).vv(11, 0x5a5a_5a5a);
+        for &(r, val) in ins {
+            p.vv(r, val);
+        }
+        p.raw(pre).raw(op).raw(&[vop1(1, 0, v(12))]);
+        p.words()
+    };
+    let keep16 = 0xf0u32 << 12;
+    let flush16 = 0x30u32 << 12;
+    let rsrc: [(u32, bool); 7] = [
+        (keep16, false),
+        (flush16, true),
+        (flush16 | (1 << 23), false),
+        (flush16 | (1 << 21), true),
+        (flush16 | (1 << 20) | (1 << 22) | 0x3ff, true),
+        (keep16 | (1 << 23), false),
+        (0, true),
+    ];
+    let cases: [(u32, u32, u32, u32, bool, u32, u32); 6] = [
+        (0x132, 1, 2, 2, false, 0x3a00, 0x4200),
+        (0x132, 1, 2, 3, false, 0x3a00, 0x3600),
+        (0x132, 3, 3, 1, false, 0x8000, 0x0000),
+        (0x132, 1, 2, 1, true, 0x3a00, 0x3c00),
+        (0x135, 4, 5, 1, false, 0x3e00, 0x4200),
+        (0x135, 4, 5, 3, true, 0x3c00, 0x3a00),
+    ];
+    let mut fails = Vec::new();
+    let mut n = 0;
+    let mut check = |label: String, words: Vec<u32>, rsrc1: u32, want: u32| {
+        n += 1;
+        match run_rsrc1(&words, rsrc1) {
+            Ok(r) if r[0] == want => {}
+            Ok(r) => fails.push(format!("{label} rsrc1 {rsrc1:#010x}: got {:#x} want {want:#x}", r[0])),
+            Err(e) => fails.push(format!("{label} rsrc1 {rsrc1:#010x}: {}", e.lines().take(3).collect::<Vec<_>>().join(" | "))),
+        }
+    };
+    for (op, a, b, omod, clamp, keep, flushed) in cases {
+        let w = om(op, a, b, omod, clamp);
+        for (r, acts) in rsrc {
+            check(format!("op {op:#x} omod {omod} clamp {clamp}"), prog(&ins, &[], &w), r, if acts { flushed } else { keep });
+        }
+        check(format!("op {op:#x} omod {omod} clamp {clamp} after MODE f16 denormals on"), prog(&ins, &[sopk(0x15, 0, hw(1, 6, 2)), 3], &w), flush16, keep);
+        check(format!("op {op:#x} omod {omod} clamp {clamp} after MODE f16 denormals off"), prog(&ins, &[sopk(0x15, 0, hw(1, 6, 2)), 0], &w), keep16, flushed);
+    }
+    let add32 = [vop2(0x03, 12, v(1), 2)];
+    for (r, want) in [(keep16, 1u32), (0xc0 << 12, 0), (0x30 << 12, 1), (0, 0)] {
+        check("v_add_f32 of a denormal".into(), prog(&[(1, 1), (2, 0)], &[], &add32), r, want);
+    }
+    let t = translate(&shader(&prog(&ins, &[], &om(0x132, 1, 2, 2, false)))).unwrap();
+    assert!(t.unknowns.iter().any(|u| u.starts_with("f16 output modifier at ")), "{:?}", t.unknowns);
+    let t = translate(&shader(&prog(&ins, &[], &om(0x132, 1, 2, 0, true)))).unwrap();
+    assert!(t.unknowns.is_empty(), "{:?}", t.unknowns);
+    let t = translate(&shader(&prog(&[(1, 1), (2, 0)], &[], &add32))).unwrap();
+    assert!(t.unknowns.is_empty(), "{:?}", t.unknowns);
+    println!("f16_omod_follows_initial_mode_from_pgm_rsrc1: {n} cases, {} failing", fails.len());
+    assert!(fails.is_empty(), "{}", fails.join("
+"));
+}
+
 #[test]
 fn pk_int16_constants_and_clamp() {
     let mut c = Cases::new();

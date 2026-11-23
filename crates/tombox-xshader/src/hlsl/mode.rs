@@ -88,7 +88,7 @@ fn write_of(i: &Insn) -> Option<Option<(u32, u32)>> {
     }
 }
 
-pub(super) fn reachable(insns: &[Insn]) -> BTreeSet<u8> {
+pub(super) fn reachable(insns: &[Insn], init: u8) -> BTreeSet<u8> {
     let mut writes = Vec::new();
     for i in insns {
         match write_of(i) {
@@ -97,8 +97,8 @@ pub(super) fn reachable(insns: &[Insn]) -> BTreeSet<u8> {
             None => {}
         }
     }
-    let mut set: BTreeSet<u8> = [0xf0u8].into_iter().collect();
-    let mut work = vec![0xf0u32];
+    let mut set: BTreeSet<u8> = [init].into_iter().collect();
+    let mut work = vec![init as u32];
     while let Some(s) = work.pop() {
         for &(mask, v) in &writes {
             let n = ((s & !mask) | v) as u8;
@@ -110,13 +110,43 @@ pub(super) fn reachable(insns: &[Insn]) -> BTreeSet<u8> {
     set
 }
 
-pub(super) fn analyze(insns: &[Insn]) -> ModeUse {
-    let set = reachable(insns);
+pub(super) fn analyze(insns: &[Insn], init: u8) -> ModeUse {
+    let set = reachable(insns, init);
     let spr = set.iter().any(|&s| s & 3 != 0);
     let spd = set.iter().any(|&s| (s >> 4) & 3 != 3);
     let dpr = set.iter().any(|&s| (s >> 2) & 3 != 0);
     let dpd = set.iter().any(|&s| (s >> 6) & 3 != 3);
     ModeUse { sp: spr || spd, dp: dpr || dpd, spr, spd, dpr, dpd }
+}
+
+pub const MODE_DEFAULT: u32 = 0xf0;
+
+const PGM_RSRC1_AT: &[(u32, usize)] = &[];
+
+pub fn mode_from_pgm_rsrc1(rsrc1: u32) -> u32 {
+    ((rsrc1 >> 12) & 0xff) | (((rsrc1 >> 21) & 1) << 8) | (((rsrc1 >> 23) & 1) << 9)
+}
+
+pub(crate) fn container_pgm_rsrc1(ex: &crate::ShaderExtract) -> Option<u32> {
+    pgm_rsrc1_in(&ex.fssm, ex.isa_offset_in_fssm, PGM_RSRC1_AT)
+}
+
+fn pgm_rsrc1_in(fssm: &[u8], isa_off: usize, table: &[(u32, usize)]) -> Option<u32> {
+    if crate::gcn::is_durango(fssm) {
+        return None;
+    }
+    let rd = |o: usize| fssm.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let sub = rd(0x10)?;
+    let &(_, at) = table.iter().find(|&&(v, _)| v == sub)?;
+    if at + 4 > isa_off {
+        return None;
+    }
+    rd(at)
+}
+
+pub(super) fn f16_omod(i: &Insn) -> bool {
+    let m = i.mnemonic.as_str();
+    i.enc == Enc::Vop3 && i.aux.imm2 != 0 && !m.starts_with("v_cmp") && (m.ends_with("_f16") || m == "v_cvt_f16_f32")
 }
 
 pub(super) fn uses_mad(insns: &[Insn]) -> bool {
@@ -663,5 +693,60 @@ impl Emitter<'_> {
             v.push(e);
         }
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn container(sub: u32, at: usize, rsrc1: u32, len: usize) -> Vec<u8> {
+        let mut b = vec![0u8; len];
+        b[0x10..0x14].copy_from_slice(&sub.to_le_bytes());
+        b[at..at + 4].copy_from_slice(&rsrc1.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn pgm_rsrc1_maps_float_mode_dx10_clamp_and_ieee_into_mode() {
+        assert_eq!(mode_from_pgm_rsrc1(0), 0);
+        assert_eq!(mode_from_pgm_rsrc1(0xf0 << 12), 0xf0);
+        assert_eq!(mode_from_pgm_rsrc1(0x30 << 12), 0x30);
+        assert_eq!(mode_from_pgm_rsrc1(1 << 21), 0x100);
+        assert_eq!(mode_from_pgm_rsrc1(1 << 23), 0x200);
+        assert_eq!(mode_from_pgm_rsrc1((1 << 20) | (1 << 22) | 0xfff | (0xff << 24)), 0);
+        assert_eq!(mode_from_pgm_rsrc1((0x5a << 12) | (1 << 21) | (1 << 23) | 0xfff), 0x35a);
+    }
+
+    #[test]
+    fn pgm_rsrc1_reader_follows_the_location_table_and_refuses_everything_else() {
+        let t: &[(u32, usize)] = &[(5, 0x40), (6, 0x48)];
+        assert_eq!(pgm_rsrc1_in(&container(5, 0x40, 0x0030_0000, 0x100), 0x80, t), Some(0x0030_0000));
+        assert_eq!(pgm_rsrc1_in(&container(6, 0x48, 0x0080_0000, 0x100), 0x80, t), Some(0x0080_0000));
+        assert_eq!(pgm_rsrc1_in(&container(7, 0x40, 0x0030_0000, 0x100), 0x80, t), None);
+        assert_eq!(pgm_rsrc1_in(&container(5, 0x40, 0x0030_0000, 0x100), 0x42, t), None);
+        assert_eq!(pgm_rsrc1_in(&container(5, 0x40, 0x0030_0000, 0x44), 0x200, t), Some(0x0030_0000));
+        assert_eq!(pgm_rsrc1_in(&[0u8; 0x12], 0x80, t), None);
+        for sub in [5, 6] {
+            assert_eq!(pgm_rsrc1_in(&container(sub, 0x40, 0x0030_0000, 0x200), 0x180, PGM_RSRC1_AT), None);
+        }
+        let mut dg = vec![0u8; 0x100];
+        dg[0..8].copy_from_slice(&0x100u64.to_le_bytes());
+        dg[0x10..0x14].copy_from_slice(&5u32.to_le_bytes());
+        dg[0x18..0x1c].copy_from_slice(&5u32.to_le_bytes());
+        dg[0x28..0x30].copy_from_slice(&0x80u64.to_le_bytes());
+        assert!(crate::gcn::is_durango(&dg));
+        assert_eq!(pgm_rsrc1_in(&dg, 0x80, &[(5, 0x40)]), None);
+    }
+
+    #[test]
+    fn initial_mode_seeds_the_reachable_mode_set() {
+        assert_eq!(reachable(&[], 0xf0).into_iter().collect::<Vec<_>>(), vec![0xf0]);
+        assert_eq!(reachable(&[], 0x30).into_iter().collect::<Vec<_>>(), vec![0x30]);
+        assert_eq!(analyze(&[], 0xf0), ModeUse::default());
+        let u = analyze(&[], 0x30);
+        assert!(u.dp && u.dpd && !u.sp);
+        let u = analyze(&[], 0x00);
+        assert!(u.sp && u.spd && u.dp && u.dpd && !u.spr && !u.dpr);
     }
 }
