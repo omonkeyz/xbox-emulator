@@ -747,6 +747,39 @@ fn scalar_null_reads_zero_after_discarded_writes() {
     cases.run("scalar_null_reads_zero_after_discarded_writes");
 }
 
+#[test]
+fn scalar_null_sopk_reads_do_not_reuse_discarded_values() {
+    let mut cases = Cases::new();
+    for value in [0x7fff_ffff, 0x8000_0000, 1, 0xffff_ffff] {
+        for imm in [1, 0xffff, 0x7fff, 0x8000] {
+            let mut pre = pr();
+            pre.sv(125, value).raw(&[SCC1]);
+            let mut post = pr();
+            post.scc_to_v(0).s2v(1, 125);
+            cases.add("s_addk_i32", &pre, &[sopk(0x0f, 125, imm)], &post, &[0, 0]);
+        }
+    }
+    for (value, imm) in [(0x7fff_ffffu32, 1u16), (0x8000_0000, 0xffff)] {
+        let mut pre = pr();
+        pre.sv(20, value);
+        let mut post = pr();
+        post.s2v(0, 20).scc_to_v(1);
+        let sum = value.wrapping_add(imm as i16 as i32 as u32);
+        cases.add("s_addk_i32", &pre, &[sopk(0x0f, 20, imm)], &post, &[sum, 1]);
+    }
+    let mode_low8 = 1 | (7 << 11);
+    for value in [1, 0xff, 0x55] {
+        for src in [125, 20] {
+            let mut pre = pr();
+            pre.sv(125, value).sv(20, value);
+            let mut post = pr();
+            post.raw(&[sopk(0x12, 21, mode_low8)]).s2v(0, 21).s2v(1, 125);
+            cases.add("s_setreg_b32", &pre, &[sopk(0x13, src, mode_low8)], &post, &[if src == 125 { 0 } else { value }, 0]);
+        }
+    }
+    cases.run("scalar_null_sopk_reads_do_not_reuse_discarded_values");
+}
+
 fn s2(c: &mut Cases, m: &'static str, op: u32, a: u32, b: u32, cin: u32, res: u32, scc: u32) {
     let mut pre = pr();
     pre.sv(10, a).sv(12, b).raw(&[if cin != 0 { SCC1 } else { SCC0 }]);

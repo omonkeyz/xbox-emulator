@@ -3845,7 +3845,7 @@ impl<'a> Emitter<'a> {
                         }
                         let v = if m == "s_setreg_b32" {
                             self.touch(&d);
-                            name(&d)?
+                            r(&d)?
                         } else {
                             format!("{:#x}u", ins.raw.get(1).copied().unwrap_or(0))
                         };
@@ -3857,11 +3857,11 @@ impl<'a> Emitter<'a> {
                     "s_addk_i32" => {
                         let t = self.tmp;
                         self.tmp += 1;
-                        let dv = name(&d)?;
+                        let dv = r(&d)?;
                         self.line(&format!("uint t{t} = {dv} + {imm}; scc = (((({dv} ^ t{t}) & ({imm} ^ t{t})) >> 31) != 0u) ? 1u : 0u;"));
                         self.ws(&d, &format!("t{t}"))
                     }
-                    "s_mulk_i32" => self.ws(&d, &format!("({} * {imm})", name(&d)?)),
+                    "s_mulk_i32" => self.ws(&d, &format!("({} * {imm})", r(&d)?)),
                     _ if m.starts_with("s_cmpk_") => {
                         let fake = m.replace("s_cmpk_", "s_cmp_");
                         let k = if m.ends_with("_u32") { ins.aux.imm as i32 as u32 & 0xffff } else { ins.aux.imm as i32 as u32 };
