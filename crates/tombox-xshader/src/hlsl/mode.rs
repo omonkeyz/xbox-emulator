@@ -896,6 +896,498 @@ mod tests {
         assert!(s.contains("VGPRS 2 = 24 regs at wave32") && s.contains("fits true"), "{s}");
     }
 
+    const NO_TABLE: u64 = 0xdead_beef_dead_beef;
+    const STAGE_SLOTS: std::ops::Range<usize> = 0x18..0x60;
+    const USER_SGPRS_AT: usize = 0xd6;
+    const RSRC2_SKIP: [(usize, usize); 3] = [(0x10, 0x14), (0xd6, 0xd7), (0xe8, 0x100)];
+    const RSRC2_OF_257: [(u32, usize); 2] = [(5, 0x130), (6, 0x138)];
+    const LDS_GRANULE_BYTES: u32 = 512;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum HwReg {
+        Cs,
+        Ps,
+        Vs,
+        Gs,
+        Hs,
+    }
+
+    impl HwReg {
+        fn must_be_zero(self) -> u32 {
+            match self {
+                HwReg::Cs => 0xff00_6040,
+                HwReg::Ps => 0x01ff_0040,
+                HwReg::Vs => 0x0680_0000 | 0x003f_e040,
+                HwReg::Gs => 0x0000_ffc0,
+                HwReg::Hs => 0x0003_fe40,
+            }
+        }
+
+        fn has_user_sgpr_msb(self) -> bool {
+            self != HwReg::Cs
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SgprMatch {
+        Count,
+        CountPlusSystem,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct Rsrc2Ctx {
+        reg: HwReg,
+        user_sgprs: u32,
+        system: u32,
+        lds_reach: u32,
+    }
+
+    struct Fixture {
+        name: String,
+        sub: Option<u32>,
+        stage: String,
+        slots: Vec<(usize, u64)>,
+        slot: Option<usize>,
+        ctx: Option<Rsrc2Ctx>,
+        u: RegUse,
+        ex: crate::ShaderExtract,
+        rsrc1: BTreeSet<usize>,
+        rsrc2: BTreeMap<usize, SgprMatch>,
+    }
+
+    type Checks = Vec<(&'static str, bool)>;
+    type Tally = BTreeMap<(Option<u32>, String, &'static str, usize), (u32, BTreeMap<&'static str, u32>)>;
+
+    fn le16(b: &[u8], o: usize) -> Option<u16> {
+        b.get(o..o + 2).map(|x| u16::from_le_bytes([x[0], x[1]]))
+    }
+
+    fn le64(b: &[u8], o: usize) -> Option<u64> {
+        b.get(o..o + 8).map(|x| u64::from_le_bytes([x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]]))
+    }
+
+    fn lds_bytes(w: u32) -> u32 {
+        ((w >> 15) & 0x1ff) * LDS_GRANULE_BYTES
+    }
+
+    fn user_sgpr_field(w: u32, reg: HwReg) -> u32 {
+        ((w >> 1) & 0x1f) | if reg.has_user_sgpr_msb() { ((w >> 27) & 1) << 5 } else { 0 }
+    }
+
+    fn stage_slots(fssm: &[u8]) -> Vec<(usize, u64)> {
+        STAGE_SLOTS.step_by(8).filter_map(|o| le64(fssm, o).filter(|&v| v != 0 && v != NO_TABLE).map(|v| (o, v))).collect()
+    }
+
+    fn merged_system_sgprs(slot: Option<usize>) -> u32 {
+        if matches!(slot, Some(0x28 | 0x30 | 0x58)) {
+            8
+        } else {
+            0
+        }
+    }
+
+    fn hw_reg(stage: crate::Stage, slot: Option<usize>) -> HwReg {
+        match (slot, stage) {
+            (Some(0x40), _) => HwReg::Ps,
+            (Some(0x38), _) => HwReg::Vs,
+            (Some(0x28 | 0x30 | 0x58), _) => HwReg::Gs,
+            (_, crate::Stage::Pixel) => HwReg::Ps,
+            (_, crate::Stage::Vertex) => HwReg::Vs,
+            (_, crate::Stage::Hull) => HwReg::Hs,
+            (_, crate::Stage::Compute | crate::Stage::Amplification) => HwReg::Cs,
+            _ => HwReg::Gs,
+        }
+    }
+
+    fn ds_reach(i: &Insn) -> Option<u32> {
+        let m = i.mnemonic.as_str();
+        if ["swizzle", "permute", "gws", "append", "consume", "ordered", "addtid"].iter().any(|k| m.contains(k)) {
+            return None;
+        }
+        let base = m.replace("st64", "").replace("_d16", "");
+        let elem = if base.contains("64") {
+            8
+        } else if ["_b8", "_u8", "_i8"].iter().any(|k| base.contains(k)) {
+            1
+        } else if ["_b16", "_u16", "_i16"].iter().any(|k| base.contains(k)) {
+            2
+        } else {
+            4
+        };
+        let off = i.aux.imm as u32 & 0xffff;
+        if ["write2", "read2", "wrxchg2"].iter().any(|k| m.contains(k)) {
+            let unit = elem * if m.contains("st64") { 64 } else { 1 };
+            return Some((off & 0xff).max(off >> 8) * unit + elem);
+        }
+        Some(off + elem)
+    }
+
+    fn static_lds_reach(ex: &crate::ShaderExtract) -> u32 {
+        crate::rdna2::disassemble(&ex.isa).iter().filter(|i| i.enc == Enc::Ds && !super::super::gds::is_gds(i)).filter_map(ds_reach).max().unwrap_or(0)
+    }
+
+    fn rsrc2_fits(w: u32, c: &Rsrc2Ctx) -> Option<SgprMatch> {
+        if w & c.reg.must_be_zero() != 0 || (c.reg == HwReg::Cs && lds_bytes(w) < c.lds_reach) {
+            return None;
+        }
+        let n = user_sgpr_field(w, c.reg);
+        if n == c.user_sgprs {
+            Some(SgprMatch::Count)
+        } else if c.system != 0 && n == c.user_sgprs + c.system {
+            Some(SgprMatch::CountPlusSystem)
+        } else {
+            None
+        }
+    }
+
+    fn rsrc2_candidates(ex: &crate::ShaderExtract, c: &Rsrc2Ctx) -> BTreeMap<usize, SgprMatch> {
+        let end = ex.isa_offset_in_fssm.saturating_sub(16).min(ex.fssm.len());
+        (0..end / 4)
+            .map(|k| k * 4)
+            .filter(|&o| !RSRC2_SKIP.iter().any(|&(a, b)| o < b && o + 4 > a))
+            .filter_map(|o| le32(&ex.fssm, o).and_then(|w| rsrc2_fits(w, c)).map(|m| (o, m)))
+            .collect()
+    }
+
+    fn show_rsrc2(w: u32, c: &Rsrc2Ctx) -> String {
+        format!(
+            "{w:#010x} ({:?}: USER_SGPR {}, LDS_SIZE {} bytes, must-be-zero bits {:#x}, match {:?})",
+            c.reg,
+            user_sgpr_field(w, c.reg),
+            lds_bytes(w),
+            w & c.reg.must_be_zero(),
+            rsrc2_fits(w, c)
+        )
+    }
+
+    fn fixture(name: String, ex: crate::ShaderExtract) -> Fixture {
+        let u = reg_use(&ex);
+        let slots = stage_slots(&ex.fssm);
+        let slot = if slots.len() == 1 { Some(slots[0].0) } else { None };
+        let ctx = ex.fssm.get(USER_SGPRS_AT).map(|&b| Rsrc2Ctx {
+            reg: hw_reg(ex.stage, slot),
+            user_sgprs: b as u32,
+            system: merged_system_sgprs(slot),
+            lds_reach: static_lds_reach(&ex),
+        });
+        let rsrc1 = rsrc1_candidates(&ex, &u);
+        let rsrc2 = ctx.map(|c| rsrc2_candidates(&ex, &c)).unwrap_or_default();
+        Fixture { name, sub: le32(&ex.fssm, 0x10), stage: format!("{:?}", ex.stage), slots, slot, ctx, u, ex, rsrc1, rsrc2 }
+    }
+
+    fn group_common<K: Ord>(fx: &[Fixture], key: impl Fn(&Fixture) -> K, set: impl Fn(&Fixture) -> BTreeSet<usize>) -> BTreeMap<K, (usize, BTreeSet<usize>)> {
+        let mut g: BTreeMap<K, Vec<BTreeSet<usize>>> = BTreeMap::new();
+        for f in fx {
+            g.entry(key(f)).or_default().push(set(f));
+        }
+        g.into_iter().map(|(k, v)| (k, (v.len(), common(&v)))).collect()
+    }
+
+    fn back_from_isa(f: &Fixture) -> BTreeSet<usize> {
+        f.rsrc1.iter().map(|o| f.ex.isa_offset_in_fssm - o).collect()
+    }
+
+    fn rsrc2_probes(f: &Fixture, by_stage: &BTreeMap<(Option<u32>, String), (usize, BTreeSet<usize>)>) -> BTreeSet<usize> {
+        let mut rs: BTreeSet<usize> = by_stage.get(&(f.sub, f.stage.clone())).map(|e| e.1.iter().take(8).copied().collect()).unwrap_or_default();
+        if f.ctx.is_some_and(|c| c.reg == HwReg::Cs) {
+            if let Some(&(_, at)) = RSRC2_OF_257.iter().find(|e| Some(e.0) == f.sub) {
+                rs.insert(at);
+            }
+        }
+        rs
+    }
+
+    fn rsrc2_checks(f: &Fixture, r: usize) -> Option<(Checks, String)> {
+        let c = f.ctx?;
+        let w = le32(&f.ex.fssm, r)?;
+        let before = r.checked_sub(4).and_then(|o| le32(&f.ex.fssm, o));
+        let checks = vec![
+            ("R is an RSRC2 candidate of this fixture", f.rsrc2.contains_key(&r)),
+            ("dword at R-4 fits RSRC1", before.is_some_and(|b| rsrc1_fits(b, &f.u))),
+        ];
+        let s = format!("RSRC2 at {r:#x} = {}; dword at R-4 = {}", show_rsrc2(w, &c), before.map_or("none".to_string(), |b| show_rsrc1(b, &f.u)));
+        Some((checks, s))
+    }
+
+    fn amdhsa_checks(f: &Fixture, r: usize) -> Option<(Checks, String)> {
+        let b = &f.ex.fssm;
+        let base = r.checked_sub(52)?;
+        let w2 = le32(b, r)?;
+        let group = le32(b, base)?;
+        let entry = le64(b, base + 16)? as i64;
+        let target = base as i64 + entry;
+        let isa = f.ex.isa_offset_in_fssm as i64;
+        let reserved = b.get(base + 12..base + 16)?.iter().chain(b.get(base + 24..base + 44)?).all(|&x| x == 0);
+        let rsrc3 = le32(b, base + 44)?;
+        let rsrc1 = le32(b, base + 48)?;
+        let props = le16(b, base + 56)?;
+        let preload = le16(b, base + 58)?;
+        let tail = le32(b, base + 60)?;
+        let checks = vec![
+            ("GROUP_SEGMENT_FIXED_SIZE rounds up to LDS_SIZE", (group as u64).div_ceil(LDS_GRANULE_BYTES as u64) * LDS_GRANULE_BYTES as u64 == lds_bytes(w2) as u64),
+            ("GROUP_SEGMENT_FIXED_SIZE covers the static LDS reach", group >= f.ctx.map_or(0, |c| c.lds_reach)),
+            ("KERNEL_CODE_ENTRY_BYTE_OFFSET reaches the ISA", target == isa),
+            ("KERNEL_CODE_ENTRY_BYTE_OFFSET reaches the ISA preamble", target == isa - 16),
+            ("reserved descriptor bytes are zero", reserved),
+            ("COMPUTE_PGM_RSRC1 at R-4 fits", rsrc1_fits(rsrc1, &f.u)),
+            ("ENABLE_WAVEFRONT_SIZE32 matches the wave size", ((props >> 10) & 1 == 1) == (f.u.wave == 32)),
+            ("descriptor clear of the 0xe8..0x100 table of #289", !(base < 0x100 && base + 64 > 0xe8)),
+        ];
+        let s = format!(
+            "AMDHSA descriptor at {base:#x}: GROUP_SEGMENT_FIXED_SIZE {group} bytes (LDS_SIZE {} bytes, static reach {} bytes), KERNEL_CODE_ENTRY_BYTE_OFFSET {entry:#x} -> {target:#x} (ISA at {isa:#x}, an entry of {:#x} would reach it), RSRC3 {rsrc3:#010x}, RSRC1 {}, KERNEL_CODE_PROPERTIES {props:#06x}, KERNARG_PRELOAD {preload:#06x}, last dword {tail:#010x}",
+            lds_bytes(w2),
+            f.ctx.map_or(0, |c| c.lds_reach),
+            isa - base as i64,
+            show_rsrc1(rsrc1, &f.u)
+        );
+        Some((checks, s))
+    }
+
+    fn code_region_checks(f: &Fixture, r: usize) -> Option<(Checks, String)> {
+        let b = &f.ex.fssm;
+        let off = le64(b, 0xc0)?;
+        let size = le64(b, 0xc8)?;
+        let start = off as i128 + 0x10;
+        let isa = f.ex.isa_offset_in_fssm as i128;
+        let before = usize::try_from(start - 4).ok().and_then(|o| le32(b, o));
+        let after = [le32(b, r + 4), le32(b, r + 8), le32(b, r + 12)];
+        let mut checks = vec![
+            ("code region starts at R", start == r as i128),
+            ("code region starts at the ISA", start == isa),
+            ("code region starts at the ISA preamble", start == isa - 16),
+            ("dword before the code region fits RSRC1", before.is_some_and(|w| rsrc1_fits(w, &f.u))),
+        ];
+        if f.ctx.is_some_and(|c| c.reg == HwReg::Cs) {
+            checks.push(("three dwords after R are the group size", f.ex.psv_numthreads.is_some_and(|t| after == t.map(Some))));
+        }
+        let s = format!(
+            "code region: u64 at 0xc0 {off:#x}, at 0xc8 {size:#x}, starts at {start:#x} (R {:+}, ISA {:+}), ends at {:#x} (FSSM {:#x} bytes, ISA ends at {:#x}); dword before it {}; three dwords after R [{}], group size {:?}",
+            start - r as i128,
+            start - isa,
+            start + size as i128,
+            b.len(),
+            f.ex.isa_offset_in_fssm + f.ex.isa.len(),
+            before.map_or("none".to_string(), |w| show_rsrc1(w, &f.u)),
+            after.iter().map(|w| w.map_or("none".to_string(), |w| format!("{w:#x}"))).collect::<Vec<_>>().join(", "),
+            f.ex.psv_numthreads
+        );
+        Some((checks, s))
+    }
+
+    fn hx(v: Option<u32>) -> String {
+        v.map_or("none".to_string(), |w| format!("{w:#x}"))
+    }
+
+    fn hs<'a>(it: impl IntoIterator<Item = &'a usize>) -> String {
+        format!("[{}]", it.into_iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", "))
+    }
+
+    fn check(c: &Checks, n: &str) -> bool {
+        c.iter().any(|&(k, ok)| k == n && ok)
+    }
+
+    fn tally(t: &mut Tally, key: (Option<u32>, String, &'static str, usize), checks: &Checks) {
+        let e = t.entry(key).or_default();
+        e.0 += 1;
+        for &(n, ok) in checks {
+            *e.1.entry(n).or_default() += ok as u32;
+        }
+    }
+
+    fn csfx(sub: u32, user_sgprs: u8, isa_off: usize, words: &[(usize, u32)]) -> Vec<u8> {
+        let mut b = vec![0xffu8; isa_off];
+        b[0x10..0x14].copy_from_slice(&sub.to_le_bytes());
+        for o in STAGE_SLOTS.step_by(8) {
+            b[o..o + 8].copy_from_slice(&NO_TABLE.to_le_bytes());
+        }
+        b[USER_SGPRS_AT] = user_sgprs;
+        for &(o, w) in words {
+            b[o..o + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn rsrc2_scan_matches_user_sgprs_and_must_be_zero_bits_and_groups_by_stage() {
+        assert_eq!(user_sgpr_field(9 << 1, HwReg::Cs), 9);
+        assert_eq!(user_sgpr_field((1 << 1) | (1 << 27), HwReg::Gs), 33);
+        assert_eq!(user_sgpr_field((1 << 1) | (1 << 27), HwReg::Cs), 1);
+        let cs = Rsrc2Ctx { reg: HwReg::Cs, user_sgprs: 9, system: 0, lds_reach: 1024 };
+        let w = (9 << 1) | (7 << 7) | (2 << 11) | (2 << 15);
+        assert_eq!(rsrc2_fits(w, &cs), Some(SgprMatch::Count));
+        assert_eq!(rsrc2_fits((w & !(0x1ff << 15)) | (1 << 15), &cs), None);
+        assert_eq!(rsrc2_fits(w | (1 << 31), &cs), None);
+        assert_eq!(rsrc2_fits(w | (1 << 6), &cs), None);
+        assert_eq!(rsrc2_fits((w & !0x3e) | (8 << 1), &cs), None);
+        let gs = Rsrc2Ctx { reg: HwReg::Gs, user_sgprs: 1, system: 8, lds_reach: 0 };
+        assert_eq!(rsrc2_fits(1 << 1, &gs), Some(SgprMatch::Count));
+        assert_eq!(rsrc2_fits(9 << 1, &gs), Some(SgprMatch::CountPlusSystem));
+        assert_eq!(rsrc2_fits(10 << 1, &gs), None);
+        let gs33 = Rsrc2Ctx { user_sgprs: 33, system: 0, ..gs };
+        assert_eq!(rsrc2_fits((1 << 1) | (1 << 27), &gs33), Some(SgprMatch::Count));
+        assert_eq!(rsrc2_fits(1 << 1, &gs33), None);
+        let vs = Rsrc2Ctx { reg: HwReg::Vs, user_sgprs: 4, system: 0, lds_reach: 0 };
+        assert_eq!(rsrc2_fits(4 << 1, &vs), Some(SgprMatch::Count));
+        assert_eq!(rsrc2_fits((4 << 1) | (1 << 23), &vs), None);
+        let ps = Rsrc2Ctx { reg: HwReg::Ps, ..vs };
+        assert_eq!(rsrc2_fits((4 << 1) | (0xf << 28), &ps), Some(SgprMatch::Count));
+        assert_eq!(rsrc2_fits((4 << 1) | (1 << 16), &ps), None);
+        assert_eq!(hw_reg(crate::Stage::Vertex, Some(0x28)), HwReg::Gs);
+        assert_eq!(hw_reg(crate::Stage::Vertex, None), HwReg::Vs);
+        assert_eq!(hw_reg(crate::Stage::Compute, None), HwReg::Cs);
+
+        let r1 = |v: u32| 2 | (v << 12);
+        let c = crate::Stage::Compute;
+        let a = fixture("a".into(), synth(csfx(6, 9, 0x150, &[(0x134, r1(0xf0)), (0x138, 9 << 1)]), 0x150, &V20_S30, c));
+        let b = fixture("b".into(), synth(csfx(6, 9, 0x150, &[(0x134, r1(0x30)), (0x138, (9 << 1) | (7 << 7))]), 0x150, &V20_S30, c));
+        let mut pfssm = csfx(6, 9, 0x160, &[(0x140, 9 << 1)]);
+        pfssm[0x40..0x48].copy_from_slice(&0x200u64.to_le_bytes());
+        let p = fixture("p".into(), synth(pfssm, 0x160, &V20_S30, crate::Stage::Pixel));
+        assert_eq!(p.slot, Some(0x40));
+        assert_eq!(p.ctx.map(|c| c.reg), Some(HwReg::Ps));
+        assert_eq!(a.rsrc2.keys().copied().collect::<Vec<_>>(), vec![0x138]);
+        assert_eq!(p.rsrc2.keys().copied().collect::<Vec<_>>(), vec![0x140]);
+        let fx = [a, b, p];
+        let by_stage = group_common(&fx, |f| (f.sub, f.stage.clone()), |f| f.rsrc2.keys().copied().collect());
+        assert_eq!(by_stage[&(Some(6), "Compute".to_string())], (2, BTreeSet::from([0x138])));
+        assert_eq!(by_stage[&(Some(6), "Pixel".to_string())], (1, BTreeSet::from([0x140])));
+        let by_sub = group_common(&fx, |f| f.sub, |f| f.rsrc2.keys().copied().collect());
+        assert!(by_sub[&Some(6)].1.is_empty());
+        let rsrc1_by_stage = group_common(&fx, |f| (f.sub, f.stage.clone()), |f| f.rsrc1.clone());
+        assert!(rsrc1_by_stage[&(Some(6), "Compute".to_string())].1.contains(&0x134));
+        let by_slot = group_common(&fx, |f| (f.sub, f.slot), |f| f.rsrc2.keys().copied().collect());
+        assert_eq!(by_slot[&(Some(6), Some(0x40))].1, BTreeSet::from([0x140]));
+        assert_eq!(rsrc2_probes(&fx[0], &by_stage), BTreeSet::from([0x138]));
+        let (rc, _) = rsrc2_checks(&fx[0], 0x138).unwrap();
+        assert!(check(&rc, "R is an RSRC2 candidate of this fixture") && check(&rc, "dword at R-4 fits RSRC1"));
+
+        let other = fixture("c".into(), synth(csfx(6, 8, 0x150, &[(0x134, r1(0xf0)), (0x138, 9 << 1)]), 0x150, &V20_S30, c));
+        assert!(!other.rsrc2.contains_key(&0x138));
+        let lds = fixture("d".into(), synth(csfx(6, 9, 0x150, &[(0x138, 9 << 1)]), 0x150, &[0xd834_0000 | 0x100, 0, 0xbf81_0000], c));
+        assert_eq!(lds.ctx.map(|c| c.lds_reach), Some(0x104));
+        assert!(!lds.rsrc2.contains_key(&0x138));
+    }
+
+    #[test]
+    fn amdhsa_descriptor_and_code_region_probes_on_synthetic_containers() {
+        let c = crate::Stage::Compute;
+        let w2 = (9 << 1) | (7 << 7) | (2 << 15);
+        let mut f = csfx(6, 9, 0x150, &[(0x104, 1000), (0x108, 0), (0x10c, 0), (0x110, 0), (0x130, 0), (0x134, 2 | (0xf0 << 12)), (0x138, w2), (0x13c, 1 << 10), (0x140, 0)]);
+        f[0x114..0x11c].copy_from_slice(&0x4cu64.to_le_bytes());
+        f[0x11c..0x130].fill(0);
+        let hsa = fixture("hsa".into(), synth(f, 0x150, &V20_S30, c));
+        let (checks, s) = amdhsa_checks(&hsa, 0x138).unwrap();
+        assert!(checks.iter().all(|e| e.1 != (e.0 == "KERNEL_CODE_ENTRY_BYTE_OFFSET reaches the ISA preamble")), "{checks:?}\n{s}");
+        assert!(s.contains("GROUP_SEGMENT_FIXED_SIZE 1000 bytes (LDS_SIZE 1024 bytes") && s.contains("OFFSET 0x4c -> 0x150"), "{s}");
+        let (checks, _) = amdhsa_checks(&hsa, 0x130).unwrap();
+        assert!(!check(&checks, "descriptor clear of the 0xe8..0x100 table of #289"));
+        let (cr, _) = code_region_checks(&hsa, 0x138).unwrap();
+        assert!(!check(&cr, "code region starts at R") && !check(&cr, "three dwords after R are the group size"));
+
+        let mut g = csfx(6, 9, 0x160, &[(0x134, 2), (0x138, w2), (0x13c, 64), (0x140, 1), (0x144, 1)]);
+        g[0xc0..0xc8].copy_from_slice(&0x128u64.to_le_bytes());
+        g[0xc8..0xd0].copy_from_slice(&0x40u64.to_le_bytes());
+        let mut ex = synth(g, 0x160, &V20_S30, c);
+        ex.psv_numthreads = Some([64, 1, 1]);
+        let region = fixture("region".into(), ex);
+        let (cr, s) = code_region_checks(&region, 0x138).unwrap();
+        assert!(check(&cr, "code region starts at R") && check(&cr, "three dwords after R are the group size") && check(&cr, "dword before the code region fits RSRC1"), "{cr:?}\n{s}");
+        assert!(!check(&cr, "code region starts at the ISA"));
+        let (hc, _) = amdhsa_checks(&region, 0x138).unwrap();
+        assert!(!check(&hc, "reserved descriptor bytes are zero"));
+
+        let mut gfssm = csfx(6, 1, 0x160, &[(0x140, 9 << 1)]);
+        gfssm[0x28..0x30].copy_from_slice(&0x180u64.to_le_bytes());
+        let gs = fixture("gs".into(), synth(gfssm, 0x160, &V20_S30, crate::Stage::Vertex));
+        assert_eq!(gs.ctx.map(|c| (c.reg, c.system)), Some((HwReg::Gs, 8)));
+        assert_eq!(gs.rsrc2.get(&0x140), Some(&SgprMatch::CountPlusSystem));
+        let by_sub = summarize(&[hsa, region, gs], &BTreeMap::new());
+        assert_eq!(by_sub[&Some(6)].0, 3);
+    }
+
+    fn summarize(fx: &[Fixture], adjacent: &BTreeMap<Option<u32>, (usize, usize)>) -> BTreeMap<Option<u32>, (usize, BTreeSet<usize>)> {
+        let by_sub = group_common(fx, |f| f.sub, |f| f.rsrc1.clone());
+        let back_by_sub = group_common(fx, |f| f.sub, back_from_isa);
+        let r1_stage = group_common(fx, |f| (f.sub, f.stage.clone()), |f| f.rsrc1.clone());
+        let r1_back_stage = group_common(fx, |f| (f.sub, f.stage.clone()), back_from_isa);
+        let r1_slot = group_common(fx, |f| (f.sub, f.slot), |f| f.rsrc1.clone());
+        let r2_stage = group_common(fx, |f| (f.sub, f.stage.clone()), |f| f.rsrc2.keys().copied().collect());
+        let r2_slot = group_common(fx, |f| (f.sub, f.slot), |f| f.rsrc2.keys().copied().collect());
+        let mut tallies: Tally = BTreeMap::new();
+        let mut slot_diffs: BTreeMap<(Option<u32>, usize, &'static str, usize), BTreeSet<i128>> = BTreeMap::new();
+        for x in fx {
+            let probes = rsrc2_probes(x, &r2_stage);
+            eprintln!("{}: {} sub-version {}, probing RSRC2 at {}", x.name, x.stage, hx(x.sub), hs(&probes));
+            for &r in &probes {
+                for (kind, got) in [("RSRC2", rsrc2_checks(x, r)), ("code region", code_region_checks(x, r))]
+                    .into_iter()
+                    .chain(x.ctx.filter(|c| c.reg == HwReg::Cs).map(|_| ("AMDHSA", amdhsa_checks(x, r))))
+                {
+                    if let Some((checks, s)) = got {
+                        eprintln!("  {s}");
+                        tally(&mut tallies, (x.sub, x.stage.clone(), kind, r), &checks);
+                    }
+                }
+            }
+            for &(so, v) in &x.slots {
+                let r1c = r1_stage.get(&(x.sub, x.stage.clone())).map(|e| e.1.clone()).unwrap_or_default();
+                let d = |o: usize| v as i128 - o as i128;
+                eprintln!(
+                    "  stage slot {so:#x} = {v:#x}: minus ISA offset {:+}; minus RSRC2 probes [{}]; minus common RSRC1 offsets [{}]",
+                    d(x.ex.isa_offset_in_fssm),
+                    probes.iter().map(|&r| format!("{r:#x}: {:+}", d(r))).collect::<Vec<_>>().join(", "),
+                    r1c.iter().take(8).map(|&o| format!("{o:#x}: {:+}", d(o))).collect::<Vec<_>>().join(", ")
+                );
+                if x.slots.len() == 1 {
+                    for &r in &probes {
+                        slot_diffs.entry((x.sub, so, "RSRC2", r)).or_default().insert(d(r));
+                    }
+                    for &o in r1c.iter().take(8) {
+                        slot_diffs.entry((x.sub, so, "RSRC1", o)).or_default().insert(d(o));
+                    }
+                    slot_diffs.entry((x.sub, so, "ISA", 0)).or_default().insert(d(x.ex.isa_offset_in_fssm));
+                }
+            }
+        }
+        for (sub, (n, set)) in &by_sub {
+            let (an, fit) = adjacent.get(sub).copied().unwrap_or_default();
+            eprintln!(
+                "FSSM sub-version {}: {n} fixtures; RSRC1 offsets that fit all of those: fixed {}, counted back from the ISA {}; the dword before COMPUTE_PGM_RSRC2 of #257 fits in {fit} of {an}",
+                hx(*sub),
+                hs(set),
+                hs(&back_by_sub[sub].1)
+            );
+        }
+        for (k, (n, set)) in &r1_stage {
+            eprintln!(
+                "FSSM sub-version {}, stage {}: {n} fixtures; RSRC1 offsets that fit all: fixed {}, counted back from the ISA {}; RSRC2 offsets that fit all: {}",
+                hx(k.0),
+                k.1,
+                hs(set),
+                hs(&r1_back_stage[k].1),
+                hs(&r2_stage[k].1)
+            );
+        }
+        for (k, (n, set)) in &r1_slot {
+            eprintln!("FSSM sub-version {}, stage slot {}: {n} fixtures; RSRC1 offsets that fit all {}; RSRC2 offsets that fit all {}", hx(k.0), k.1.map_or("none".to_string(), |o| format!("{o:#x}")), hs(set), hs(&r2_slot[k].1));
+        }
+        for ((sub, so, what, o), d) in &slot_diffs {
+            eprintln!(
+                "FSSM sub-version {}, stage slot {so:#x}: slot value minus {what} {o:#x} takes {} distinct value(s) {:?}",
+                hx(*sub),
+                d.len(),
+                d.iter().take(8).collect::<Vec<_>>()
+            );
+        }
+        for ((sub, stage, kind, r), (n, counts)) in &tallies {
+            eprintln!("FSSM sub-version {}, stage {stage}, {kind} hypothesis at R = {r:#x}: {n} fixtures probed", hx(*sub));
+            for (c, k) in counts {
+                eprintln!("    {k} of {n}: {c}");
+            }
+        }
+        by_sub
+    }
+
     fn dxbc_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
@@ -917,23 +1409,21 @@ mod tests {
         files.sort();
         let (mut fssm_n, mut durango_n) = (0, 0);
         let mut bad = Vec::new();
-        let mut fixed: BTreeMap<Option<u32>, Vec<BTreeSet<usize>>> = Default::default();
-        let mut back: BTreeMap<Option<u32>, Vec<BTreeSet<usize>>> = Default::default();
         let mut adjacent: BTreeMap<Option<u32>, (usize, usize)> = Default::default();
         let (mut dfixed, mut dback) = (Vec::new(), Vec::new());
+        let mut fx: Vec<Fixture> = Vec::new();
         for f in &files {
             let Ok(bytes) = std::fs::read(f) else { continue };
             let Ok(ex) = crate::extract(&bytes) else { continue };
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let durango = crate::gcn::is_durango(&ex.fssm);
-            let sub = le32(&ex.fssm, 0x10);
-            let u = reg_use(&ex);
-            let cand = rsrc1_candidates(&ex, &u);
-            let rel: BTreeSet<usize> = cand.iter().map(|o| ex.isa_offset_in_fssm - o).collect();
+            let x = fixture(name, ex);
+            let (ex, u, sub, name) = (&x.ex, &x.u, x.sub, &x.name);
+            let rel = back_from_isa(&x);
             let adj = RSRC2_ADJACENT.iter().find(|e| Some(e.0) == sub).map(|e| e.1);
             let adj_w = adj.filter(|o| o + 4 <= ex.isa_offset_in_fssm.saturating_sub(16)).and_then(|o| le32(&ex.fssm, o));
             eprintln!(
-                "{name}: {} {:?}, sub-version at 0x10 {}, ISA at {:#x}, {} VGPRs and {} SGPRs used (lower bound), wave{}, reader {:#x?}, {} dwords before the ISA fit",
+                "{name}: {} {:?}, sub-version at 0x10 {}, ISA at {:#x}, {} VGPRs and {} SGPRs used (lower bound), wave{}, reader {}, {} dwords before the ISA fit",
                 if durango { "Durango" } else { "FSSM" },
                 ex.stage,
                 sub.map_or("none".to_string(), |w| format!("{w:#x}")),
@@ -941,52 +1431,52 @@ mod tests {
                 u.vgprs,
                 u.sgprs,
                 u.wave,
-                container_pgm_rsrc1(&ex),
-                cand.len()
+                container_pgm_rsrc1(ex).map_or("none".to_string(), |w| format!("{w:#010x}")),
+                x.rsrc1.len()
             );
             if let (Some(o), Some(w)) = (adj, adj_w) {
-                eprintln!("  dword at {o:#x}, 4 bytes before COMPUTE_PGM_RSRC2 of #257: {}", show_rsrc1(w, &u));
+                eprintln!("  dword at {o:#x}, 4 bytes before COMPUTE_PGM_RSRC2 of #257: {}", show_rsrc1(w, u));
             }
-            eprintln!("  fixed offsets {:#x?}", cand.iter().take(32).collect::<Vec<_>>());
-            eprintln!("  counted back from the ISA {:#x?}", rel.iter().take(32).collect::<Vec<_>>());
+            eprintln!("  fixed offsets {}", hs(x.rsrc1.iter().take(32)));
+            eprintln!("  counted back from the ISA {}", hs(rel.iter().take(32)));
             if durango {
                 durango_n += 1;
-                if container_pgm_rsrc1(&ex).is_some() {
+                if container_pgm_rsrc1(ex).is_some() {
                     bad.push(format!("{name}: a Durango container is read while no Durango location is proven"));
                 }
-                dfixed.push(cand);
+                dfixed.push(x.rsrc1.clone());
                 dback.push(rel);
                 continue;
             }
             fssm_n += 1;
-            if let Some(w) = container_pgm_rsrc1(&ex) {
-                if !rsrc1_fits(w, &u) {
-                    bad.push(format!("{name}: sub-version {sub:#x?}, the reader's dword is {}", show_rsrc1(w, &u)));
+            if let Some(w) = container_pgm_rsrc1(ex) {
+                if !rsrc1_fits(w, u) {
+                    bad.push(format!("{name}: sub-version {sub:#x?}, the reader's dword is {}", show_rsrc1(w, u)));
                 }
             }
             let e = adjacent.entry(sub).or_default();
             e.0 += 1;
-            if adj_w.is_some_and(|w| rsrc1_fits(w, &u)) {
+            if adj_w.is_some_and(|w| rsrc1_fits(w, u)) {
                 e.1 += 1;
             }
-            fixed.entry(sub).or_default().push(cand);
-            back.entry(sub).or_default().push(rel);
-        }
-        for (sub, sets) in &fixed {
-            let (n, fit) = adjacent[sub];
             eprintln!(
-                "FSSM sub-version {sub:#x?}: {} fixtures; offsets that fit all of those: fixed {:#x?}, counted back from the ISA {:#x?}; the dword before COMPUTE_PGM_RSRC2 fits in {fit} of {n}",
-                sets.len(),
-                common(sets),
-                common(&back[sub])
+                "  byte 0xd6 (user SGPRs, #289) {:?}, u64 at 0xe8 {}, stage slots {:x?}, RSRC2 register {:?}, static LDS reach {} bytes",
+                x.ctx.map(|c| c.user_sgprs),
+                le64(&ex.fssm, 0xe8).map_or("none".to_string(), |p| if p == NO_TABLE { "no table".to_string() } else { format!("{p:#x}") }),
+                x.slots,
+                x.ctx.map(|c| (c.reg, c.system)),
+                x.ctx.map_or(0, |c| c.lds_reach)
             );
+            eprintln!("  RSRC2 candidates {}", x.rsrc2.iter().take(32).map(|(o, m)| format!("{o:#x} {m:?}")).collect::<Vec<_>>().join(", "));
+            fx.push(x);
         }
-        eprintln!("FSSM: {fssm_n} fixtures; Durango: {durango_n} fixtures, offsets that fit all of those: fixed {:#x?}, counted back from the code {:#x?}", common(&dfixed), common(&dback));
+        let by_sub = summarize(&fx, &adjacent);
+        eprintln!("FSSM: {fssm_n} fixtures; Durango: {durango_n} fixtures, offsets that fit all of those: fixed {}, counted back from the code {}", hs(&common(&dfixed)), hs(&common(&dback)));
         assert!(bad.is_empty(), "PGM_RSRC1 is not where the reader looks:\n{}", bad.join("\n"));
         assert!(fssm_n >= 2, "not proven: {fssm_n} FSSM fixtures; at least two are needed");
-        for (sub, sets) in &fixed {
+        for (sub, (_, set)) in &by_sub {
             if let Some(&(_, at)) = PGM_RSRC1_AT.iter().find(|e| Some(e.0) == *sub) {
-                assert!(common(sets).contains(&at), "sub-version {sub:#x?}: the reader's offset {at:#x} is not among the offsets that fit every fixture");
+                assert!(set.contains(&at), "sub-version {sub:#x?}: the reader's offset {at:#x} is not among the offsets that fit every fixture");
             }
         }
     }
