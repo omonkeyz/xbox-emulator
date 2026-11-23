@@ -53,6 +53,7 @@ pub struct Translated {
     pub user_data_base: Option<usize>,
     pub cb_limits: BTreeMap<u32, u64>,
     pub fmask: Vec<(u32, u32, u32)>,
+    pub gather_lod_blind: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -496,6 +497,8 @@ struct Emitter<'a> {
     tex: BTreeMap<u32, u32>,       // slot -> dim
     fmask: BTreeMap<u32, u32>,
     fmask_loc: BTreeSet<(u32, u32, u32)>,
+    gather_ssamp: HashMap<usize, Option<(u32, u32)>>,
+    gather_blind: BTreeSet<u32>,
     samp: BTreeSet<u32>,
     samp_cmp: BTreeSet<u32>,
     uav: BTreeMap<u32, u32>,       // slot -> dim
@@ -1147,6 +1150,26 @@ fn lower_lane_spills(insns: &mut [Insn]) -> Result<(), String> {
     Ok(())
 }
 
+fn gather_lod_fields(w1: u32, w2: u32) -> Result<(f32, f32, f32), String> {
+    let (lo, hi) = (w1 & 0xfff, (w1 >> 12) & 0xfff);
+    let bias = (((w2 & 0x3fff) << 18) as i32) >> 18;
+    let sec = (w2 >> 14) & 0x3f;
+    let mip = (w2 >> 26) & 3;
+    if sec != 0 {
+        return Err(format!("S# LOD_BIAS_SEC {sec:#x} is scaled by the T# perf_mod, unsupported"));
+    }
+    if !matches!(mip, 1 | 2) {
+        return Err(format!("S# MIP_FILTER {mip} unsupported"));
+    }
+    if lo & 0xff != 0 || (hi != 0xfff && hi & 0xff != 0) {
+        return Err(format!("fractional S# MIN_LOD {lo:#x} / MAX_LOD {hi:#x} unsupported: the PC sampler cannot be steered onto the footprint mip"));
+    }
+    if lo > hi {
+        return Err(format!("S# MIN_LOD {lo:#x} above MAX_LOD {hi:#x} unsupported"));
+    }
+    Ok((bias as f32 / 256.0, lo as f32 / 256.0, hi as f32 / 256.0))
+}
+
 fn dpp_vgpr(ins: &Insn) -> Option<u8> {
     match (ins.enc, ins.src.first(), ins.raw.get(1)) {
         (Enc::Vop1 | Enc::Vop2 | Enc::Vopc, Some(Opnd::Raw(233 | 234 | 250)), Some(w)) => Some((w & 0xff) as u8),
@@ -1242,6 +1265,8 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         tex: BTreeMap::new(),
         fmask: BTreeMap::new(),
         fmask_loc: BTreeSet::new(),
+        gather_ssamp: HashMap::new(),
+        gather_blind: BTreeSet::new(),
         samp: BTreeSet::new(),
         samp_cmp: BTreeSet::new(),
         uav: BTreeMap::new(),
@@ -1378,7 +1403,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect(), gather_lod_blind: em.gather_blind.iter().copied().collect() })
 }
 
 impl<'a> Emitter<'a> {
@@ -2542,6 +2567,10 @@ impl<'a> Emitter<'a> {
                         tex_res.push((((*ttable as u32) << 24) | off, if is_uav { Res::Uav(tslot, dim) } else { Res::Tex(tslot, dim) }));
                     }
                     let mut samp_res: Vec<(u32, Res)> = Vec::new();
+                    if ins.mnemonic.starts_with("image_gather4") && ins.mnemonic.split('_').any(|t| t == "l") {
+                        let w = |k: u16| u8::try_from(ss + k).ok().and_then(|r| Self::sgpr_const_in(&insns, block_start, idx, r));
+                        self.gather_ssamp.insert(idx, w(1).zip(w(2)));
+                    }
                     if ins.mnemonic.starts_with("image_sample") || ins.mnemonic.starts_with("image_gather") || ins.mnemonic == "image_get_lod" {
                         let fixed = if sym.get(&ss).is_none() && written.contains(&ss) { self.dg_static_sampler(idx, ss)? } else { None };
                         let samp_c = match fixed {
@@ -6582,6 +6611,17 @@ impl<'a> Emitter<'a> {
                     return Err(format!("{} with unnormalised coordinates unsupported", ins.mnemonic));
                 }
                 let l = lod.clone().ok_or("missing lod")?;
+                let lim = match self.gather_ssamp.get(&idx).copied().flatten() {
+                    Some((w1, w2)) => Some(gather_lod_fields(w1, w2).map_err(|e| format!("{} at {:#x}: {e}", ins.mnemonic, ins.offset))?),
+                    None => {
+                        self.gather_blind.insert(ins.offset as u32);
+                        None
+                    }
+                };
+                let (l, back) = match lim {
+                    Some((b, lo, hi)) => (format!("clamp({l} + {b:?}, {lo:?}, {hi:?})"), format!(" - {b:?}")),
+                    None => (l, String::new()),
+                };
                 let k = XYZW[ins.aux.mask.trailing_zeros() as usize];
                 let ext = if dim == 5 { format!("t{t}e, ") } else { String::new() };
                 self.line(&format!("uint t{t}w, t{t}h, t{t}e, t{t}n;"));
@@ -6600,8 +6640,8 @@ impl<'a> Emitter<'a> {
                     let c = format!("(float2(t{t}i + int2({dx}, {dy})) + 0.5) / t{t}s");
                     let c = if dim == 5 { format!("float3({c}, {})", coords[2]) } else { c };
                     let call = match &zref {
-                        Some(z) => format!("{tex}.SampleCmpLevel({smp}, {c}, {z}, (float)t{t}m)"),
-                        None => format!("{tex}.SampleLevel({smp}, {c}, (float)t{t}m).{k}"),
+                        Some(z) => format!("{tex}.SampleCmpLevel({smp}, {c}, {z}, (float)t{t}m{back})"),
+                        None => format!("{tex}.SampleLevel({smp}, {c}, (float)t{t}m{back}).{k}"),
                     };
                     self.line(&format!("float t{t}g{n} = {call};"));
                     vals.push(format!("asuint(t{t}g{n})"));

@@ -310,6 +310,157 @@ fn image_mimg_gather_explicit_lod() {
     run_mem_cases("mimg_gather_explicit_lod", &cs);
 }
 
+fn lod_words(bias: i32, lo: u32, hi: u32, mip: u32) -> (u32, u32) {
+    (lo | (hi << 12), ((bias as u32) & 0x3fff) | (1 << 20) | (1 << 22) | (mip << 26))
+}
+
+fn lod_sampler(filter: u32, cmp: u32, (w1, w2): (u32, u32)) -> [u8; 52] {
+    let mut s = sampler(filter, 3, cmp);
+    let hi = (w1 >> 12) & 0xfff;
+    let bias = ((((w2 & 0x3fff) << 18) as i32) >> 18) as f32 / 256.0;
+    s[16..20].copy_from_slice(&bias.to_bits().to_le_bytes());
+    s[44..48].copy_from_slice(&((w1 & 0xfff) as f32 / 256.0).to_bits().to_le_bytes());
+    s[48..52].copy_from_slice(&(if hi == 0xfff { f32::MAX } else { hi as f32 / 256.0 }).to_bits().to_le_bytes());
+    s
+}
+
+fn lod_pick(lod: f32, (w1, w2): (u32, u32), mips: u32) -> u32 {
+    let bias = ((((w2 & 0x3fff) << 18) as i32) >> 18) as f32 / 256.0;
+    let (lo, hi) = ((w1 & 0xfff) as f32 / 256.0, ((w1 >> 12) & 0xfff) as f32 / 256.0);
+    nearest((lod + bias).clamp(lo, hi), mips)
+}
+
+fn blind_pick(lod: f32, (w1, w2): (u32, u32), mips: u32) -> (u32, u32) {
+    let bias = (((w2 & 0x3fff) << 18) as i32) >> 18;
+    let (lo, hi) = ((w1 & 0xfff) as i32, ((w1 >> 12) & 0xfff) as i32);
+    let m0 = nearest(lod, mips);
+    let m1 = ((m0 as i32 * 256 + bias).clamp(lo, if hi == 0xfff { i32::MAX } else { hi }) / 256).clamp(0, mips as i32 - 1) as u32;
+    (m0, m1)
+}
+
+fn blind_foot(m0: u32, m1: u32, u: f32, v: f32, off: (i32, i32)) -> Vec<(u32, u32)> {
+    let (s0, s1) = ((8i32 >> m0) as f32, 8i32 >> m1);
+    let i = (u * s0 - 0.5).floor() as i32 + off.0;
+    let j = (v * s0 - 0.5).floor() as i32 + off.1;
+    let c = |a: i32| ((2 * a + 1) * s1).div_euclid(2 * s0 as i32).clamp(0, s1 - 1) as u32;
+    vec![(c(i), c(j + 1)), (c(i + 1), c(j + 1)), (c(i + 1), c(j)), (c(i), c(j))]
+}
+
+fn lod_prog(sw: Option<(u32, u32)>, vals: &[u32]) -> Prog {
+    let mut pre = Prog::new();
+    if let Some((w1, w2)) = sw {
+        pre.sv(13, w1).sv(14, w2);
+    }
+    for (k, &x) in vals.iter().enumerate() {
+        pre.vv(k as u32 + 1, x);
+    }
+    pre
+}
+
+fn run_direct(group: &str, cs: &[(MCase, bool)]) {
+    let mut fails = Vec::new();
+    for (i, (c, blind)) in cs.iter().enumerate() {
+        let t = translate(&extract_code(&c.words, c.env.pos, None));
+        match &t {
+            Ok(t) if t.gather_lod_blind.is_empty() == *blind => fails.push(format!("#{i} {}: gather_lod_blind {:x?}, want blind={blind}", c.m, t.gather_lod_blind)),
+            Err(e) => fails.push(format!("#{i} {}: translate {e}", c.m)),
+            _ => {}
+        }
+        match exec(&c.words, &c.env) {
+            Ok(o) if o.rt[..c.rt.len()] == c.rt[..] => {}
+            Ok(o) => fails.push(format!("#{i} {}: rt {:08x?} want {:08x?}\n{}", c.m, &o.rt[..c.rt.len()], c.rt, t.map(|t| t.hlsl).unwrap_or_default())),
+            Err(e) => fails.push(format!("#{i} {}: {}", c.m, e.lines().take(4).collect::<Vec<_>>().join(" | "))),
+        }
+    }
+    println!("{group}: {} cases", cs.len());
+    assert!(fails.is_empty(), "{group}: {} failing\n{}", fails.len(), fails.join("\n\n"));
+}
+
+#[test]
+fn image_mimg_gather_explicit_lod_sampler_bias_and_clamp() {
+    let mut cs = Vec::new();
+    let (gu, gv) = (0.3f32, 0.55f32);
+    let none = 0xfff;
+    for &(lod, bias, lo, hi, filt, dmask) in &[
+        (0.0f32, 256i32, 0u32, none, 0u32, 1u32),
+        (0.3, 384, 0, none, 0x15, 2),
+        (3.0, 0, 0, 0x100, 0, 4),
+        (0.0, -256, 0x200, none, 0x15, 8),
+        (2.0, -192, 0, none, 0x15, 1),
+        (1.0, 768, 0, none, 0, 2),
+        (0.0, 0, 0x500, none, 0, 4),
+        (2.6, 256, 0x100, 0x200, 0x15, 8),
+        (-1.0, 128, 0, none, 0, 1),
+    ] {
+        let sw = lod_words(bias, lo, hi, if filt & 1 != 0 { 2 } else { 1 });
+        let ch = dmask.trailing_zeros() as usize;
+        let op = mimg(0x44, dmask, 1, 1, 8, 0, 12);
+        let words = build(&lod_prog(Some(sw), &[fb(gu), fb(gv), fb(lod)]), &op, 8, 4, false);
+        let m = lod_pick(lod, sw, 4);
+        let exp: Vec<u32> = foot_at(m, gu, gv, (0, 0), false).iter().map(|&(x, y)| ea(m, x, y)[ch]).collect();
+        if filt == 0 && bias % 256 == 0 {
+            if let Some(rw) = runtime_words(&words, &op, vop1(0x07, 200, v(2))) {
+                let (m0, m1) = blind_pick(lod, sw, 4);
+                let exp: Vec<u32> = blind_foot(m0, m1, gu, gv, (0, 0)).iter().map(|&(x, y)| ea(m1, x, y)[ch]).collect();
+                cs.push((case("image_gather4_l", op, rw, Env { tex: Some(&IMG_A), samp: Some(lod_sampler(filt, 0, sw)), pos: true, ..Default::default() }, exp), true));
+            }
+        }
+        cs.push((case("image_gather4_l", op, words, Env { tex: Some(&IMG_A), samp: Some(lod_sampler(filt, 0, sw)), ..Default::default() }, exp), false));
+    }
+    for &(ox, oy, lod, bias, hi) in &[(1i32, -1i32, 0.0f32, 256i32, 0xfffu32), (-2, 3, 2.0, 0, 0x100)] {
+        let sw = lod_words(bias, 0, hi, 1);
+        let op = mimg(0x54, 2, 1, 1, 8, 0, 12);
+        let words = build(&lod_prog(Some(sw), &[packoff(ox, oy), fb(gu), fb(gv), fb(lod)]), &op, 8, 4, false);
+        let m = lod_pick(lod, sw, 4);
+        let exp: Vec<u32> = foot_at(m, gu, gv, (ox, oy), false).iter().map(|&(x, y)| ea(m, x, y)[1]).collect();
+        cs.push((case("image_gather4_l_o", op, words, Env { tex: Some(&IMG_A), samp: Some(lod_sampler(0, 0, sw)), ..Default::default() }, exp), false));
+    }
+    for &(layer, lod, bias, hi) in &[(2.0f32, 0.0f32, 256i32, 0xfffu32), (1.0, 1.0, 0, 0)] {
+        let sw = lod_words(bias, 0, hi, 1);
+        let op = mimg(0x44, 4, 5, 1, 8, 0, 12);
+        let words = build(&lod_prog(Some(sw), &[fb(gu), fb(gv), fb(layer), fb(lod)]), &op, 8, 4, false);
+        let m = lod_pick(lod, sw, 2);
+        let exp: Vec<u32> = foot_at(m, gu, gv, (0, 0), false).iter().map(|&(x, y)| ea(m, x, y)[2]).collect();
+        cs.push((case("image_gather4_l", op, words, Env { tex: Some(&IMG_C), samp: Some(lod_sampler(0, 0, sw)), ..Default::default() }, exp), false));
+    }
+    let one = |b: bool| fb(if b { 1.0 } else { 0.0 });
+    for &(z, lod, bias, hi) in &[(0.5f32 + 6.5 / 64.0, 0.0f32, 256i32, 0xfffu32), (30.5 / 64.0, 1.0, 0, 0)] {
+        let sw = lod_words(bias, 0, hi, 1);
+        let op = mimg(0x4c, 1, 1, 1, 8, 0, 12);
+        let words = build(&lod_prog(Some(sw), &[fb(z), fb(gu), fb(gv), fb(lod)]), &op, 8, 4, false);
+        let m = lod_pick(lod, sw, 2);
+        let exp: Vec<u32> = foot_at(m, gu, gv, (0, 0), false).iter().map(|&(x, y)| one(z < f32::from_bits(td(m, 0, x, y)[0]))).collect();
+        cs.push((case("image_gather4_c_l", op, words, Env { tex: Some(&IMG_E), samp: Some(lod_sampler(0x80, 2, sw)), ..Default::default() }, exp), false));
+    }
+    for &(lod, bias, lo, hi) in &[(0.0f32, 256i32, 0u32, 0xfffu32), (3.0, 0, 0, 0x100), (0.0, 0, 0x200, 0xfff)] {
+        let sw = lod_words(bias, lo, hi, 1);
+        let op = mimg(0x44, 1, 1, 1, 8, 0, 12);
+        let words = build(&lod_prog(None, &[fb(gu), fb(gv), fb(lod)]), &op, 8, 4, false);
+        let (m0, m1) = blind_pick(lod, sw, 4);
+        let exp: Vec<u32> = blind_foot(m0, m1, gu, gv, (0, 0)).iter().map(|&(x, y)| ea(m1, x, y)[0]).collect();
+        cs.push((case("image_gather4_l", op, words, Env { tex: Some(&IMG_A), samp: Some(lod_sampler(0, 0, sw)), ..Default::default() }, exp), true));
+    }
+    run_direct("mimg_gather_explicit_lod_sampler", &cs);
+}
+
+#[test]
+fn image_mimg_gather_explicit_lod_sampler_refusals() {
+    let op = mimg(0x44, 1, 1, 1, 8, 0, 12);
+    for &((w1, w2), why) in &[
+        (lod_words(0, 0x180, 0xfff, 1), "fractional S# MIN_LOD 0x180"),
+        (lod_words(0, 0, 0x280, 2), "MAX_LOD 0x280 unsupported"),
+        (lod_words(0, 0x300, 0x100, 1), "S# MIN_LOD 0x300 above MAX_LOD 0x100"),
+        (lod_words(0, 0, 0xfff, 0), "S# MIP_FILTER 0 unsupported"),
+        ((0xfff000, lod_words(0, 0, 0, 1).1 | (4 << 14)), "S# LOD_BIAS_SEC 0x4"),
+    ] {
+        let words = build(&lod_prog(Some((w1, w2)), &[fb(0.3), fb(0.55), fb(1.0)]), &op, 8, 4, false);
+        match translate(&extract(&words, false)) {
+            Err(e) => assert!(e.contains("image_gather4_l at ") && e.contains(why), "S# {w1:#x} {w2:#x}: error {e:?}, want {why:?}"),
+            Ok(_) => panic!("S# {w1:#x} {w2:#x}: translated, want refusal {why:?}"),
+        }
+    }
+}
+
 #[test]
 fn image_mimg_query() {
     let mut cs = Vec::new();
