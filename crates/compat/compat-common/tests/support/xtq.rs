@@ -1340,6 +1340,54 @@ pub fn verify_termination_cancels_delayed_callbacks() {
     }
 }
 
+pub fn verify_termination_order_on_a_manual_queue() {
+    let a = api();
+    let q = a.create(MANUAL, MANUAL);
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
+    let phase = Arc::new(AtomicU32::new(0));
+    let note = |name: &'static str| {
+        let (l, p) = (log.clone(), phase.clone());
+        move |canceled: bool| l.lock().unwrap().push(format!("{name} {} in {}", if canceled { "canceled" } else { "ran" }, ["no dispatch", "work dispatch", "completion dispatch"][p.load(SeqCst) as usize]))
+    };
+    assert_eq!(a.submit(q, WORK, 10000, note("delayed work")), 0);
+    assert_eq!(a.submit(q, COMPLETION, 10000, note("delayed completion")), 0);
+    assert_eq!(a.submit(q, WORK, 0, note("queued work")), 0);
+    assert_eq!(a.submit(q, COMPLETION, 0, note("queued completion")), 0);
+    let (l, p) = (log.clone(), phase.clone());
+    assert_eq!(a.terminate(q, false, Some(Box::new(move || l.lock().unwrap().push(format!("terminated in {}", ["no dispatch", "work dispatch", "completion dispatch"][p.load(SeqCst) as usize]))))), 0);
+    let after_terminate = (a.submit(q, WORK, 0, note("late work")), a.submit(q, COMPLETION, 0, note("late completion")));
+    let before_dispatch = log.lock().unwrap().clone();
+    phase.store(1, SeqCst);
+    while a.dispatch(q, WORK, 0) {}
+    phase.store(0, SeqCst);
+    let after_work = (a.submit(q, WORK, 0, note("later work")), a.submit(q, COMPLETION, 0, note("later completion")));
+    let end = Instant::now() + Duration::from_secs(2);
+    while !log.lock().unwrap().iter().any(|e| e.starts_with("terminated")) && Instant::now() < end {
+        phase.store(2, SeqCst);
+        while a.dispatch(q, COMPLETION, 0) {}
+        phase.store(1, SeqCst);
+        while a.dispatch(q, WORK, 0) {}
+        phase.store(0, SeqCst);
+    }
+    let at_end = (a.submit(q, WORK, 0, note("last work")), a.submit(q, COMPLETION, 0, note("last completion")));
+    assert_eq!(after_terminate, (E_ABORT, 0), "right after XTaskQueueTerminate the work port refuses and the completion port still accepts");
+    assert!(before_dispatch.is_empty(), "nothing is canceled before its port is dispatched: {before_dispatch:?}");
+    assert_eq!(after_work, (E_ABORT, E_ABORT), "once the work port has drained, the completion port refuses too");
+    assert_eq!(at_end, (E_ABORT, E_ABORT), "a terminated queue takes no new work");
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            "queued work canceled in work dispatch",
+            "delayed work canceled in work dispatch",
+            "queued completion canceled in completion dispatch",
+            "late completion canceled in completion dispatch",
+            "delayed completion canceled in completion dispatch",
+            "terminated in completion dispatch",
+        ]
+    );
+    a.close(q);
+}
+
 pub fn verify_close_keeps_queued_callbacks() {
     let a = api();
     let q = a.create(SERIALIZED, SERIALIZED);
@@ -2234,7 +2282,8 @@ macro_rules! xtq_tests {
             verify_queue_monitor_has_correct_ports,
             verify_nested_queue_dispatch_order, verify_terminate_waits_for_async_in_flight,
             verify_single_queue_delayed_poll_strand, verify_composite_queue_delayed_callback_starvation,
-            verify_termination_cancels_delayed_callbacks, verify_close_keeps_queued_callbacks,
+            verify_termination_cancels_delayed_callbacks, verify_termination_order_on_a_manual_queue,
+            verify_close_keeps_queued_callbacks,
             verify_dispatch_on_pool_port, verify_thread_pool_callbacks_can_block,
             verify_serialized_queues_do_not_keep_threads, verify_serialized_port_final_release,
             verify_serialized_port_survives_one_release, verify_serialized_idle_port_delivers_termination,

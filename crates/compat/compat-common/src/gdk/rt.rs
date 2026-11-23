@@ -260,10 +260,10 @@ type Idle = Box<dyn FnOnce() + Send>;
 
 #[derive(Default)]
 struct LiveState {
-    n: usize,
+    n: [usize; 2],
     ended: bool,
     work_done: bool,
-    on_idle: Vec<Idle>,
+    on_idle: [Vec<Idle>; 2],
 }
 
 #[derive(Default)]
@@ -277,15 +277,16 @@ impl Live {
         if s.ended && (port == 0 || s.work_done) {
             return false;
         }
-        s.n += 1;
+        s.n[(port != 0) as usize] += 1;
         true
     }
 
-    fn leave(&self) {
+    fn leave(&self, port: u32) {
         let run = {
             let mut s = self.st.lock().unwrap_or_else(|e| e.into_inner());
-            s.n = s.n.saturating_sub(1);
-            if s.n == 0 && s.ended { std::mem::take(&mut s.on_idle) } else { Vec::new() }
+            let p = (port != 0) as usize;
+            s.n[p] = s.n[p].saturating_sub(1);
+            if s.n[p] == 0 && s.ended { std::mem::take(&mut s.on_idle[p]) } else { Vec::new() }
         };
         for f in run {
             f();
@@ -297,10 +298,10 @@ impl Live {
             let mut s = self.st.lock().unwrap_or_else(|e| e.into_inner());
             s.ended = true;
             ended.store(true, Ordering::Release);
-            if s.n == 0 {
+            if s.n[0] == 0 {
                 Some(on_idle)
             } else {
-                s.on_idle.push(on_idle);
+                s.on_idle[0].push(on_idle);
                 None
             }
         };
@@ -309,14 +310,15 @@ impl Live {
         }
     }
 
-    fn finish_work(&self, then: Idle) {
+    fn finish_work(&self, close_completion: impl FnOnce(), then: Idle) {
+        self.st.lock().unwrap_or_else(|e| e.into_inner()).work_done = true;
+        close_completion();
         let now = {
             let mut s = self.st.lock().unwrap_or_else(|e| e.into_inner());
-            s.work_done = true;
-            if s.n == 0 {
+            if s.n[1] == 0 {
                 Some(then)
             } else {
-                s.on_idle.push(then);
+                s.on_idle[1].push(then);
                 None
             }
         };
@@ -405,31 +407,31 @@ unsafe fn queued(h: usize, port: u32, job: Job) -> Queued {
         resolve(h),
         Box::new(move |canceled| {
             let key = Arc::as_ptr(&live) as usize;
-            FRAMES.with(|f| f.borrow_mut().push((key, false)));
+            FRAMES.with(|f| f.borrow_mut().push((key, port, false)));
             job(canceled || ended.load(Ordering::Acquire));
-            let released = FRAMES.with(|f| f.borrow_mut().pop().map(|x| x.1).unwrap_or(false));
+            let released = FRAMES.with(|f| f.borrow_mut().pop().map(|x| x.2).unwrap_or(false));
             if !released {
-                live.leave();
+                live.leave(port);
             }
         }),
     )
 }
 
 thread_local! {
-    static FRAMES: RefCell<Vec<(usize, bool)>> = const { RefCell::new(Vec::new()) };
+    static FRAMES: RefCell<Vec<(usize, u32, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
-fn release_own_frames(live: &Arc<Live>) -> usize {
+fn release_own_frames(live: &Arc<Live>) -> Vec<u32> {
     let key = Arc::as_ptr(live) as usize;
     FRAMES.with(|f| {
-        let mut n = 0;
+        let mut ports = Vec::new();
         for fr in f.borrow_mut().iter_mut() {
-            if fr.0 == key && !fr.1 {
-                fr.1 = true;
-                n += 1;
+            if fr.0 == key && !fr.2 {
+                fr.2 = true;
+                ports.push(fr.1);
             }
         }
-        n
+        ports
     })
 }
 
@@ -444,8 +446,10 @@ pub unsafe fn submit(queue_h: usize, port: u32, job: Job) -> i32 {
     }
 }
 
-fn timers() -> &'static (Mutex<Vec<(Instant, usize, Arc<Port>, Option<Job>)>>, Condvar) {
-    static T: OnceLock<(Mutex<Vec<(Instant, usize, Arc<Port>, Option<Job>)>>, Condvar)> = OnceLock::new();
+type Timer = (Instant, usize, u32, Arc<Port>, Option<Job>);
+
+fn timers() -> &'static (Mutex<Vec<Timer>>, Condvar) {
+    static T: OnceLock<(Mutex<Vec<Timer>>, Condvar)> = OnceLock::new();
     static START: std::sync::Once = std::sync::Once::new();
     let t = T.get_or_init(|| (Mutex::new(Vec::new()), Condvar::new()));
     START.call_once(|| {
@@ -460,7 +464,7 @@ fn timers() -> &'static (Mutex<Vec<(Instant, usize, Arc<Port>, Option<Job>)>>, C
                         let mut i = 0;
                         while i < v.len() {
                             if v[i].0 <= now {
-                                let (_, tag, p, j) = v.swap_remove(i);
+                                let (_, tag, _, p, j) = v.swap_remove(i);
                                 if let Some(j) = j {
                                     due.push((p, tag, j));
                                 }
@@ -498,20 +502,20 @@ pub unsafe fn submit_delayed(queue_h: usize, port: u32, delay_ms: u32, job: Job)
         return S_OK;
     }
     let (m, cv) = timers();
-    m.lock().unwrap_or_else(|e| e.into_inner()).push((Instant::now() + Duration::from_millis(delay_ms as u64), tag, p, Some(job)));
+    m.lock().unwrap_or_else(|e| e.into_inner()).push((Instant::now() + Duration::from_millis(delay_ms as u64), tag, (port != 0) as u32, p, Some(job)));
     cv.notify_all();
     S_OK
 }
 
-fn flush_timers(tag: usize, ports: &[&Arc<Port>]) {
+fn flush_timers(tag: usize, port: u32, whole: Option<&Arc<Port>>) {
     let mut due: Vec<(Arc<Port>, usize, Job)> = Vec::new();
     {
         let (m, cv) = timers();
         let mut v = m.lock().unwrap_or_else(|e| e.into_inner());
         let mut i = 0;
         while i < v.len() {
-            if v[i].1 == tag || ports.iter().any(|p| Arc::ptr_eq(p, &v[i].2)) {
-                let (_, tg, p, j) = v.swap_remove(i);
+            if (v[i].1 == tag && v[i].2 == port) || whole.is_some_and(|p| Arc::ptr_eq(p, &v[i].3)) {
+                let (_, tg, _, p, j) = v.swap_remove(i);
                 if let Some(j) = j {
                     due.push((p, tg, j));
                 }
@@ -633,27 +637,29 @@ unsafe extern "system" fn q_terminate(_t: This, q: usize, wait: bool, ctx: *mut 
     let route: Idle = Box::new(move || {
         let deliver: Job = Box::new(move |_| done());
         let forward: Job = Box::new(move |_| {
-            live.finish_work(Box::new(move || {
-                if owns {
-                    completion.terminated.store(true, Ordering::Release);
-                    completion.cv.notify_all();
-                }
-                completion.submit_marker(h, deliver)
-            }))
+            let closing = completion.clone();
+            live.finish_work(
+                move || {
+                    flush_timers(h, 1, owns.then_some(&closing));
+                    if owns {
+                        closing.terminated.store(true, Ordering::Release);
+                        closing.cv.notify_all();
+                    }
+                },
+                Box::new(move || completion.submit_marker(h, deliver)),
+            )
         });
         work.submit_marker(h, forward);
     });
     let own = release_own_frames(&qq.live);
     qq.live.end(&qq.ended, route);
-    for _ in 0..own {
-        qq.live.leave();
+    for port in own {
+        qq.live.leave(port);
     }
+    flush_timers(h, 0, qq.owns.then_some(&qq.work));
     if qq.owns {
-        flush_timers(resolve(q), &[&qq.work, &qq.completion]);
         qq.work.terminated.store(true, Ordering::Release);
         qq.work.cv.notify_all();
-    } else {
-        flush_timers(resolve(q), &[]);
     }
     if wait {
         let mut d = sig.done.lock().unwrap_or_else(|e| e.into_inner());
