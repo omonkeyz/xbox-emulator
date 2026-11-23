@@ -1170,6 +1170,9 @@ unsafe fn adopt(up: &mut Uploader, res: *mut c_void, p: Placed) -> Result<Tracke
     if let Some(r) = unsupported_reason(&p) {
         return Err(r);
     }
+    if let Some(s) = crate::uav_subst::lookup(res) {
+        return Err(format!("the PC texture stores format {} as format {} (uav_subst) and console texels are not widened while mirroring, so title CPU writes do not reach it", s.console, s.host));
+    }
     let layout = layout_for(&p.desc)?;
     if layout.planes != 1 {
         return Err(format!("{} planes", layout.planes));

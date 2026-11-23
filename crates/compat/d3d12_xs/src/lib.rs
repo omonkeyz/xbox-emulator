@@ -136,6 +136,7 @@ mod cl_console_fix;
 mod resolve_x;
 mod device_console_fix;
 mod depth_uav;
+mod uav_subst;
 mod pso_ext;
 mod global_bind;
 mod kmd10;

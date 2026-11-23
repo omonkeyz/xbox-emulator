@@ -1118,3 +1118,6 @@ fn hw_gpuprof_times_a_cross_queue_wait_and_the_submissions_around_it() {
         }
     }
 }
+
+#[path = "uav_subst_hw.rs"]
+mod uav_subst_hw;
