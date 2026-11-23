@@ -2318,6 +2318,9 @@ impl<'a> Emitter<'a> {
                     // A dynamic SOFFSET register indexes the buffer at run time: size the
                     // cbuffer declaration to the D3D12 maximum (64 KiB = 4096 vec4).
                     let dynamic = (ins.raw.get(1).copied().unwrap_or(0) >> 25) != 0x7d;
+                    if !dynamic && ins.aux.imm < 0 {
+                        return Err(format!("s_buffer_load at {:#x}: negative offset without SOFFSET", ins.offset));
+                    }
                     let end = if dynamic { 4096 * 4 } else { ins.aux.imm as u32 / 4 + n };
                     let mut out: Vec<(u32, Res)> = Vec::new();
                     // A scalar load reads whatever buffer the descriptor names. From the CBV
@@ -3790,10 +3793,11 @@ impl<'a> Emitter<'a> {
                             _ => smem_bounds::Bound::Mem,
                         };
                         let imm4 = ins.aux.imm as u32 & !3;
+                        let past = if ins.aux.imm < 0 { ">=" } else { "<" };
                         let t = self.tmp;
                         self.tmp += 1;
                         if soff != 0x7d {
-                            self.line(&format!("uint t{t} = ({} & 0xfffffffcu) + {imm4:#x}u; uint t{t}c = (t{t} < {imm4:#x}u) ? 1u : 0u;", ssrc_name(soff)?));
+                            self.line(&format!("uint t{t} = ({} & 0xfffffffcu) + {imm4:#x}u; uint t{t}c = (t{t} {past} {imm4:#x}u) ? 1u : 0u;", ssrc_name(soff)?));
                         } else {
                             self.line(&format!("uint t{t} = {imm4:#x}u;"));
                         }
@@ -3822,11 +3826,12 @@ impl<'a> Emitter<'a> {
                 };
                 self.note_cb_bound(slot, Some(&bound));
                 let imm4 = ins.aux.imm as u32 & !3;
+                let past = if ins.aux.imm < 0 { ">=" } else { "<" };
                 if soff != 0x7d {
                     let so = ssrc_name(soff)?;
                     let t = self.tmp;
                     self.tmp += 1;
-                    self.line(&format!("uint t{t} = ({so} & 0xfffffffcu) + {imm4:#x}u; uint t{t}c = (t{t} < {imm4:#x}u) ? 1u : 0u;"));
+                    self.line(&format!("uint t{t} = ({so} & 0xfffffffcu) + {imm4:#x}u; uint t{t}c = (t{t} {past} {imm4:#x}u) ? 1u : 0u;"));
                     for k in 0..n {
                         let lo = if k == 0 { format!("t{t}") } else { format!("(t{t} + {:#x}u)", 4 * k) };
                         match self.smem_cond_dyn(&bound, &format!("t{t}"), &format!("t{t}c"), k, true, true) {

@@ -279,7 +279,7 @@ fn decode_operands(enc: Enc, raw: &[u32]) -> (Vec<Opnd>, Vec<Opnd>, InsnAux) {
             let sbase = (w & 0x3f) * 2; // SBASE is an even-aligned SGPR pair, stored /2
             aux.imm = (lit.unwrap_or(raw.get(1).copied().unwrap_or(0)) & 0x1f_ffff) as i64;
             if let Some(d1) = raw.get(1) {
-                aux.imm = (d1 & 0x1f_ffff) as i64; // 21-bit OFFSET in dword1
+                aux.imm = (((d1 << 11) as i32) >> 11) as i64; // signed 21-bit OFFSET in dword1
             }
             match (w >> 18) & 0xff {
                 0x1f | 0x20 => return (vec![], vec![], aux),

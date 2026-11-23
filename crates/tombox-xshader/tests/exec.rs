@@ -2057,6 +2057,21 @@ fn scalar_smem_loads() {
         let want = regs.iter().map(|&r| word(0, 16 + 4 * (r - 20))).collect();
         cs.push(C { m, w, out: regs, want });
     }
+    for &(so, imm, n, byte) in &[(0xeu32, 2i32, 1u32, 0xcu32), (3, 3, 1, 0), (2, 6, 1, 4), (8, -4, 1, 4), (0xb, -1, 1, 4), (0x10, -8, 2, 8)] {
+        let mut w = Prog::new();
+        w.sv(12, so);
+        let mut w = w.w;
+        w.extend_from_slice(&load_v0);
+        w.extend_from_slice(&smem(if n == 2 { 0x09 } else { 0x08 }, 20, 0, imm as u32, 12));
+        let regs: Vec<u32> = (0..n).map(|k| 20 + k).collect();
+        let want = regs.iter().map(|&r| word(0, byte + 4 * (r - 20))).collect();
+        cs.push(C { m: if n == 2 { "s_buffer_load_dwordx2" } else { "s_buffer_load_dword" }, w, out: regs, want });
+    }
+    {
+        let mut w = load_v0.to_vec();
+        w.extend_from_slice(&smem(0x08, 20, 0, 0x13, SNULL));
+        cs.push(C { m: "s_buffer_load_dword", w, out: vec![20], want: vec![word(0, 0x10)] });
+    }
     let probe = |base: u32| smem(0x08, 30, base, 0x24, SNULL);
     let mut w = Vec::new();
     for k in 0..4u32 {
