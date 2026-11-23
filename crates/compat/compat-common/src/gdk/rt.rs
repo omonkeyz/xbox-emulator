@@ -754,6 +754,7 @@ struct AState {
     identity: usize,
     status: Mutex<(i32, usize)>,
     cv: Condvar,
+    signaled: AtomicBool,
     cleaned: AtomicBool,
     queue: usize,
     canceled: AtomicBool,
@@ -764,6 +765,14 @@ struct AState {
 
 unsafe impl Send for AState {}
 unsafe impl Sync for AState {}
+
+impl AState {
+    fn signal(&self) {
+        let _st = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        self.signaled.store(true, Ordering::Release);
+        self.cv.notify_all();
+    }
+}
 
 fn states() -> &'static Mutex<HashMap<usize, Arc<AState>>> {
     static M: OnceLock<Mutex<HashMap<usize, Arc<AState>>>> = OnceLock::new();
@@ -834,6 +843,7 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
         identity,
         status: Mutex::new((E_PENDING, 0)),
         cv: Condvar::new(),
+        signaled: AtomicBool::new(false),
         cleaned: AtomicBool::new(false),
         queue: (*block).queue,
         canceled: AtomicBool::new(false),
@@ -897,40 +907,36 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
     if hr == E_PENDING {
         return;
     }
-    {
+    let keep = hr >= 0 && size > 0;
+    let callback = {
         let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
         if st.0 != E_PENDING {
             return;
         }
         *st = (hr, size);
-    }
-    let keep = hr >= 0 && size > 0;
-    let after_callback = !keep && (*block).callback.is_some() && s.in_begin.load(Ordering::Acquire);
+        mark(block, hr, keep);
+        if !keep {
+            let mut m = states().lock().unwrap_or_else(|e| e.into_inner());
+            if m.get(&(block as usize)).is_some_and(|c| Arc::ptr_eq(c, &s)) {
+                m.remove(&(block as usize));
+            }
+        }
+        (*block).callback
+    };
+    let after_callback = !keep && callback.is_some() && s.in_begin.load(Ordering::Acquire);
     if !keep && !after_callback {
         cleanup(&s, block);
     }
-    mark(block, hr, keep);
-    let notify = {
-        let s = s.clone();
-        let b = SendPtr(block as usize);
-        move || {
-            let block = b.0 as *mut Block;
-            if !keep {
-                states().lock().unwrap_or_else(|e| e.into_inner()).remove(&(block as usize));
-            }
-            s.cv.notify_all();
-        }
-    };
-    match (*block).callback {
+    match callback {
         Some(cb) => {
             let b = SendPtr(block as usize);
-            let owner = s.clone();
+            let done = s.clone();
             let job: Job = Box::new(move |_| {
                 cb(b.0 as *mut c_void);
                 if after_callback {
-                    cleanup(&owner, b.0 as *mut Block);
+                    cleanup(&done, b.0 as *mut Block);
                 }
-                notify();
+                done.signal();
             });
             match queued(s.queue, 1, job) {
                 Queued::Ready(p, tag, j) => p.submit_tagged(tag, j),
@@ -939,11 +945,11 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
                     if after_callback {
                         cleanup(s, block);
                     }
-                    s.cv.notify_all()
+                    s.signal()
                 }
             }
         }
-        None => notify(),
+        None => s.signal(),
     }
 }
 
@@ -954,7 +960,7 @@ pub unsafe fn get_status(block: *mut Block, wait: bool) -> i32 {
     match state(block as usize) {
         Some(s) => {
             let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
-            while wait && st.0 == E_PENDING {
+            while wait && !s.signaled.load(Ordering::Acquire) {
                 st = s.cv.wait(st).unwrap_or_else(|e| e.into_inner());
             }
             st.0
