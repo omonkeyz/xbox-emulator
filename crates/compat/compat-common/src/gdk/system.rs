@@ -1,4 +1,4 @@
-use super::{cstr, data_root, log, put_str, setting, title, xasync, Guid, Iface, This, E_ABORT, E_FAIL, E_INVALIDARG, S_OK};
+use super::{cstr, data_root, log, put_str, setting, title, xasync, Guid, Iface, This, E_ABORT, E_INVALIDARG, E_NOT_FOUND, S_OK};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -88,16 +88,12 @@ unsafe extern "system" fn get_analytics_info(_t: This, out: *mut u8) -> *mut u8 
 }
 
 unsafe extern "system" fn get_title_id(_t: This, out: *mut u32) -> i32 {
+    let Some(id) = title().title_id else { return E_NOT_FOUND };
     if out.is_null() {
         return E_INVALIDARG;
     }
-    match title().title_id {
-        Some(id) => {
-            *out = id;
-            S_OK
-        }
-        None => E_FAIL,
-    }
+    *out = id;
+    S_OK
 }
 
 pub fn app_device_id() -> String {

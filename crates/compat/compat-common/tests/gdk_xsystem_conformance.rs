@@ -6,10 +6,7 @@ use std::sync::OnceLock;
 #[path = "support/xsys.rs"]
 mod xsys;
 
-const DIFFERS: &[(&str, &str)] = &[
-    ("title_id_without_a_title_is_not_found", "XGameGetXboxTitleId without a TitleId returns E_FAIL, reference E_NOT_FOUND"),
-    ("title_id_without_a_title_reports_not_found_before_a_null_output", "XGameGetXboxTitleId(null) without a TitleId returns E_INVALIDARG, reference E_NOT_FOUND"),
-];
+const DIFFERS: &[(&str, &str)] = &[];
 
 unsafe extern "system" fn query(provider: *const xsys::Guid, iid: *const xsys::Guid, out: *mut *mut c_void) -> i32 {
     gdk::query_api_impl(provider as *const gdk::Guid, iid as *const gdk::Guid, out)
