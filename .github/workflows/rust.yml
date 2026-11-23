@@ -43,9 +43,49 @@ jobs:
       - name: cargo check
         shell: bash
         run: cargo check --locked -p tombox-pe -p tombox-archive -p tombox-rpf -p tombox-disasm -p tombox-xshader --all-targets
-      - name: cargo test (no dumps, WARP only)
+      - name: cargo test (no dumps, WARP only, xshader exec runs in xshader-exec)
         shell: bash
-        run: cargo test --locked -p tombox-pe -p tombox-archive -p tombox-rpf -p tombox-disasm -p tombox-xshader --no-fail-fast
+        run: |
+          rest=()
+          for f in crates/tombox-xshader/tests/*.rs crates/tombox-xshader/tests/*/main.rs; do
+            [ -e "$f" ] || continue
+            n="$(basename "$f" .rs)"
+            if [ "$n" = main ]; then n="$(basename "$(dirname "$f")")"; fi
+            if [ "$n" != exec ]; then rest+=(--test "$n"); fi
+          done
+          rc=0
+          cargo test --locked -p tombox-pe -p tombox-archive -p tombox-rpf -p tombox-disasm --no-fail-fast || rc=1
+          cargo test --locked -p tombox-xshader --no-fail-fast --lib --bins "${rest[@]}" || rc=1
+          cargo test --locked -p tombox-xshader --doc || rc=1
+          exit "$rc"
+
+  xshader-exec:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: cargo test, xshader exec, shard ${{ matrix.shard }} of ${{ strategy.job-total }} (WARP only)
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ strategy.job-index }}
+          SHARD_TOTAL: ${{ strategy.job-total }}
+        run: |
+          cargo test --locked -p tombox-xshader --test exec -- --list --format terse | tr -d '\r' | sed -n 's/: test$//p' | LC_ALL=C sort > "$RUNNER_TEMP/exec_all.txt"
+          awk -v k="$SHARD_INDEX" -v n="$SHARD_TOTAL" '(NR - 1) % n == k' "$RUNNER_TEMP/exec_all.txt" > "$RUNNER_TEMP/exec_shard.txt"
+          echo "shard $((SHARD_INDEX + 1)) of $SHARD_TOTAL: $(wc -l < "$RUNNER_TEMP/exec_shard.txt") of $(wc -l < "$RUNNER_TEMP/exec_all.txt") tests"
+          test -s "$RUNNER_TEMP/exec_shard.txt"
+          xargs cargo test --locked -p tombox-xshader --test exec -- --exact < "$RUNNER_TEMP/exec_shard.txt"
 
   rust-workspace-check:
     runs-on: windows-latest
