@@ -77,6 +77,9 @@ vectors.py          Prints the hardware vector table for tests/exec_mem/mtbuf_hw
                     few elements, plus those where naive models (fp32 round-to-nearest-even, int
                     truncation) disagree with the hardware, and d16 stores of +-0.5, NaN, max
                     finite and -0. Usage: vectors.py <outdir>
+valu_probe.py       VALU / SALU probes (f16 FMA, s_bfe widths, f32 NaN rules, normalized
+                    conversions), see the last section. Usage: valu_probe.py gen <outdir> |
+                    show <outdir>
 
 
 Results (gfx1036)
@@ -265,3 +268,61 @@ image_atomic_* (with and without glc) and reads the texels back.
     ./verify_runner k.co ia_add_1 cases.in rec/add_1.bin 8 256                       (each ia_<op>_<glc> kernel)
     python3 image_probe.py check rec                                                (208/208 on gfx1036)
     python3 image_probe.py rust rec crates/tombox-xshader/tests/exec_mem/mimg_rdna2.rs "<machine>"
+
+
+VALU / SALU probes (valu_probe.py)
+----------------------------------
+
+Same runner (runner.cpp) and kernel preamble (gen.py) as the MTBUF probe, for four questions outside
+MTBUF that the ISA text leaves open. 33 kernels.
+
+    fma16   VOP2 0x36 / 0x37 / 0x38: fused (v_fmac_f16 / v_fmamk_f16 / v_fmaak_f16, the LLVM names for
+            GFX10) or multiply-then-add? Each kernel also runs v_fma_f16 and v_mul_f16 + v_add_f16 on
+            the same inputs, so both references come from the hardware.
+    sbfe    s_bfe_{u,i}{32,64} with a width field of 32 or more (64 or more for the 64-bit forms) and
+            junk in the unused bits of S1. show compares three candidates: 7-bit width with sign-fill
+            past the top bit, 7-bit width with the literal ISA formula (zero-fill), and width modulo
+            the operand size.
+    nan     which NaN v_fma_f32, v_mul_f32, v_add_f32, v_sub_f32, v_fmac_f32, v_min_f32 and v_max_f32
+            return, with IEEE mode off and on. show checks the outputs against the rules measured on
+            gfx1036 (below), so a different GPU or a changed kernel shows up as a nonzero count.
+    norm    rounding, NaN and range handling of v_cvt_pknorm_{i,u}16_{f32,f16} and
+            v_cvt_norm_{i,u}16_f16.
+
+    python3 valu_probe.py gen <dir>
+    clang-18 -x assembler -target amdgcn-amd-amdhsa -mcpu=gfx1036 -c <dir>/k.s -o <dir>/k.o
+    ld.lld-18 -shared <dir>/k.o -o <dir>/k.co
+    <runner built by run.sh> <dir>
+    python3 valu_probe.py show <dir>
+
+On gfx1036 (measured by SchmashinPrunes on the iGPU of a Ryzen 5 9600X: Linux Mint, kernel 7.0.0-42,
+ROCm/HIP 5.7.1, clang / ld.lld 18.1.3; all 33 kernels ran and no kernel had outputs that differ
+between threads). This is RDNA2, not the console's gfx1013.
+
+    fma16   fused. VOP2 0x36 / 0x37 / 0x38 match hardware v_fma_f16 on all 254,891 inputs that separate
+            the two models (three K values) and never match v_mul_f16 + v_add_f16. Hardware v_fma_f16
+            matches the exact single-rounding model with 0 mismatches. The upper half of D is kept.
+    sbfe    7-bit width, sign-fill: 152 / 152 (literal ISA formula 114, width modulo the operand size
+            100). A signed field that reaches the top bit sign-fills. Junk in the unused bits of S1 is
+            ignored, and so is offset bit 5 (32-bit forms) or bit 6 (64-bit forms). SCC = result != 0.
+    norm    round to nearest, 0 mismatches for all six instructions, NaN gives 0. Half-up
+            (floor(x + 0.5)) fails on the signed forms. v_cvt_norm_* keep the upper half of D.
+    nan     the rules below, fitted by SchmashinPrunes on the raw outputs, reproduce every NaN result
+            in both IEEE modes. show checks them (nan_arith / nan_minmax) and prints the number of
+            results that differ per instruction: 0 on gfx1036.
+
+NaN rules, arithmetic (v_fma_f32, v_fmac_f32, v_mul_f32, v_add_f32, v_sub_f32), operand order
+(a, b, c) or (src0, src1):
+
+    1. v_sub_f32 negates src1 first, so a NaN in src1 comes out with its sign flipped.
+    2. fma / fmac: if neither a nor b is a NaN and a * b is invalid (0 * inf), the result is the
+       default NaN even when c is a NaN.
+    3. Otherwise the result is the first NaN operand: unchanged in IEEE mode 0 (a signalling NaN stays
+       signalling), quieted (| 0x400000) in IEEE mode 1.
+    4. An invalid operation without a NaN input (0 * inf, inf - inf, the fma sum) returns 0xffc00000
+       in both modes.
+
+NaN rules, v_min_f32 / v_max_f32: in IEEE mode 0 a NaN operand is ignored when the other one is a
+number, and two NaNs give src0 unchanged. In IEEE mode 1 a signalling NaN wins and is quieted (src0
+first); otherwise a quiet NaN is ignored when the other operand is a number, and two quiet NaNs give
+src0.
