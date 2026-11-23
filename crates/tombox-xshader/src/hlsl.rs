@@ -265,6 +265,22 @@ fn sat_int(e: &str, bits: u32) -> String {
     format!("(min(asuint(max({e}, -{h})) + {h:#x}u, {:#x}u) ^ {h:#x}u)", (h << 1) - 1)
 }
 
+fn f16_inline(x: f32) -> u32 {
+    if (x - 0.159_154_94).abs() < 1e-7 {
+        return 0x3118;
+    }
+    let b = x.to_bits();
+    ((b >> 16) & 0x8000) | ((((b >> 23) & 0xff) - 112) << 10)
+}
+
+fn f16_inline_val(x: f32, hi: bool) -> String {
+    match (hi, f16_inline(x)) {
+        (true, _) => "0.0".into(),
+        (false, 0x3118) => "f16tof32(0x3118u)".into(),
+        _ => format!("({x:?})"),
+    }
+}
+
 /// Scalar register number of an operand (SGPRs, plus vcc_lo/vcc_hi = 106/107, which SMEM
 /// loads can target directly: `s_buffer_load_dwordx2 vcc_lo, ...`).
 fn sreg_num(o: &Opnd) -> Option<u8> {
@@ -4415,7 +4431,7 @@ impl<'a> Emitter<'a> {
         let h16 = |o: &Opnd| -> Result<String, String> {
             let hi_sel = ins.enc == Enc::Vop3 && s.iter().position(|x| std::ptr::eq(x, o)).map_or(false, |i| (ins.raw[0] >> (11 + i)) & 1 != 0);
             let mut e = match o {
-                Opnd::ConstF32(_) => f(o)?,
+                Opnd::ConstF32(x) => f16_inline_val(*x, hi_sel),
                 _ if hi_sel => format!("f16tof32(({}) >> 16)", r(o)?),
                 _ => format!("f16tof32(({}) & 0xffffu)", r(o)?),
             };
@@ -4683,7 +4699,10 @@ impl<'a> Emitter<'a> {
             let mut u = Vec::new();
             let mut i = Vec::new();
             for k in 0..n {
-                let x = r(&s[k])?;
+                let x = match &s[k] {
+                    Opnd::ConstF32(x) if m.ends_with("_f16") => format!("{:#x}u", f16_inline(*x)),
+                    o => r(o)?,
+                };
                 if (opsel >> k) & 1 != 0 {
                     u.push(format!("(({x}) >> 16)"));
                     i.push(format!("(asint({x}) >> 16)"));
@@ -5113,7 +5132,10 @@ impl<'a> Emitter<'a> {
             "v_cvt_f32_ubyte1" => Some(format!("(float)(({a} >> 8) & 0xffu)")),
             "v_cvt_f32_ubyte2" => Some(format!("(float)(({a} >> 16) & 0xffu)")),
             "v_cvt_f32_ubyte3" => Some(format!("(float)(({a} >> 24) & 0xffu)")),
-            "v_cvt_f32_f16" => Some(format!("f16tof32({a})")),
+            "v_cvt_f32_f16" => Some(match &s[0] {
+                Opnd::ConstF32(x) => f16_inline_val(*x, false),
+                _ => format!("f16tof32({a})"),
+            }),
             "v_fract_f32" => Some(format!("tb_fract({})", fa()?)),
             "v_trunc_f32" => Some(format!("tb_trunc({})", fa()?)),
             "v_ceil_f32" => Some(format!("tb_ceil({})", fa()?)),
