@@ -1,11 +1,14 @@
 use compat_common::gdk::{self, xasync};
 use core::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
+use std::sync::Arc;
 use std::time::Duration;
 
 const E_ABORT: i32 = 0x8000_4004u32 as i32;
 const E_PENDING: i32 = 0x8000_000Au32 as i32;
 const OP_CLEANUP: u32 = 4;
+const MANUAL: u32 = 0;
+const THREAD_POOL: u32 = 1;
 
 #[repr(C)]
 struct Block {
@@ -33,6 +36,7 @@ struct Api {
     complete: unsafe extern "system" fn(*mut c_void, *mut Block, i32, usize),
     result: unsafe extern "system" fn(*mut c_void, *mut Block, usize, usize, *mut c_void, *mut usize) -> i32,
     create: unsafe extern "system" fn(*mut c_void, u32, u32, *mut usize) -> i32,
+    dispatch: unsafe extern "system" fn(*mut c_void, usize, u32, u32) -> bool,
 }
 
 fn api() -> Api {
@@ -51,6 +55,7 @@ fn api() -> Api {
             complete: core::mem::transmute(f(10)),
             result: core::mem::transmute(f(11)),
             create: core::mem::transmute(f(12)),
+            dispatch: core::mem::transmute(f(16)),
         }
     }
 }
@@ -75,6 +80,7 @@ unsafe extern "system" fn slow_callback(b: *mut Block) {
 
 struct Call {
     a: Api,
+    q: usize,
     b: *mut Block,
     phase: &'static AtomicU32,
 }
@@ -82,6 +88,9 @@ struct Call {
 impl Call {
     fn status(&self, wait: bool) -> i32 {
         unsafe { (self.a.status)(self.a.o as *mut c_void, self.b, wait) }
+    }
+    fn dispatch_completion(&self) -> bool {
+        unsafe { (self.a.dispatch)(self.a.o as *mut c_void, self.q, 1, 0) }
     }
     fn completer(&self, delay_ms: u64, hr: i32, size: usize) -> impl FnOnce() + Send + 'static {
         let (a, b) = (self.a, self.b as usize);
@@ -93,13 +102,17 @@ impl Call {
 }
 
 fn call(provider: Provider, callback: bool) -> Call {
+    call_on(THREAD_POOL, provider, callback)
+}
+
+fn call_on(completion: u32, provider: Provider, callback: bool) -> Call {
     let a = api();
     let mut q = 0usize;
-    assert_eq!(unsafe { (a.create)(a.o as *mut c_void, 1, 1, &mut q) }, 0);
+    assert_eq!(unsafe { (a.create)(a.o as *mut c_void, THREAD_POOL, completion, &mut q) }, 0);
     let phase: &'static AtomicU32 = Box::leak(Box::new(AtomicU32::new(0)));
     let b = Box::into_raw(Box::new(Block { queue: q, context: phase as *const AtomicU32 as usize, callback: if callback { Some(slow_callback) } else { None }, internal: [0; 32] }));
     assert_eq!(unsafe { (a.begin)(a.o as *mut c_void, b, 0, 0, core::ptr::null(), provider) }, 0);
-    Call { a, b, phase }
+    Call { a, q, b, phase }
 }
 
 fn until(ms: u64, f: impl Fn() -> bool) -> bool {
@@ -156,4 +169,40 @@ fn block_is_not_written_after_wait_returns() {
     let snap = unsafe { (*c.b).internal };
     completer.join().unwrap();
     assert_eq!(snap, unsafe { (*c.b).internal }, "the async block was written after XAsyncGetStatus(wait) returned");
+}
+
+#[test]
+fn wait_does_not_pump_a_manual_completion_queue() {
+    for late in [false, true] {
+        let c = call_on(MANUAL, idle, true);
+        let complete = c.completer(if late { 0 } else { 100 }, 0, 4);
+        let completer = if late {
+            complete();
+            None
+        } else {
+            Some(std::thread::spawn(complete))
+        };
+        let returned = Arc::new(AtomicI32::new(1));
+        let (a, b, r) = (c.a, c.b as usize, returned.clone());
+        let waiter = std::thread::spawn(move || r.store(unsafe { (a.status)(a.o as *mut c_void, b as *mut Block, true) }, SeqCst));
+        if let Some(t) = completer {
+            t.join().unwrap();
+        }
+        assert!(!until(400, || returned.load(SeqCst) != 1), "late {late}: XAsyncGetStatus(wait) returned while the completion callback was still queued");
+        assert_eq!(c.phase.load(SeqCst), 0, "late {late}: the wait ran the completion callback itself");
+        assert!(c.dispatch_completion());
+        waiter.join().unwrap();
+        assert_eq!(returned.load(SeqCst), 0);
+        assert_eq!(c.phase.load(SeqCst), 2);
+    }
+}
+
+#[test]
+fn wait_on_a_completed_call_without_a_result_leaves_the_callback_queued() {
+    let c = call_on(MANUAL, idle, true);
+    c.completer(0, 0, 0)();
+    assert_eq!(c.status(true), 0);
+    assert_eq!(c.phase.load(SeqCst), 0);
+    assert!(c.dispatch_completion());
+    assert_eq!(c.phase.load(SeqCst), 2);
 }
