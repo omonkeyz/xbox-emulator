@@ -648,28 +648,38 @@ fn bl_name(table: u8, key: usize) -> String {
     }
 }
 
-const BVH_HELPERS: &str = r#"ByteAddressBuffer tb_gmem : register(t0, spaceTB_GMEM_SPACE);
+const BVH_GMEM_DECL: &str = r#"ByteAddressBuffer tb_gmem : register(t0, spaceTB_GMEM_SPACE);
 cbuffer TbGmem : register(b0, spaceTB_GMEM_SPACE) { uint4 tb_gmem_base; };
 uint tb_gmoff(uint64_t va) { return (uint)(va - ((((uint64_t)tb_gmem_base.y) << 32) | (uint64_t)tb_gmem_base.x)); }
-float3 tb_gm3(uint o) { return asfloat(tb_gmem.Load3(o)); }
+uint tb_bvh_load1(uint64_t va) { return tb_gmem.Load(tb_gmoff(va)); }
+uint3 tb_bvh_load3(uint64_t va) { return tb_gmem.Load3(tb_gmoff(va)); }
+uint4 tb_bvh_load4(uint64_t va) { return tb_gmem.Load4(tb_gmoff(va)); }
+"#;
+
+const BVH_GLOBAL_DECL: &str = r#"uint tb_bvh_load1(uint64_t va) { return tb_gmem_load(uint2((uint)va, (uint)(va >> 32)), 4u); }
+uint3 tb_bvh_load3(uint64_t va) { return uint3(tb_bvh_load1(va), tb_bvh_load1(va + 4ULL), tb_bvh_load1(va + 8ULL)); }
+uint4 tb_bvh_load4(uint64_t va) { return uint4(tb_bvh_load1(va), tb_bvh_load1(va + 4ULL), tb_bvh_load1(va + 8ULL), tb_bvh_load1(va + 12ULL)); }
+"#;
+
+const BVH_HELPERS: &str = r#"float3 tb_bvh_f3(uint64_t va) { return asfloat(tb_bvh_load3(va)); }
 void tb_bvh_swap(inout float da, inout uint ia, inout float db, inout uint ib) { if (db < da) { float tf = da; da = db; db = tf; uint ti = ia; ia = ib; ib = ti; } }
 uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir, float3 inv) {
     uint64_t base = (((uint64_t)d.x) << 8) | (((uint64_t)(d.y & 0xffu)) << 40);
     uint ty = (uint)node & 7u;
-    uint off = tb_gmoff(base + ((node >> 3) << 6));
+    uint64_t addr = base + ((node & 0x0000fffffffffff8ULL) << 3);
     float inf = asfloat(0x7f800000u);
     if (ty == 4u || ty == 5u) {
         inv = clamp(inv, -asfloat(0x7f7fffffu), asfloat(0x7f7fffffu));
-        uint4 ch = tb_gmem.Load4(off);
+        uint4 ch = tb_bvh_load4(addr);
         uint id[4] = { ch.x, ch.y, ch.z, ch.w };
         float dist[4];
         [unroll] for (uint i = 0u; i < 4u; i++) {
             float3 mn, mx;
             if (ty == 5u) {
-                mn = tb_gm3(off + 16u + 24u * i);
-                mx = tb_gm3(off + 28u + 24u * i);
+                mn = tb_bvh_f3(addr + (uint64_t)(16u + 24u * i));
+                mx = tb_bvh_f3(addr + (uint64_t)(28u + 24u * i));
             } else {
-                uint3 w = tb_gmem.Load3(off + 16u + 12u * i);
+                uint3 w = tb_bvh_load3(addr + (uint64_t)(16u + 12u * i));
                 mn = float3(f16tof32(w.x), f16tof32(w.x >> 16), f16tof32(w.y));
                 mx = float3(f16tof32(w.y >> 16), f16tof32(w.z), f16tof32(w.z >> 16));
             }
@@ -691,8 +701,8 @@ uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir,
         return uint4(id[0], id[1], id[2], id[3]);
     }
     if (ty < 4u) {
-        float3 v0 = tb_gm3(off), v1 = tb_gm3(off + 12u), v2 = tb_gm3(off + 24u);
-        uint tri = tb_gmem.Load(off + 48u);
+        float3 v0 = tb_bvh_f3(addr), v1 = tb_bvh_f3(addr + 12ULL), v2 = tb_bvh_f3(addr + 24ULL);
+        uint tri = tb_bvh_load1(addr + 48ULL);
         float3 ad = abs(dir);
         uint kz = (ad.x >= ad.y && ad.x >= ad.z) ? 0u : (ad.y >= ad.z ? 1u : 2u);
         uint kx = kz == 2u ? 0u : kz + 1u;
@@ -710,7 +720,7 @@ uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir,
         bool miss = ((U < 0.0 || V < 0.0 || W < 0.0) && (U > 0.0 || V > 0.0 || W > 0.0));
         float det = U + (V + W);
         float t = (U * (sz * A[kz]) + V * (sz * B[kz])) + W * (sz * C[kz]);
-        miss = miss || V == 0.0 || det == 0.0 || (det < 0.0 ? -t : t) < 0.0;
+        miss = miss || det == 0.0 || (det < 0.0 ? -t : t) < 0.0;
         if ((d.w >> 24) & 1u)
             return miss ? uint4(asuint(inf), asuint(1.0), 0u, 0u) : uint4(asuint(t), asuint(det), asuint(V), asuint(W));
         return miss ? uint4(asuint(inf), asuint(1.0), tri, 0u) : uint4(asuint(t), asuint(det), tri, 1u);
@@ -718,6 +728,14 @@ uint4 tb_bvh_intersect(uint4 d, uint64_t node, float tmax, float3 o, float3 dir,
     return uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
 }
 "#;
+
+pub fn global_helpers() -> String {
+    global::helpers()
+}
+
+pub fn bvh_global_helpers() -> String {
+    format!("{BVH_GLOBAL_DECL}{BVH_HELPERS}")
+}
 
 const F64_HELPERS: &str = r#"static const uint tb_2opi[51] = { 0xA2F983u, 0x6E4E44u, 0x1529FCu, 0x2757D1u, 0xF534DDu, 0xC0DB62u, 0x95993Cu, 0x439041u, 0xFE5163u, 0xABDEBBu, 0xC561B7u, 0x246E3Au, 0x424DD2u, 0xE00649u, 0x2EEA09u, 0xD1921Cu, 0xFE1DEBu, 0x1CB129u, 0xA73EE8u, 0x8235F5u, 0x2EBB44u, 0x84E99Cu, 0x7026B4u, 0x5F7E41u, 0x3991D6u, 0x398353u, 0x39F49Cu, 0x845F8Bu, 0xBDF928u, 0x3B1FF8u, 0x97FFDEu, 0x05980Fu, 0xEF2F11u, 0x8B5A0Au, 0x6D1F6Du, 0x367ECFu, 0x27CB09u, 0xB74F46u, 0x3F669Eu, 0x5FEA2Du, 0x7527BAu, 0xC7EBE5u, 0xF17B3Du, 0x0739F7u, 0x8A5292u, 0xEA6BFBu, 0x5FB11Fu, 0x8D5D08u, 0x560330u, 0x46FC7Bu, 0x6BABF0u };
 uint tb_hi64(double x) { uint l, h; asuint(x, l, h); return h; }
@@ -1378,7 +1396,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh && !em.uses_global, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
 }
 
 impl<'a> Emitter<'a> {
@@ -4320,34 +4338,57 @@ impl<'a> Emitter<'a> {
                 Ok(())
             }
             Enc::Ds if m == "ds_swizzle_b32" => {
-                // Quad swizzle (QDMode): each lane of a 2x2 pixel quad reads the lane selected
-                // by a 2-bit field of the 8-bit mask — how RDNA2 pixel shaders fetch neighbour
-                // values for derivatives. Per pixel: value at quad position (sx, sy) =
-                // v + (sx - px) * ddx_fine(v) + (sy - py) * ddy_fine(v), with (px, py) this
-                // pixel's position in its quad. Treats the register as float (derivative use).
-                if !is_ps {
-                    return Err("ds_swizzle outside a pixel shader".into());
-                }
-                let off = ins.aux.imm as u32;
-                if off & 0x8000 == 0 {
-                    return Err("ds_swizzle without QDMode unsupported".into());
-                }
-                self.uses_quad = true;
-                let src = f(&s[0])?;
+                let off = ins.aux.imm as u32 & 0xffff;
                 let usrc = r(&s[0])?;
                 let t = self.tmp;
                 self.tmp += 1;
-                self.line(&format!("uint t{t}s = ({:#x}u >> (tb_quad * 2u)) & 3u;", off & 0xff));
-                self.line("#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6");
-                self.line(&format!(
-                    "uint t{t}q0 = QuadReadLaneAt({usrc}, 0u), t{t}q1 = QuadReadLaneAt({usrc}, 1u), t{t}q2 = QuadReadLaneAt({usrc}, 2u), t{t}q3 = QuadReadLaneAt({usrc}, 3u);"
-                ));
-                self.line(&format!("uint t{t} = t{t}s == 0u ? t{t}q0 : t{t}s == 1u ? t{t}q1 : t{t}s == 2u ? t{t}q2 : t{t}q3;"));
-                self.line("#else");
-                self.line(&format!(
-                    "float t{t}f = {src}; uint t{t} = asuint(t{t}f + ((float)(t{t}s & 1u) - (float)(tb_quad & 1u)) * ddx_fine(t{t}f) + ((float)(t{t}s >> 1) - (float)(tb_quad >> 1)) * ddy_fine(t{t}f));"
-                ));
-                self.line("#endif");
+                if is_ps && (off & 0x8000 != 0) {
+                    self.uses_quad = true;
+                    let src = f(&s[0])?;
+                    self.line(&format!("uint t{t}s = ({:#x}u >> (tb_quad * 2u)) & 3u;", off & 0xff));
+                    self.line("#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6");
+                    self.line(&format!(
+                        "uint t{t}q0 = QuadReadLaneAt({usrc}, 0u), t{t}q1 = QuadReadLaneAt({usrc}, 1u), t{t}q2 = QuadReadLaneAt({usrc}, 2u), t{t}q3 = QuadReadLaneAt({usrc}, 3u);"
+                    ));
+                    self.line(&format!("uint t{t} = t{t}s == 0u ? t{t}q0 : t{t}s == 1u ? t{t}q1 : t{t}s == 2u ? t{t}q2 : t{t}q3;"));
+                    self.line("#else");
+                    self.line(&format!(
+                        "float t{t}f = {src}; uint t{t} = asuint(t{t}f + ((float)(t{t}s & 1u) - (float)(tb_quad & 1u)) * ddx_fine(t{t}f) + ((float)(t{t}s >> 1) - (float)(tb_quad >> 1)) * ddy_fine(t{t}f));"
+                    ));
+                    self.line("#endif");
+                } else {
+                    let wide_bitmode = (off & 0x8000 == 0) && (((off & 0x1c) != 0x1c) || (((off >> 5) & 0x1c) != 0) || (((off >> 10) & 0x1c) != 0));
+                    let has_lds = self.insns.iter().any(|i| {
+                        i.enc == Enc::Ds && !matches!(i.mnemonic.as_str(), "ds_swizzle_b32" | "ds_permute_b32" | "ds_bpermute_b32")
+                    });
+                    let use_gs = wide_bitmode && self.is_cs && self.brace_depth == 0 && self.loop_depth == 0 && !has_lds;
+                    let (and_m, or_m, xor_m) = (off & 0x1f, (off >> 5) & 0x1f, (off >> 10) & 0x1f);
+                    let src_lane = if off & 0x8000 != 0 {
+                        format!("((t{t}l & ~3u) | (({:#x}u >> ((t{t}l & 3u) * 2u)) & 3u))", off & 0xff)
+                    } else {
+                        format!("((t{t}l & ~31u) | ((((t{t}l & 31u) & {and_m:#x}u) | {or_m:#x}u) ^ {xor_m:#x}u))")
+                    };
+                    if use_gs {
+                        let p = self.ex.isa_preamble;
+                        let (gx, gy, gz) = (p[1].max(1), p[2].max(1), p[3].max(1));
+                        let n = gx * gy * gz;
+                        self.line(&format!("uint t{t} = 0u;"));
+                        self.line("#ifdef TB_XL_GS");
+                        self.line(&format!(
+                            "{{ uint t{t}f = gtid.x + gtid.y * {gx}u + gtid.z * {}u; uint t{t}g = t{t}f & ~31u; uint t{t}j = t{t}f & 31u; GroupMemoryBarrierWithGroupSync(); tb_xl[t{t}f] = {usrc}; tb_xa[t{t}f] = exec_lo & 1u; GroupMemoryBarrierWithGroupSync(); uint t{t}i = t{t}g + (((t{t}j & {and_m:#x}u) | {or_m:#x}u) ^ {xor_m:#x}u); t{t} = (t{t}i < {n}u && tb_xa[min(t{t}i, {}u)] != 0u) ? tb_xl[min(t{t}i, {}u)] : 0u; }}",
+                            gx * gy, n - 1, n - 1
+                        ));
+                        self.line("#else");
+                        self.line(&format!(
+                            "{{ uint t{t}l = WaveGetLaneIndex(); uint t{t}s = {src_lane}; uint t{t}v = WaveReadLaneAt({usrc}, t{t}s); bool t{t}a = WaveReadLaneAt(exec_lo & 1u, t{t}s) != 0u; t{t} = t{t}a ? t{t}v : 0u; }}"
+                        ));
+                        self.line("#endif");
+                    } else {
+                        self.line(&format!(
+                            "uint t{t}l = WaveGetLaneIndex(); uint t{t}s = {src_lane}; uint t{t}v = WaveReadLaneAt({usrc}, t{t}s); bool t{t}a = WaveReadLaneAt(exec_lo & 1u, t{t}s) != 0u; uint t{t} = t{t}a ? t{t}v : 0u;"
+                        ));
+                    }
+                }
                 self.wv(&d.ok_or("no dst")?, &format!("t{t}"))
             }
             Enc::Vinterp => {
@@ -6987,7 +7028,12 @@ impl<'a> Emitter<'a> {
             h.push_str(&global::helpers());
         }
         if self.uses_bvh {
-            h.push_str(&BVH_HELPERS.replace("TB_GMEM_SPACE", &TB_GMEM_SPACE.to_string()));
+            if self.uses_global {
+                h.push_str(BVH_GLOBAL_DECL);
+            } else {
+                h.push_str(&BVH_GMEM_DECL.replace("TB_GMEM_SPACE", &TB_GMEM_SPACE.to_string()));
+            }
+            h.push_str(BVH_HELPERS);
         }
         for id in &self.hw_regs {
             let _ = writeln!(h, "static uint tb_hw{id} = {:#x}u;", if *id == 1 { 0xf0u32 } else { 0 });

@@ -138,6 +138,8 @@ mod device_console_fix;
 mod depth_uav;
 mod pso_ext;
 mod global_bind;
+mod rt_bvh;
+mod rt_x;
 mod kmd10;
 mod dred;
 mod dred_marks;

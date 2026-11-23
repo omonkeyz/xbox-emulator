@@ -63,10 +63,13 @@ fn tri_ref(v: [[f32; 3]; 3], r: &Ray) -> [u32; 4] {
     let w = bx * ay - by * ax;
     let back = u < 0.0 || vv < 0.0 || w < 0.0;
     let front = u > 0.0 || vv > 0.0 || w > 0.0;
-    if (back && front) || vv == 0.0 {
+    if back && front {
         return miss;
     }
     let det = u + (vv + w);
+    if det == 0.0 {
+        return miss;
+    }
     let t = u * (sz * a[kz]) + vv * (sz * b[kz]) + w * (sz * c[kz]);
     if det.signum() * t < 0.0 {
         return miss;
@@ -144,6 +147,7 @@ fn image_mimg_bvh() {
         Ray { tmax: 100.0, o: [0.0, 0.0, 0.0], d: [0.0, 0.0, -1.0] },
         Ray { tmax: 100.0, o: [0.0, 0.0, 8.0], d: [0.0, 0.0, -1.0] },
         Ray { tmax: 100.0, o: [0.0, -1.0, 0.0], d: [0.0, 0.0, 1.0] },
+        Ray { tmax: 100.0, o: [-1.0, 0.0, 0.0], d: [0.0, 0.0, 1.0] },
         Ray { tmax: 100.0, o: [0.0, 0.0, 0.0], d: [0.25, 0.125, 1.0] },
     ];
     let mut store: Vec<(Vec<u32>, Vec<u32>, [u32; 2], Vec<u32>, &'static str)> = Vec::new();

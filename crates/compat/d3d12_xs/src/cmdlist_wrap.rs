@@ -30,7 +30,7 @@ const PAGE_READWRITE: u32 = 0x04;
 
 /// Number of Xbox vtable slots we materialize. Max observed call is Xbox slot 50
 /// (OMSetRenderTargets); 128 leaves generous headroom.
-const N: usize = 128;
+const N: usize = 144;
 static XBOX_VT: [AtomicUsize; N] = [const { AtomicUsize::new(0) }; N];
 static BUILT: AtomicBool = AtomicBool::new(false);
 static mut REAL_VT_PTR: *const usize = core::ptr::null();
@@ -107,9 +107,9 @@ static PROBE_HITS: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn probe_impl(_this: *mut c_void, a: u64, caller: usize, slot: u64) {
     let h = PROBE_HITS.fetch_add(1, Ordering::Relaxed);
-    static PER: [AtomicUsize; 128] = [const { AtomicUsize::new(0) }; 128];
+    static PER: [AtomicUsize; 144] = [const { AtomicUsize::new(0) }; 144];
     let _ = h;
-    if PER[(slot as usize).min(127)].fetch_add(1, Ordering::Relaxed) < 4 {
+    if PER[(slot as usize).min(143)].fetch_add(1, Ordering::Relaxed) < 4 {
         let base = EXE_BASE.load(Ordering::Relaxed);
         record("d3d12_xs", "cmdlist.hi",
             &format!("slot={slot} arg1={a:#x} caller={:#x}", caller.wrapping_sub(base)));

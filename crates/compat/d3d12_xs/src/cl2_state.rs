@@ -1582,6 +1582,29 @@ pub(crate) unsafe fn close_part_into(list: *mut c_void, slots: &[Option<u32>]) -
     hr
 }
 
+pub(crate) unsafe fn reapply_compute_args(list: *mut c_void) {
+    let s = with(list, |s| s.clone());
+    unsafe {
+        for (&(side, idx), a) in &s.args {
+            if side != 0 {
+                continue;
+            }
+            match a {
+                RootArg::Table(h) => w_ctable(list, idx, *h),
+                RootArg::View(slot, va) => {
+                    let f: unsafe extern "system" fn(*mut c_void, u32, u64) = core::mem::transmute(view_wrapper(*slot));
+                    f(list, idx, *va)
+                }
+                RootArg::Consts(m) => {
+                    for (&off, &v) in m {
+                        w_c1(list, idx, v, off)
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) unsafe fn reapply_bindings(list: *mut c_void) {
     let s = with(list, |s| s.clone());
     unsafe { apply_bindings(list, &s) };

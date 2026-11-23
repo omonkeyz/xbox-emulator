@@ -247,7 +247,8 @@ unsafe fn device() -> *mut c_void {
 }
 
 unsafe fn create_rs(dev: *mut c_void, blob: &[u8]) -> (i32, *mut c_void) {
-    let f: unsafe extern "system" fn(*mut c_void, u32, *const u8, usize, *const Guid, *mut *mut c_void) -> i32 = unsafe { core::mem::transmute(vslot(dev, 16)) };
+    let slot = if crate::device_wrap::root_signature_hooked() { crate::device_wrap::real_orig(16) } else { vslot(dev, 16) };
+    let f: unsafe extern "system" fn(*mut c_void, u32, *const u8, usize, *const Guid, *mut *mut c_void) -> i32 = unsafe { core::mem::transmute(slot) };
     let mut rs: *mut c_void = core::ptr::null_mut();
     let hr = unsafe { f(dev, 1, blob.as_ptr(), blob.len(), &IID_ROOT_SIGNATURE, &mut rs) };
     (hr, rs)

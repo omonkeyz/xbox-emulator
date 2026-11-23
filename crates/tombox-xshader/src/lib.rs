@@ -26,6 +26,8 @@ pub mod trans32;
 pub mod gcn;
 pub mod gds_abi;
 pub mod global_abi;
+pub mod state_obj;
+pub mod rt_cps;
 pub mod centroid_abi;
 pub mod user_data_abi;
 pub mod runtime_hlsl;

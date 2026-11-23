@@ -393,6 +393,7 @@ fn buffer_sub_dword_and_signed_atomics() {
         ("buffer_atomic_cmpswap", [0xe0c4_4000, 0x8000_0200], vec!["InterlockedCompareExchange(utb0[0u], v3, v2, t"]),
         ("buffer_atomic_inc", [0xe0f0_4000, 0x8000_0300], vec![">= v3) ? 0u : ("]),
         ("buffer_atomic_dec", [0xe0f4_4000, 0x8000_0300], vec!["== 0u) || ("]),
+        ("buffer_atomic_add soffset", [0xe0c8_4000, 0x0a00_0300], vec!["InterlockedAdd(utb0[((s10) + 0x0u) >> 2], v3, t"]),
     ];
     for (label, op, expect) in cases {
         let body = [load_desc[0], load_desc[1], op[0], op[1], vop1(1, 0, v(4))];
@@ -616,6 +617,18 @@ fn bvh_intersect_ray_reads_guest_bvh() {
     for (label, body, expect) in cases {
         check(label, &program(&body), None, &expect);
     }
+    let combined = program(&[
+        0xdc30_8000, 0x057d_0001, // flat_load_dword v5, v[1:2] (global)
+        0xf19c_0f01, 0x0000_1401, // image_bvh64_intersect_ray
+        vop1(1, 0, v(20)),
+        vop1(1, 1, v(5)),
+    ]);
+    let ex = shader(&combined, None);
+    let t = translate(&ex).expect("translate combined global+bvh");
+    assert!(t.needs_global, "combined shader should set needs_global");
+    assert!(!t.needs_gmem, "combined shader should route BVH through TbGlobal instead of TB_GMEM_SPACE");
+    assert!(t.hlsl.contains("tb_bvh_load1(uint64_t va) { return tb_gmem_load("), "{}", t.hlsl);
+    assert!(!t.hlsl.contains("space4000001"), "{}", t.hlsl);
 }
 
 fn sopc_eq(a: u32, b: u32) -> u32 {

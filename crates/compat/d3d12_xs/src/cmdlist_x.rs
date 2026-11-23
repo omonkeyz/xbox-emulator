@@ -10,6 +10,10 @@ pub const IID_XBOX_GRAPHICS_COMMAND_LIST5: Guid =
     Guid { d1: 0x5505_0859, d2: 0x4024, d3: 0x474c, d4: [0x98, 0xcf, 0x64, 0x5b, 0x51, 0xdc, 0x48, 0x74] };
 const IID_PC_GRAPHICS_COMMAND_LIST5: Guid =
     Guid { d1: 0x5505_0859, d2: 0x4024, d3: 0x474c, d4: [0x87, 0xf5, 0x64, 0x72, 0xea, 0xee, 0x44, 0xea] };
+pub const IID_XBOX_GRAPHICS_COMMAND_LIST6: Guid =
+    Guid { d1: 0xc382_7890, d2: 0x4024, d3: 0x474c, d4: [0x98, 0xcf, 0x64, 0x5b, 0x51, 0xdc, 0x48, 0x74] };
+const IID_PC_GRAPHICS_COMMAND_LIST6: Guid =
+    Guid { d1: 0xc382_7890, d2: 0xe548, d3: 0x4cfa, d4: [0x96, 0xcf, 0x56, 0x89, 0xa9, 0x37, 0x0f, 0x80] };
 const IID_DEVICE: Guid =
     Guid { d1: 0x1898_19F1, d2: 0x1DB6, d3: 0x4B57, d4: [0xBE, 0x54, 0x18, 0x21, 0x33, 0x9B, 0x85, 0xF7] };
 const PC_GRAPHICS_LIST_IIDS: [Guid; 5] = [
@@ -45,6 +49,8 @@ pub unsafe fn install(xbox_vt: &[AtomicUsize], real_vt: *const usize) {
     crate::cl_ext::install(xbox_vt);
     crate::cl_fw::install_null_slots(xbox_vt);
     crate::gds::install(xbox_vt);
+    crate::global_bind::install(xbox_vt);
+    crate::rt_x::install_cmdlist(xbox_vt);
     crate::centroid_bind::install(xbox_vt);
     let prev_close = xbox_vt[9].load(Ordering::Relaxed);
     REAL_CLOSE.store(if prev_close != 0 { prev_close } else { *real_vt.add(9) }, Ordering::Relaxed);
@@ -108,6 +114,8 @@ pub unsafe fn dump_device_messages(dev: *mut c_void, tag: &str) {
 unsafe extern "system" fn close_x(this: *mut c_void) -> i32 {
     let f: unsafe extern "system" fn(*mut c_void) -> i32 = core::mem::transmute(REAL_CLOSE.load(Ordering::Relaxed));
     crate::gds::on_close(this);
+    crate::global_bind::on_close(this);
+    crate::rt_x::on_close(this);
     crate::centroid_bind::on_close(this);
     let hr = f(this);
     crate::ecl_probe::on_close(this, hr);
@@ -197,6 +205,21 @@ unsafe extern "system" fn query_interface_x(this: *mut c_void, riid: *const Guid
             }
         }
         return hr;
+    }
+    if *riid == IID_XBOX_GRAPHICS_COMMAND_LIST6 || *riid == IID_PC_GRAPHICS_COMMAND_LIST6 {
+        *ppv = core::ptr::null_mut();
+        let mut pc6: *mut c_void = core::ptr::null_mut();
+        let hr = qi(this, &IID_PC_GRAPHICS_COMMAND_LIST6, &mut pc6);
+        if hr >= 0 && !pc6.is_null() {
+            if let Some(shim) = shim_of(this) {
+                *ppv = shim as *mut c_void;
+                return 0;
+            }
+            let vt = *(pc6 as *const *const usize);
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = core::mem::transmute(*vt.add(2));
+            release(pc6);
+        }
+        return E_NOINTERFACE;
     }
     if *riid != IID_XBOX_GRAPHICS_COMMAND_LIST5 {
         return qi(this, riid, ppv);

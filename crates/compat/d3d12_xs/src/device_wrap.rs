@@ -27,9 +27,7 @@ pub struct Guid {
 
 const IID_IUNKNOWN: Guid = Guid { d1: 0, d2: 0, d3: 0, d4: [0xC0, 0, 0, 0, 0, 0, 0, 0x46] };
 
-/// ID3D12Device through ID3D12Device8 — all resolve to our wrapper so every
-/// device call (CreateDescriptorHeap etc.) stays intercepted.
-const DEVICE_IIDS: [Guid; 9] = [
+const DEVICE_IIDS: [Guid; 10] = [
     Guid { d1: 0x1898_19F1, d2: 0x1DB6, d3: 0x4B57, d4: [0xBE, 0x54, 0x18, 0x21, 0x33, 0x9B, 0x85, 0xF7] }, // Device
     Guid { d1: 0x77ac_ce80, d2: 0x638e, d3: 0x4e65, d4: [0x88, 0x95, 0xc1, 0xf2, 0x33, 0x86, 0x86, 0x3e] }, // Device1
     Guid { d1: 0x30ba_a41e, d2: 0xb15b, d3: 0x475c, d4: [0xa0, 0xbb, 0x1a, 0xf5, 0xc5, 0xb6, 0x43, 0x28] }, // Device2
@@ -38,7 +36,8 @@ const DEVICE_IIDS: [Guid; 9] = [
     Guid { d1: 0x8b4f_173b, d2: 0x2fea, d3: 0x4b80, d4: [0x8f, 0x58, 0x43, 0x07, 0x19, 0x1a, 0xb9, 0x5d] }, // Device5
     Guid { d1: 0xc70b_221b, d2: 0x40e4, d3: 0x4a17, d4: [0x89, 0xaf, 0x02, 0x5a, 0x07, 0x27, 0xa6, 0xdc] }, // Device6
     Guid { d1: 0x5c01_4b53, d2: 0x68a1, d3: 0x4b9b, d4: [0x8b, 0xd1, 0xdd, 0x60, 0x46, 0xb9, 0x35, 0x8b] }, // Device7
-    Guid { d1: 0x9218_e6bb, d2: 0xf944, d3: 0x4f7e, d4: [0xa7, 0x5c, 0xb1, 0xb2, 0xc7, 0xb7, 0x01, 0xf3] }, // Device8
+    Guid { d1: 0x9218_e6bb, d2: 0xf944, d3: 0x4f7e, d4: [0xa7, 0x5c, 0xb1, 0xb2, 0xc7, 0xb7, 0x01, 0xf3] }, // PC Device8
+    crate::rt_x::IID_XBOX_DEVICE8, // Xbox Series ID3D12Device8
 ];
 
 const IID_XSX_DEVICE8: Guid = Guid { d1: 0x728f1fa2, d2: 0xea11, d3: 0x4a9f, d4: [0x9b, 0x52, 0x9b, 0x42, 0xa4, 0x84, 0xd5, 0xc9] };
@@ -135,6 +134,9 @@ unsafe extern "system" fn check_feature_support(
         unsafe { core::mem::transmute(*rvt.add(13)) };
     let hr = unsafe { f(real, feature, pdata, size) };
     if hr == S_OK {
+        if feature == crate::rt_x::D3D12_FEATURE_OPTIONS5 {
+            unsafe { crate::rt_x::patch_options5(pdata, size) };
+        }
         return S_OK;
     }
     if !pdata.is_null() && size > 0 && size <= 65536 {
@@ -143,6 +145,9 @@ unsafe extern "system" fn check_feature_support(
         while try_size >= 4 {
             let hr2 = unsafe { f(real, feature, pdata, try_size) };
             if hr2 == S_OK {
+                if feature == crate::rt_x::D3D12_FEATURE_OPTIONS5 {
+                    unsafe { crate::rt_x::patch_options5(pdata, size) };
+                }
                 record("d3d12_xs", "CheckFeatureSupport",
                     &format!("feature={feature} xbox_size={size} -> PC size={try_size} S_OK"));
                 return S_OK;
@@ -163,12 +168,31 @@ unsafe extern "system" fn create_descriptor_heap(
     let real = unsafe { (*this).real };
     let f: unsafe extern "system" fn(*mut c_void, *const c_void, *const Guid, *mut *mut c_void) -> i32 =
         unsafe { core::mem::transmute(*real_vtbl(real).add(14)) };
-    let hr = unsafe { f(real, pdesc, riid, ppv) };
+    let grown = if !pdesc.is_null() {
+        let raw = unsafe { *(pdesc as *const [u32; 4]) };
+        crate::global_bind::grow_heap_desc(&raw)
+    } else {
+        None
+    };
+    let mut hr = match &grown {
+        Some((gdesc, _)) => unsafe { f(real, gdesc.as_ptr() as *const c_void, riid, ppv) },
+        None => unsafe { f(real, pdesc, riid, ppv) },
+    };
+    let mut grew_ok = grown.is_some() && hr == S_OK;
+    if hr != S_OK && grown.is_some() {
+        hr = unsafe { f(real, pdesc, riid, ppv) };
+        grew_ok = false;
+    }
     if hr != S_OK && !pdesc.is_null() { let d = pdesc as *const u32; record("d3d12_xs", "CreateDescriptorHeap", &unsafe { format!("FAILED type={} num={} flags={:#x} node={:#x} hr={hr:#010x}", *d, *d.add(1), *d.add(2), *d.add(3)) }); }
     if hr == S_OK && !ppv.is_null() {
         // Keep the heap REAL (so it works when passed to SetDescriptorHeaps etc.);
         // patch the shared heap vtable once to fix the handle-getter ABI.
         crate::heap_wrap::ensure_patched(unsafe { *ppv });
+        if grew_ok {
+            if let Some((_, orig_num)) = grown {
+                unsafe { crate::global_bind::note_heap(real, *ppv, orig_num) };
+            }
+        }
         if (crate::rtcap::enabled() || crate::passcap::tables_on()) && !pdesc.is_null() {
             // Binding trace: remember shader-visible heaps (GPU handle -> CPU handle).
             let d = pdesc as *const u32;
@@ -1262,7 +1286,7 @@ pub fn pso_summary(pso: usize) -> Option<(usize, usize, String)> {
 // real device directly (ID3D12DeviceChild::GetDevice on a resource or command list returns
 // it) and views created that way would otherwise go unrecorded.
 static REAL_ORIG: [core::sync::atomic::AtomicUsize; 40] = [const { core::sync::atomic::AtomicUsize::new(0) }; 40];
-fn real_orig(slot: usize) -> usize {
+pub(crate) fn real_orig(slot: usize) -> usize {
     REAL_ORIG[slot].load(Ordering::Relaxed)
 }
 pub(crate) fn real_device_orig(slot: usize) -> usize {
@@ -1278,23 +1302,39 @@ unsafe extern "system" fn real_create_root_signature(real: *mut c_void, mask: u3
     let sent = core::cell::RefCell::new(Vec::<u8>::new());
     let mut gds = unsafe { crate::gds::patch_root_signature(blob, len) };
     let (gb, gl) = gds.as_ref().map_or((blob, len), |(b, _)| (b.as_ptr(), b.len()));
+    let mut gbl = unsafe { crate::global_bind::patch_root_signature(gb, gl) };
+    let (tb, tl) = gbl.as_ref().map_or((gb, gl), |(b, _)| (b.as_ptr(), b.len()));
     let cen = unsafe {
-        crate::centroid_bind::create(gb, gl, &|b, l| {
+        crate::centroid_bind::create(tb, tl, &|b, l| {
             *sent.borrow_mut() = copy(b, l);
             f(real, mask, b, l, riid, ppv)
         }, ppv)
     };
-    let mut hr = match (&cen, &gds) {
-        (Some(hr), _) => *hr,
-        (None, Some((b, _))) => {
+    let mut hr = match (&cen, &gbl, &gds) {
+        (Some(hr), _, _) => *hr,
+        (None, Some((b, _)), _) | (None, None, Some((b, _))) => {
             *sent.borrow_mut() = b.clone();
             unsafe { f(real, mask, b.as_ptr(), b.len(), riid, ppv) }
         }
-        (None, None) => {
+        (None, None, None) => {
             *sent.borrow_mut() = copy(blob, len);
             unsafe { f(real, mask, blob, len, riid, ppv) }
         }
     };
+    if hr < 0 && gbl.is_some() {
+        record("d3d12_xs", "global_bind", &format!("root signature with TbGlobal table rejected hr={hr:#010x}; retrying without TbGlobal"));
+        gbl = None;
+        hr = match &gds {
+            Some((b, _)) => {
+                *sent.borrow_mut() = b.clone();
+                unsafe { f(real, mask, b.as_ptr(), b.len(), riid, ppv) }
+            }
+            None => {
+                *sent.borrow_mut() = copy(blob, len);
+                unsafe { f(real, mask, blob, len, riid, ppv) }
+            }
+        };
+    }
     if hr < 0 && gds.is_some() {
         record("d3d12_xs", "gds", &format!("root signature with the GDS parameter rejected hr={hr:#010x}; created without GDS"));
         gds = None;
@@ -1309,6 +1349,7 @@ unsafe extern "system" fn real_create_root_signature(real: *mut c_void, mask: u3
     }
     if hr >= 0 && !ppv.is_null() {
         if let Some((_, idx)) = gds { crate::gds::note_root_signature(unsafe { *ppv }, idx) }
+        if let Some((_, idx)) = gbl { crate::global_bind::note_root_signature(unsafe { *ppv }, idx) }
         if cen.is_none() { crate::centroid_bind::forget(unsafe { *ppv }) }
     }
     if hr >= 0 && !ppv.is_null() && !blob.is_null() && len != 0 {
@@ -1394,44 +1435,74 @@ unsafe extern "system" fn real_evict(real: *mut c_void, n: u32, objs: *const *mu
     unsafe { f(real, n, objs) }
 }
 /// Patch the real device's method table (shared by every interface version of the device).
-unsafe fn patch_real_device(real: *mut c_void) {
+unsafe fn hook_real_slots(real: *mut c_void, hooks: &[(usize, usize)], what: &str) -> bool {
     extern "system" {
         fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
     }
+    let (Some(lo), Some(hi)) = (hooks.iter().map(|h| h.0).min(), hooks.iter().map(|h| h.0).max()) else {
+        return false;
+    };
+    let vt = unsafe { *(real as *const *mut usize) };
+    let span = (hi - lo + 1) * 8;
+    let mut old = 0u32;
+    if unsafe { VirtualProtect(vt.add(lo) as *mut c_void, span, 0x04, &mut old) } == 0 {
+        record("d3d12_xs", "bindtrace", &format!("could not unprotect the device method table - {what} not installed"));
+        return false;
+    }
+    for &(slot, f) in hooks {
+        REAL_ORIG[slot].store(unsafe { *vt.add(slot) }, Ordering::Relaxed);
+        unsafe { *vt.add(slot) = f };
+    }
+    let mut tmp = 0u32;
+    unsafe { VirtualProtect(vt.add(lo) as *mut c_void, span, old, &mut tmp) };
+    true
+}
+
+const IID_D3D12_DEVICE: Guid = Guid { d1: 0x1898_19f1, d2: 0x1db6, d3: 0x4b57, d4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7] };
+
+unsafe fn is_d3d12_device(obj: *mut c_void) -> bool {
+    if obj.is_null() {
+        return false;
+    }
+    let qi: unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32 = unsafe { core::mem::transmute(*(*(obj as *const *const usize))) };
+    let mut dev: *mut c_void = core::ptr::null_mut();
+    if unsafe { qi(obj, &IID_D3D12_DEVICE, &mut dev) } < 0 || dev.is_null() {
+        return false;
+    }
+    let release: unsafe extern "system" fn(*mut c_void) -> u32 = unsafe { core::mem::transmute(*(*(dev as *const *const usize)).add(2)) };
+    unsafe { release(dev) };
+    true
+}
+
+static ROOT_SIG_HOOK: std::sync::Once = std::sync::Once::new();
+
+pub(crate) fn root_signature_hooked() -> bool {
+    ROOT_SIG_HOOK.is_completed()
+}
+
+unsafe fn patch_real_root_signature(real: *mut c_void) {
+    if ROOT_SIG_HOOK.is_completed() || !unsafe { is_d3d12_device(real) } {
+        return;
+    }
+    ROOT_SIG_HOOK.call_once(|| unsafe {
+        if hook_real_slots(real, &[(16, real_create_root_signature as usize)], "root-signature patching (GDS, TbGlobal, centroid, console stripping)") {
+            record("d3d12_xs", "global_bind", "root-signature hook installed on the real device method table");
+        }
+    });
+}
+
+unsafe fn patch_real_device(real: *mut c_void) {
     static DONE: std::sync::Once = std::sync::Once::new();
     DONE.call_once(|| unsafe {
-        let vt = *(real as *const *mut usize);
-        let hooks: [(usize, usize); 7] = [
-            (16, real_create_root_signature as usize),
+        let hooks: [(usize, usize); 6] = [
             (17, real_create_cbv as usize), (18, real_create_srv as usize), (19, real_create_uav as usize),
             (22, real_create_sampler as usize), (23, real_copy_descriptors as usize), (24, real_copy_descriptors_simple as usize),
         ];
-        let mut old = 0u32;
-        if VirtualProtect(vt.add(16) as *mut c_void, 9 * 8, 0x04, &mut old) == 0 {
-            record("d3d12_xs", "bindtrace", "could not unprotect the device method table - descriptor trace disabled");
-            return;
+        if hook_real_slots(real, &hooks, "descriptor trace") {
+            record("d3d12_xs", "bindtrace", "descriptor hooks installed on the real device method table");
         }
-        let full = crate::rtcap::enabled();
-        for (slot, f) in hooks {
-            if slot == 16 && !full {
-                continue;
-            }
-            REAL_ORIG[slot].store(*vt.add(slot), Ordering::Relaxed);
-            *vt.add(slot) = f;
-        }
-        let mut tmp = 0u32;
-        VirtualProtect(vt.add(16) as *mut c_void, 9 * 8, old, &mut tmp);
-        record("d3d12_xs", "bindtrace", "descriptor hooks installed on the real device method table");
-        if crate::hang_cap::on() {
-            let mut old2 = 0u32;
-            if VirtualProtect(vt.add(34) as *mut c_void, 2 * 8, 0x04, &mut old2) != 0 {
-                for (slot, f) in [(34usize, real_make_resident as usize), (35, real_evict as usize)] {
-                    REAL_ORIG[slot].store(*vt.add(slot), Ordering::Relaxed);
-                    *vt.add(slot) = f;
-                }
-                VirtualProtect(vt.add(34) as *mut c_void, 2 * 8, old2, &mut tmp);
-                record("d3d12_xs", "hang_cap", "MakeResident/Evict hooks installed on the real device method table");
-            }
+        if crate::hang_cap::on() && hook_real_slots(real, &[(34, real_make_resident as usize), (35, real_evict as usize)], "MakeResident/Evict hooks") {
+            record("d3d12_xs", "hang_cap", "MakeResident/Evict hooks installed on the real device method table");
         }
     });
 }
@@ -1785,6 +1856,8 @@ unsafe extern "system" fn create_compute_pso_sync(
             code.len(), u64::from_le_bytes(desc[0..8].try_into().unwrap()), cached.0, cached.1,
             u32::from_le_bytes(desc[0x30..0x34].try_into().unwrap()), std::thread::current().id(), memory_status(), dir.display()));
         unsafe { crate::cmdlist_x::dump_device_messages(real, "CreateComputePSO_X") };
+        let rs = u64::from_le_bytes(desc[0..8].try_into().unwrap()) as *mut c_void;
+        record("d3d12_xs", "global_bind", &format!("failed compute PSO root {:#x}: TbGlobal param {:?}", rs as usize, crate::global_bind::root_index(rs)));
     }
     hr
 }
@@ -2145,6 +2218,7 @@ pub(crate) fn vtable() -> *const usize {
         crate::ecl_probe::install_device(&mut v);
         crate::cbv_raw::hook_device(&mut v);
         crate::pso_lib::hook_device(&mut v);
+        crate::rt_x::install_device(&mut v);
         Box::leak(v.into_boxed_slice()).as_ptr() as usize
     }) as *const usize
 }
@@ -2154,6 +2228,7 @@ pub fn wrap_device(real: *mut c_void) -> *mut c_void {
     if !real.is_null() {
         unsafe { crate::shader_xlat::probe_typed_atomic64(real) };
         crate::blend_probe::note_device(real);
+        unsafe { patch_real_root_signature(real) };
     }
     if (crate::rtcap::enabled() || crate::passcap::tables_on()) && !real.is_null() {
         unsafe { patch_real_device(real) };

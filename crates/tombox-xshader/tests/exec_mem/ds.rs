@@ -485,3 +485,25 @@ fn ds_permute_with_lds_is_refused() {
     };
     assert!(e.contains("groupshared"), "{e}");
 }
+
+#[test]
+fn ds_swizzle_compute_qdmode_and_bitmode() {
+    let mut cs = Vec::new();
+    for &m in &[0xe4u32, 0x1b, 0x55, 0xaa, 0x4e, 0xb1] {
+        let op = ds(0x35, 0x8000 | m, 2, 0, 0, 10);
+        cs.push(cc("ds_swizzle_b32", op, op.to_vec(), &[10], &move |t| {
+            let src = (t & !3) | ((m >> ((t & 3) * 2)) & 3);
+            vec![dv(src)]
+        }));
+    }
+    for &(and_m, or_m, xor_m) in &[(0x1fu32, 0u32, 1u32), (0x1f, 0, 2), (0x1f, 0, 0x1f), (0x1c, 3, 0), (0x18, 1, 2)] {
+        let off = and_m | (or_m << 5) | (xor_m << 10);
+        let op = ds(0x35, off, 2, 0, 0, 10);
+        cs.push(cc("ds_swizzle_b32", op, op.to_vec(), &[10], &move |t| {
+            let lane = t & 31;
+            let src = (t & !31) | (((lane & and_m) | or_m) ^ xor_m);
+            vec![dv(src)]
+        }));
+    }
+    run_cs_cases("ds_swizzle_cs", &cs);
+}

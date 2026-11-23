@@ -7,7 +7,7 @@ const RAYTRACING_AS: u32 = 0x40_0000;
 const BUFFER_ONLY_STATES: u32 = 0x3;
 
 fn fix_state(s: u32) -> u32 {
-    if s & RAYTRACING_AS != 0 && s != RAYTRACING_AS {
+    if s & RAYTRACING_AS != 0 && (s != RAYTRACING_AS || crate::rt_x::configured_raytracing_tier() != 0) {
         s & !RAYTRACING_AS
     } else {
         s
@@ -19,11 +19,14 @@ fn texture_state(s: u32) -> u32 {
 }
 
 pub fn initial_state(dim: u32, s: u32) -> u32 {
-    let f = if dim == 1 { s } else { texture_state(s) };
+    let mut f = if dim == 1 { s } else { texture_state(s) };
+    if crate::rt_x::configured_raytracing_tier() != 0 && f & RAYTRACING_AS != 0 {
+        f &= !RAYTRACING_AS;
+    }
     if f != s {
         static LOGGED: AtomicUsize = AtomicUsize::new(0);
         if LOGGED.fetch_add(1, Ordering::Relaxed) < 8 {
-            record("d3d12_xs", "xone.barrier", &format!("initial state {s:#x} -> {f:#x}: buffer-only read bits on a texture (dim={dim})"));
+            record("d3d12_xs", "xone.barrier", &format!("initial state {s:#x} -> {f:#x}: translated console state (dim={dim})"));
         }
     }
     f
@@ -140,7 +143,9 @@ mod tests {
     #[test]
     fn strips_combined_xbox_bit_only() {
         assert_eq!(fix_state(0x4000c0), 0xc0);
-        assert_eq!(fix_state(0x400000), 0x400000);
+        let expected_as = if crate::rt_x::configured_raytracing_tier() != 0 { 0 } else { 0x400000 };
+        assert_eq!(fix_state(0x400000), expected_as);
+        assert_eq!(initial_state(1, 0x400000), expected_as);
         assert_eq!(fix_state(0xc0), 0xc0);
         let b = transition(BUF, 0, 0x4, 0x4000c0);
         let out = rewrite(&b, buffers, |_| false).expect("rewritten");
