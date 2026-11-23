@@ -676,6 +676,10 @@ fn ds_lds_atomic64_sizing() {
     let body = |off: u32| cs_prog(&ds(0x40, off, 5, 22, 24, 10), &[10]);
     let err = |words: &[u32], fssm: &[u8]| translate(&cs_extract_fssm(words, T, fssm)).map(|t| t.hlsl).unwrap_err();
     assert!(err(&body(0), &[]).contains("COMPUTE_PGM_RSRC2 not found"));
+    assert!(err(&body(0), &cs_fssm_sub(7, 0x130, 5 << 15)).contains("sub-version 0x7 has no known location"));
+    assert!(err(&body(0), &cs_fssm_sub(6, 0x130, 5 << 15)).contains("declares no LDS"));
+    let h = translate(&cs_extract_fssm(&body(0x9f8), T, &cs_fssm_sub(6, 0x138, 5 << 15))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[640];") && h.contains("% 640u]") && !h.contains("& 8191u]"));
     assert!(err(&body(0), &lds_fssm(0)).contains("declares no LDS"));
     assert!(err(&body(0), &lds_fssm(64)).contains("no room for the lock word"));
     assert!(err(&body(0), &cs_fssm(5 << 15 | 0x50)).contains("not trusted as an LDS size"));

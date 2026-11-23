@@ -527,8 +527,13 @@ pub fn cs_extract(words: &[u32], threads: u32) -> ShaderExtract {
 }
 
 pub fn cs_fssm(compute_pgm_rsrc2: u32) -> Vec<u8> {
-    let mut b = vec![0u8; 0x134];
-    b[0x130..].copy_from_slice(&compute_pgm_rsrc2.to_le_bytes());
+    cs_fssm_sub(5, 0x130, compute_pgm_rsrc2)
+}
+
+pub fn cs_fssm_sub(sub_version: u32, at: usize, compute_pgm_rsrc2: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 0x13c];
+    b[0x10..0x14].copy_from_slice(&sub_version.to_le_bytes());
+    b[at..at + 4].copy_from_slice(&compute_pgm_rsrc2.to_le_bytes());
     b
 }
 

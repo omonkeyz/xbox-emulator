@@ -106,7 +106,8 @@ impl Emitter<'_> {
             self.touch(o);
         }
         let addr = r(&ins.src[0])?;
-        let at = |o: u32| format!("tb_lds[(({addr} + {:#x}u) >> 2) & 8191u]", o * step);
+        let wrap = self.lds_wrap();
+        let at = |o: u32| format!("tb_lds[(({addr} + {:#x}u) >> 2) {wrap}]", o * step);
         let (x0, x1) = (r(&ins.src[1])?, r(&ins.src[2])?);
         let t = self.tmp;
         self.tmp += 1;

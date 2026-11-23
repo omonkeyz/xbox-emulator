@@ -528,6 +528,7 @@ struct Emitter<'a> {
     lds_r_pending: bool,
     lds_nested: bool,
     lds64_nested: bool,
+    lds64_n: Option<u32>,
     brace_depth: i32,
     /// Shader reads constant tables embedded in its code section.
     uses_code: bool,
@@ -1264,6 +1265,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         lds_r_pending: false,
         lds_nested: false,
         lds64_nested: false,
+        lds64_n: None,
         brace_depth: 0,
         uses_code: false,
         vreg_array: false,
@@ -1319,6 +1321,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
     };
     em.vreg_array = em.insns.iter().any(|i| i.mnemonic.starts_with("v_movrel"));
     em.mode_use = mode::analyze(&em.insns);
+    em.plan_lds64();
     if em.mode_use.sp || em.mode_use.dp {
         em.hw_regs.insert(1);
     }
@@ -4191,7 +4194,8 @@ impl<'a> Emitter<'a> {
                 let scale = if m.contains("st64") { 64 } else { 1 };
                 let (off0, off1) = ((off & 0xff) * scale, ((off >> 8) & 0xff) * scale);
                 let addr = r(&s[0])?;
-                let at = |o: u32| format!("tb_lds[(({addr} + {o:#x}u) >> 2) & 8191u]");
+                let wrap = self.lds_wrap();
+                let at = |o: u32| format!("tb_lds[(({addr} + {o:#x}u) >> 2) {wrap}]");
                 let vd = match d {
                     Some(Opnd::Vgpr(v)) => v,
                     _ => return Err("bad vdst".into()),
@@ -4243,7 +4247,7 @@ impl<'a> Emitter<'a> {
                 let t = self.tmp;
                 self.tmp += 1;
                 self.line(&format!("uint t{t}a = ({}) + {off:#x}u; uint t{t}s = (t{t}a & 3u) * 8u;", r(&s[0])?));
-                let word = format!("tb_lds[(t{t}a >> 2) & 8191u]");
+                let word = format!("tb_lds[(t{t}a >> 2) {}]", self.lds_wrap());
                 if m.starts_with("ds_write") {
                     let data = if m.ends_with("_d16_hi") { format!("(({}) >> 16u)", r(&s[1])?) } else { r(&s[1])? };
                     self.line(&format!(
@@ -4296,7 +4300,7 @@ impl<'a> Emitter<'a> {
                 let x0 = r(&s[1])?;
                 let t = self.tmp;
                 self.tmp += 1;
-                let word = format!("tb_lds[(({addr} + {off:#x}u) >> 2) & 8191u]");
+                let word = format!("tb_lds[(({addr} + {off:#x}u) >> 2) {}]", self.lds_wrap());
                 let body = match m.replace("_rtn", "").as_str() {
                     "ds_add_u32" => format!("InterlockedAdd({word}, {x0}, t{t});"),
                     "ds_min_u32" => format!("InterlockedMin({word}, {x0}, t{t});"),
@@ -7190,15 +7194,12 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
             let _ = writeln!(h, "    s{} = gid.x; s{} = gid.y; s{} = gid.z;", g, g + 1, g + 2);
             h.push_str(&dg_init);
             h.push_str(&static_init);
-            match lds64 {
-                Some(n) => {
-                    h.push_str("    tb_lds64_lock = 0u;
+            if lds64.is_some() {
+                h.push_str("    tb_lds64_lock = 0u;
     GroupMemoryBarrierWithGroupSync();
 ");
-                    h.push_str(&self.body.replace("& 8191u]", &format!("% {n}u]")));
-                }
-                None => h.push_str(&self.body),
             }
+            h.push_str(&self.body);
             h.push_str("}
 ");
             return Ok(h);

@@ -2,7 +2,8 @@ use super::{gds, r, Emitter};
 use crate::rdna2::{Enc, Insn, Opnd};
 use crate::ShaderExtract;
 
-const RSRC2_FSSM_OFFSET: usize = 0x130;
+const FSSM_SUBVERSION_AT: usize = 0x10;
+const RSRC2_BY_SUBVERSION: [(u32, usize); 2] = [(5, 0x130), (6, 0x138)];
 const RSRC2_MUST_BE_ZERO: u32 = 0xff00_6040;
 const LDS_GRANULE_DWORDS: u32 = 128;
 const GROUPSHARED_BYTES: u32 = 32768;
@@ -30,20 +31,34 @@ pub(super) fn is_atomic64(m: &str) -> bool {
     )
 }
 
-fn compute_pgm_rsrc2(ex: &ShaderExtract) -> Option<u32> {
+fn le32(b: &[u8], o: usize) -> Option<u32> {
+    b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+}
+
+fn rsrc2_location(ex: &ShaderExtract) -> Result<usize, String> {
     if crate::gcn::is_durango(&ex.fssm) {
-        return None;
+        return Err("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (Durango container, no proven location), so the LDS size is unknown and the lock word cannot be placed".into());
     }
-    if RSRC2_FSSM_OFFSET + 4 > ex.isa_offset_in_fssm.checked_sub(16)? {
-        return None;
+    let v = le32(&ex.fssm, FSSM_SUBVERSION_AT)
+        .ok_or("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (no FSSM sub-version), so the LDS size is unknown and the lock word cannot be placed")?;
+    let at = RSRC2_BY_SUBVERSION
+        .iter()
+        .find(|e| e.0 == v)
+        .map(|e| e.1)
+        .ok_or_else(|| format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (FSSM sub-version {v:#x} has no known location), so the LDS size is unknown and the lock word cannot be placed"))?;
+    if ex.isa_offset_in_fssm.checked_sub(16).is_none_or(|end| at + 4 > end) {
+        return Err(format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (byte {at:#x} is not before the ISA), so the LDS size is unknown and the lock word cannot be placed"));
     }
-    let b = ex.fssm.get(RSRC2_FSSM_OFFSET..RSRC2_FSSM_OFFSET + 4)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    Ok(at)
+}
+
+fn compute_pgm_rsrc2(ex: &ShaderExtract) -> Result<u32, String> {
+    let at = rsrc2_location(ex)?;
+    le32(&ex.fssm, at).ok_or_else(|| format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (byte {at:#x} is past its end), so the LDS size is unknown and the lock word cannot be placed"))
 }
 
 pub(super) fn lds_dwords(ex: &ShaderExtract) -> Result<u32, String> {
-    let w = compute_pgm_rsrc2(ex)
-        .ok_or("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container, so the LDS size is unknown and the lock word cannot be placed")?;
+    let w = compute_pgm_rsrc2(ex)?;
     if w & RSRC2_MUST_BE_ZERO != 0 {
         return Err(format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 {w:#010x} has TRAP_PRESENT, EXCP_EN or bit 31 set, not trusted as an LDS size"));
     }
@@ -88,14 +103,24 @@ fn pair_hi(m: &str, o: &Opnd) -> Result<Opnd, String> {
 }
 
 impl Emitter<'_> {
-    pub(super) fn lds64_dwords(&self) -> Result<Option<u32>, String> {
-        if !self.is_cs || !self.body.contains("tb_lds64_lock") {
-            return Ok(None);
+    pub(super) fn plan_lds64(&mut self) {
+        if self.is_cs && !self.is_ms() && self.insns.iter().any(|i| i.enc == Enc::Ds && is_atomic64(&i.mnemonic)) {
+            self.lds64_n = lds_dwords(self.ex).ok();
         }
+    }
+
+    pub(super) fn lds_wrap(&self) -> String {
+        match self.lds64_n {
+            Some(n) => format!("% {n}u"),
+            None => "& 8191u".into(),
+        }
+    }
+
+    pub(super) fn lds64_dwords(&self) -> Result<Option<u32>, String> {
+        let Some(n) = self.lds64_n else { return Ok(None) };
         if self.lds_nested && self.lds64_nested {
             return Err("a 64-bit LDS atomic sits in a branch or a loop of a shader that has another LDS access in a branch or a loop: 64-bit LDS atomics are serialised only against each other, and no group sync can separate them there".into());
         }
-        let n = lds_dwords(self.ex)?;
         for i in self.insns.iter().filter(|i| i.enc == Enc::Ds && !gds::is_gds(i)) {
             if let Some(reach) = ds_reach(i).filter(|&x| x > n * 4) {
                 return Err(format!("{}: static LDS offset reaches byte {reach}, past the {} bytes the shader declares, in a shader with a 64-bit LDS atomic", i.mnemonic, n * 4));
@@ -122,6 +147,7 @@ impl Emitter<'_> {
             self.lds64_nested = true;
         }
         let off = ins.aux.imm as u32 & 0xffff;
+        let wrap = self.lds_wrap();
         let two = op.starts_with("ds_wrxchg2");
         let offs: Vec<u32> = if two {
             let unit = if op.contains("st64") { 512 } else { 8 };
@@ -162,7 +188,7 @@ impl Emitter<'_> {
             "if (exec_lo & 1u) {{ bool t{t}g = true; while (t{t}g) {{ uint t{t}k; InterlockedCompareExchange(tb_lds64_lock, 0u, 1u, t{t}k); if (t{t}k == 0u) {{"
         ));
         for (k, &b) in offs.iter().enumerate() {
-            let at = |x: u32| format!("tb_lds[(({addr} + {x:#x}u) >> 2) & 8191u]");
+            let at = |x: u32| format!("tb_lds[(({addr} + {x:#x}u) >> 2) {wrap}]");
             let (w0, w1) = (at(b), at(b + 4));
             let n = if !two {
                 new.clone()
@@ -200,10 +226,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
-    fn dword(b: &[u8], o: usize) -> Option<u32> {
-        b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
-    }
-
     fn lds_bytes(w: u32) -> u32 {
         ((w >> 15) & 0x1ff) * LDS_GRANULE_DWORDS * 4
     }
@@ -218,7 +240,7 @@ mod tests {
 
     fn candidates(ex: &ShaderExtract, reach: u32) -> BTreeSet<usize> {
         let end = ex.isa_offset_in_fssm.saturating_sub(16).min(ex.fssm.len());
-        (0..end / 4).map(|k| k * 4).filter(|&o| dword(&ex.fssm, o).is_some_and(|w| fits(w, reach))).collect()
+        (0..end / 4).map(|k| k * 4).filter(|&o| le32(&ex.fssm, o).is_some_and(|w| fits(w, reach))).collect()
     }
 
     fn common(sets: &[BTreeSet<usize>]) -> BTreeSet<usize> {
@@ -253,8 +275,9 @@ mod tests {
         }
     }
 
-    fn header(len: usize, at: usize, w: u32) -> Vec<u8> {
+    fn header(len: usize, sub: u32, at: usize, w: u32) -> Vec<u8> {
         let mut b = vec![0xffu8; len];
+        b[FSSM_SUBVERSION_AT..FSSM_SUBVERSION_AT + 4].copy_from_slice(&sub.to_le_bytes());
         b[at..at + 4].copy_from_slice(&w.to_le_bytes());
         b
     }
@@ -262,29 +285,38 @@ mod tests {
     const WRITE_AT_0X1FC: [u32; 3] = [0xd800_0000 | (0x0d << 18) | 0x1fc, 0x0000_0201, 0xbf81_0000];
 
     #[test]
-    fn reader_takes_the_dword_only_when_it_sits_before_the_isa() {
+    fn reader_takes_the_dword_the_fssm_sub_version_names_and_only_before_the_isa() {
         let w = 5 << 15 | 0x10;
-        let at = |isa_off: usize| compute_pgm_rsrc2(&synth(header(0x200, RSRC2_FSSM_OFFSET, w), isa_off, &WRITE_AT_0X1FC));
-        assert_eq!(at(0x210), Some(w));
-        assert_eq!(at(RSRC2_FSSM_OFFSET + 20), Some(w));
-        assert_eq!(at(RSRC2_FSSM_OFFSET + 16), None);
-        assert_eq!(at(0), None);
-        assert_eq!(lds_dwords(&synth(header(0x200, RSRC2_FSSM_OFFSET, w), 0x210, &WRITE_AT_0X1FC)), Ok(640));
-        let mut durango = header(0x200, RSRC2_FSSM_OFFSET, w);
+        for (sub, at) in RSRC2_BY_SUBVERSION {
+            let read = |isa_off: usize| compute_pgm_rsrc2(&synth(header(0x200, sub, at, w), isa_off, &WRITE_AT_0X1FC)).ok();
+            assert_eq!(read(0x210), Some(w));
+            assert_eq!(read(at + 20), Some(w));
+            assert_eq!(read(at + 16), None);
+            assert_eq!(read(0), None);
+            assert_eq!(lds_dwords(&synth(header(0x200, sub, at, w), 0x210, &WRITE_AT_0X1FC)), Ok(640));
+        }
+        let v6_at_0x130 = synth(header(0x200, 6, 0x130, w), 0x210, &WRITE_AT_0X1FC);
+        assert_eq!(compute_pgm_rsrc2(&v6_at_0x130), Ok(u32::MAX));
+        assert!(lds_dwords(&v6_at_0x130).unwrap_err().contains("not trusted as an LDS size"));
+        for sub in [0, 4, 7, u32::MAX] {
+            let e = lds_dwords(&synth(header(0x200, sub, 0x130, w), 0x210, &WRITE_AT_0X1FC)).unwrap_err();
+            assert!(e.contains("not found in the shader container") && e.contains("has no known location"), "{e}");
+        }
+        let mut durango = header(0x200, 5, 0x130, w);
         durango[..0x40].fill(0);
         durango[0..8].copy_from_slice(&0x200u64.to_le_bytes());
         durango[0x18..0x1c].copy_from_slice(&5u32.to_le_bytes());
         durango[0x28..0x30].copy_from_slice(&0x40u64.to_le_bytes());
         assert!(crate::gcn::is_durango(&durango));
         let ex = synth(durango, 0x1f0, &WRITE_AT_0X1FC);
-        assert_eq!(compute_pgm_rsrc2(&ex), None);
+        assert!(compute_pgm_rsrc2(&ex).is_err());
         assert!(lds_dwords(&ex).unwrap_err().contains("not found in the shader container"));
     }
 
     #[test]
     fn scan_recovers_a_planted_dword_and_tells_a_fixed_offset_from_one_counted_back_from_the_isa() {
-        let a = synth(header(0x180, 0x130, 1 << 15), 0x190, &WRITE_AT_0X1FC);
-        let b = synth(header(0x280, 0x130, 2 << 15 | 0x10), 0x290, &WRITE_AT_0X1FC);
+        let a = synth(header(0x180, 5, 0x130, 1 << 15), 0x190, &WRITE_AT_0X1FC);
+        let b = synth(header(0x280, 5, 0x130, 2 << 15 | 0x10), 0x290, &WRITE_AT_0X1FC);
         assert_eq!(static_reach(&a), 0x200);
         assert_eq!(static_reach(&synth(Vec::new(), 0, &[0xbf81_0000])), 0);
         assert!(fits(1 << 15, 0x200));
@@ -297,10 +329,10 @@ mod tests {
         assert_eq!(common(&sets), BTreeSet::from([0x130]));
         let back = [sets[0].iter().map(|o| 0x190 - o).collect(), sets[1].iter().map(|o| 0x290 - o).collect()];
         assert!(common(&back).is_empty());
-        let c = synth(header(0x180, 0x150, 1 << 15), 0x190, &WRITE_AT_0X1FC);
-        let d = synth(header(0x280, 0x250, 1 << 15), 0x290, &WRITE_AT_0X1FC);
+        let c = synth(header(0x180, 5, 0x150, 1 << 15), 0x190, &WRITE_AT_0X1FC);
+        let d = synth(header(0x280, 5, 0x250, 1 << 15), 0x290, &WRITE_AT_0X1FC);
         assert!(common(&[candidates(&c, 0x200), candidates(&d, 0x200)]).is_empty());
-        assert_eq!(compute_pgm_rsrc2(&c).map(|w| fits(w, 0x200)), Some(false));
+        assert_eq!(compute_pgm_rsrc2(&c).map(|w| fits(w, 0x200)), Ok(false));
     }
 
     fn dxbc_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -324,7 +356,9 @@ mod tests {
         files.sort();
         let (mut fssm_n, mut fssm_lds, mut durango_n, mut durango_lds) = (0, 0, 0, 0);
         let mut bad = Vec::new();
-        let (mut fixed, mut back, mut dfixed, mut dback) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut fixed: std::collections::BTreeMap<Option<u32>, Vec<BTreeSet<usize>>> = Default::default();
+        let mut back: std::collections::BTreeMap<Option<u32>, Vec<BTreeSet<usize>>> = Default::default();
+        let (mut dfixed, mut dback) = (Vec::new(), Vec::new());
         for f in &files {
             let Ok(bytes) = std::fs::read(f) else { continue };
             let Ok(ex) = crate::extract(&bytes) else { continue };
@@ -333,19 +367,23 @@ mod tests {
             }
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let durango = crate::gcn::is_durango(&ex.fssm);
+            let sub = le32(&ex.fssm, FSSM_SUBVERSION_AT);
             let reach = static_reach(&ex);
+            let at = rsrc2_location(&ex);
             let got = compute_pgm_rsrc2(&ex);
             let cand = candidates(&ex, reach);
             let rel: BTreeSet<usize> = cand.iter().map(|o| ex.isa_offset_in_fssm - o).collect();
-            let show = |w: Option<u32>| w.map_or("none".to_string(), |w| format!("{w:#010x} (LDS {} bytes, must-be-zero bits {:#x})", lds_bytes(w), w & RSRC2_MUST_BE_ZERO));
+            let show = |w: u32| format!("{w:#010x} (LDS {} bytes, must-be-zero bits {:#x})", lds_bytes(w), w & RSRC2_MUST_BE_ZERO);
             eprintln!(
-                "{name}: {}, header dword at 0x10 {}, ISA at {:#x}, static LDS reach {reach} bytes, reader at {RSRC2_FSSM_OFFSET:#x}: {}, dword at {:#x}: {}, {} dwords before the ISA fit",
+                "{name}: {}, sub-version at 0x10 {}, ISA at {:#x}, static LDS reach {reach} bytes, reader: {}, {} dwords before the ISA fit",
                 if durango { "Durango" } else { "FSSM" },
-                dword(&ex.fssm, 0x10).map_or("none".to_string(), |w| format!("{w:#x}")),
+                sub.map_or("none".to_string(), |w| format!("{w:#x}")),
                 ex.isa_offset_in_fssm,
-                show(got),
-                RSRC2_FSSM_OFFSET * 4,
-                show(dword(&ex.fssm, RSRC2_FSSM_OFFSET * 4)),
+                match (&at, &got) {
+                    (Ok(at), Ok(w)) => format!("{at:#x} = {}", show(*w)),
+                    (_, Err(e)) => e.clone(),
+                    (Err(e), _) => e.clone(),
+                },
                 cand.len()
             );
             if reach != 0 {
@@ -354,7 +392,7 @@ mod tests {
             }
             if durango {
                 durango_n += 1;
-                if got.is_some() {
+                if got.is_ok() {
                     bad.push(format!("{name}: a Durango container is read while no Durango location is proven"));
                 }
                 if reach != 0 {
@@ -365,19 +403,35 @@ mod tests {
                 continue;
             }
             fssm_n += 1;
-            if !got.is_some_and(|w| fits(w, reach)) {
-                bad.push(format!("{name}: the dword at {RSRC2_FSSM_OFFSET:#x} is {} for a static LDS reach of {reach} bytes", show(got)));
+            match &got {
+                Ok(w) if fits(*w, reach) => {}
+                Ok(w) => bad.push(format!("{name}: sub-version {sub:#x?}, the dword at {:#x} is {} for a static LDS reach of {reach} bytes", at.clone().unwrap_or(0), show(*w))),
+                Err(e) => bad.push(format!("{name}: {e}")),
             }
             if reach != 0 {
                 fssm_lds += 1;
-                fixed.push(cand);
-                back.push(rel);
+                fixed.entry(sub).or_default().push(cand);
+                back.entry(sub).or_default().push(rel);
             }
         }
-        eprintln!("FSSM: {fssm_n} compute fixtures, {fssm_lds} with LDS instructions; offsets that fit all of those: fixed {:#x?}, counted back from the ISA {:#x?}", common(&fixed), common(&back));
+        for (sub, sets) in &fixed {
+            eprintln!(
+                "FSSM sub-version {sub:#x?}: {} compute fixtures with LDS instructions; offsets that fit all of those: fixed {:#x?}, counted back from the ISA {:#x?}",
+                sets.len(),
+                common(sets),
+                common(&back[sub])
+            );
+        }
+        eprintln!("FSSM: {fssm_n} compute fixtures, {fssm_lds} with LDS instructions");
         eprintln!("Durango: {durango_n} compute fixtures, {durango_lds} with LDS instructions; offsets that fit all of those: fixed {:#x?}, counted back from the code {:#x?}", common(&dfixed), common(&dback));
-        assert!(bad.is_empty(), "COMPUTE_PGM_RSRC2 is not where the reader looks:\n{}", bad.join("\n"));
+        assert!(bad.is_empty(), "COMPUTE_PGM_RSRC2 is not where the reader looks:
+{}", bad.join("
+"));
         assert!(fssm_n >= 2 && fssm_lds >= 1, "not proven: {fssm_n} FSSM compute fixtures, {fssm_lds} of them with LDS instructions; at least two fixtures and one that uses LDS are needed");
-        assert!(common(&fixed).contains(&RSRC2_FSSM_OFFSET));
+        for (sub, sets) in &fixed {
+            let at = RSRC2_BY_SUBVERSION.iter().find(|e| Some(e.0) == *sub).map(|e| e.1);
+            assert!(at.is_some_and(|at| common(sets).contains(&at)), "sub-version {sub:#x?}: the reader's offset {at:#x?} is not among the offsets that fit every fixture");
+        }
     }
+
 }
