@@ -42,6 +42,8 @@ pub mod branch_free;
 pub(crate) mod d3d;
 #[cfg(windows)]
 pub mod fma_probe;
+#[cfg(windows)]
+pub mod wave_probe;
 #[cfg(test)]
 mod sm5_helpers_tests;
 #[cfg(test)]

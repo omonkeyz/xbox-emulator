@@ -141,12 +141,12 @@ struct Resolved {
     stale: Option<String>,
 }
 
-fn resolve_mode(title: &str, runtime_dll: Option<&Path>, cbraw_env: Option<&str>, loop_grad: bool, probed: shader_cache::Fma) -> Resolved {
+fn resolve_mode(title: &str, runtime_dll: Option<&Path>, cbraw_env: Option<&str>, loop_grad: bool, probed: shader_cache::Fma, probed_wave64: bool, wave64_path: bool) -> Resolved {
     let marker = std::fs::read_to_string(shader_cache::runtime_mode_path(title)).ok();
-    resolve_mode_from(marker.as_deref(), runtime_dll.map(|p| (p, std::fs::read(p).ok())), cbraw_env, loop_grad, probed)
+    resolve_mode_from(marker.as_deref(), runtime_dll.map(|p| (p, std::fs::read(p).ok())), cbraw_env, loop_grad, probed, probed_wave64, wave64_path)
 }
 
-fn resolve_mode_from(marker: Option<&str>, runtime_dll: Option<(&Path, Option<Vec<u8>>)>, cbraw_env: Option<&str>, loop_grad: bool, probed: shader_cache::Fma) -> Resolved {
+fn resolve_mode_from(marker: Option<&str>, runtime_dll: Option<(&Path, Option<Vec<u8>>)>, cbraw_env: Option<&str>, loop_grad: bool, probed: shader_cache::Fma, probed_wave64: bool, env_wave64_path: bool) -> Resolved {
     let parsed = marker.and_then(Mode::parse_line);
     let xbox_one = marker.is_some_and(|m| m.split_whitespace().any(|w| w == "xbox_one=1"));
     let mut notes = Vec::new();
@@ -162,7 +162,23 @@ fn resolve_mode_from(marker: Option<&str>, runtime_dll: Option<(&Path, Option<Ve
         (None, Some((_, m))) => m.cbv_raw,
         (None, None) => CbvRaw::Copy,
     };
-    let mode = Mode { cbv_raw, loop_grad, fma };
+    let recorded_wave64 = marker.filter(|m| m.split_whitespace().any(|w| w.starts_with("wave64="))).and(parsed.as_ref()).map(|(_, m)| m.wave64);
+    let wave64 = match recorded_wave64 {
+        Some(w) if w != probed_wave64 => {
+            notes.push(format!("host wave64 {} from the last runtime launch used instead of this probe's {}", w as u8, probed_wave64 as u8));
+            w
+        }
+        _ => probed_wave64,
+    };
+    let recorded_path = marker.filter(|m| m.split_whitespace().any(|w| w.starts_with("wave64_path="))).and(parsed.as_ref()).map(|(_, m)| m.wave64_path);
+    let wave64_path = match recorded_path {
+        Some(w) if w != env_wave64_path => {
+            notes.push(format!("wave64 path {} from the last runtime launch used instead of TOMBOX_WAVE64_HOST here ({})", w as u8, env_wave64_path as u8));
+            w
+        }
+        _ => env_wave64_path,
+    };
+    let mode = Mode { cbv_raw, loop_grad, fma, wave64: wave64 && wave64_path, wave64_path };
     match &parsed {
         Some((t, m)) => {
             notes.push(format!("runtime mode file: {}", marker.unwrap_or("").trim()));
@@ -817,7 +833,7 @@ fn main() {
         println!("[shader prelaunch] {title}: dxcompiler.dll + dxil.dll not found (TOMBOX_DXC_DIR); nothing converted, every shader is left to runtime");
         std::process::exit(2);
     }
-    let res = resolve_mode(&title, runtime_dll.as_deref(), CbvRaw::setting_from_env().as_deref(), runtime_hlsl::loop_grad_from_env(), fma_probe::probe().fma);
+    let res = resolve_mode(&title, runtime_dll.as_deref(), CbvRaw::setting_from_env().as_deref(), runtime_hlsl::loop_grad_from_env(), fma_probe::probe().fma, tombox_xshader::wave_probe::probe().wave64, pack_key::wave64_path_from_env());
     for n in &res.notes {
         eprintln!("[shader prelaunch] {n}");
     }
@@ -901,23 +917,29 @@ mod tests {
     #[test]
     fn mode_follows_env_then_runtime_file_and_flags_a_stale_dll() {
         let probed = shader_cache::Fma { preserve: true, any: false, hybrid: false, f2h: false };
-        let runtime = Mode { cbv_raw: CbvRaw::On, loop_grad: true, fma: shader_cache::Fma { preserve: true, any: false, hybrid: true, f2h: true } };
+        let runtime = Mode { cbv_raw: CbvRaw::On, loop_grad: true, fma: shader_cache::Fma { preserve: true, any: false, hybrid: true, f2h: true }, wave64: true, wave64_path: true };
         let marker = format!("{} xbox_one=1", runtime.line());
-        let r = resolve_mode_from(Some(&marker), None, None, true, probed);
+        let r = resolve_mode_from(Some(&marker), None, None, true, probed, false, true);
         assert_eq!(r.mode, runtime);
         assert!(r.stale.is_none());
-        let r = resolve_mode_from(Some(&marker), None, Some("0"), true, probed);
+        let r = resolve_mode_from(Some(&marker), None, Some("0"), true, probed, true, true);
         assert_eq!(r.mode.cbv_raw, CbvRaw::Off);
-        let r = resolve_mode_from(None, None, Some("1"), true, probed);
-        assert_eq!((r.mode.cbv_raw, r.mode.fma), (CbvRaw::Forced, probed));
-        assert_eq!(resolve_mode_from(None, None, None, false, probed).mode, Mode { cbv_raw: CbvRaw::Copy, loop_grad: false, fma: probed });
+        let r = resolve_mode_from(None, None, Some("1"), true, probed, true, true);
+        assert_eq!((r.mode.cbv_raw, r.mode.fma, r.mode.wave64), (CbvRaw::Forced, probed, true));
+        assert_eq!(resolve_mode_from(None, None, None, false, probed, false, true).mode, Mode { cbv_raw: CbvRaw::Copy, loop_grad: false, fma: probed, wave64: false, wave64_path: true });
+        let before_wave64 = marker.replace(" wave64=1", "");
+        assert!(resolve_mode_from(Some(&before_wave64), None, None, true, probed, true, true).mode.wave64);
+        let off = resolve_mode_from(None, None, None, true, probed, true, false).mode;
+        assert!(!off.wave64 && !off.wave64_path);
+        let r = resolve_mode_from(Some(&marker), None, None, true, probed, true, false);
+        assert!(r.mode.wave64_path && r.notes.iter().any(|n| n.contains("TOMBOX_WAVE64_HOST")));
         let p = Path::new("d3d12_xs.dll");
         let good = pack_key::translator_tag().to_vec();
-        assert!(resolve_mode_from(None, Some((p, Some(good))), None, true, probed).stale.is_none());
+        assert!(resolve_mode_from(None, Some((p, Some(good))), None, true, probed, false, true).stale.is_none());
         let old = format!("xx{}0123456789abcdef yy", pack_key::TAG_PREFIX).into_bytes();
-        let bad = resolve_mode_from(None, Some((p, Some(old))), None, true, probed).stale.unwrap();
+        let bad = resolve_mode_from(None, Some((p, Some(old))), None, true, probed, false, true).stale.unwrap();
         assert!(bad.starts_with("STALE") && bad.contains("0123456789abcdef"));
-        assert!(resolve_mode_from(None, Some((p, Some(b"no tag".to_vec()))), None, true, probed).stale.is_some());
+        assert!(resolve_mode_from(None, Some((p, Some(b"no tag".to_vec()))), None, true, probed, false, true).stale.is_some());
     }
 
     #[test]

@@ -100,12 +100,14 @@ pub struct Mode {
     pub cbv_raw: CbvRaw,
     pub loop_grad: bool,
     pub fma: Fma,
+    pub wave64: bool,
+    pub wave64_path: bool,
 }
 
 impl Mode {
     pub fn line(&self) -> String {
         let f = self.fma;
-        format!("translator={TRANSLATOR_HASH} cbraw={} loop_grad={} fma={}{}{}{} dxc={}", self.cbv_raw.name(), self.loop_grad as u8, f.preserve as u8, f.any as u8, f.hybrid as u8, f.f2h as u8, dxc::identity())
+        format!("translator={TRANSLATOR_HASH} cbraw={} loop_grad={} fma={}{}{}{} wave64={} wave64_path={} dxc={}", self.cbv_raw.name(), self.loop_grad as u8, f.preserve as u8, f.any as u8, f.hybrid as u8, f.f2h as u8, self.wave64 as u8, self.wave64_path as u8, dxc::identity())
     }
 
     pub fn parse_line(s: &str) -> Option<(String, Mode)> {
@@ -115,7 +117,7 @@ impl Mode {
             return None;
         }
         let b = |i: usize| fma[i] == b'1';
-        let mode = Mode { cbv_raw: CbvRaw::parse(get("cbraw")?)?, loop_grad: get("loop_grad")? == "1", fma: Fma { preserve: b(0), any: b(1), hybrid: b(2), f2h: b(3) } };
+        let mode = Mode { cbv_raw: CbvRaw::parse(get("cbraw")?)?, loop_grad: get("loop_grad")? == "1", fma: Fma { preserve: b(0), any: b(1), hybrid: b(2), f2h: b(3) }, wave64: get("wave64") == Some("1"), wave64_path: get("wave64_path") == Some("1") };
         Some((get("translator")?.to_string(), mode))
     }
 }
@@ -136,7 +138,36 @@ pub fn translate(ex: &ShaderExtract, link: Option<&InputInterp>, cbv: CbvRaw) ->
 }
 
 pub fn finalize(hlsl: &str, rtfmt: &[u8; 8], mode: &Mode) -> String {
-    runtime_hlsl::finalize(hlsl, rtfmt, mode.loop_grad)
+    let out = runtime_hlsl::finalize(hlsl, rtfmt, mode.loop_grad);
+    if mode.wave64_path {
+        out
+    } else {
+        without_wave64_path(&out)
+    }
+}
+
+pub fn wave64_path_from_env() -> bool {
+    std::env::var("TOMBOX_WAVE64_HOST").ok().as_deref() != Some("0")
+}
+
+pub fn without_wave64_path(src: &str) -> String {
+    let kept: String = src.split_inclusive('\n').filter(|l| l.trim() != "GroupMemoryBarrier();").collect();
+    kept.replace("(WaveGetLaneCount() - 1u)", "31u")
+}
+
+pub fn host_wave(src: &str, profile: &str, wave64: bool, mode: &Mode) -> (String, String) {
+    let at = src.find("[numthreads(").map(|k| src[..k].rfind('\n').map_or(0, |n| n + 1));
+    let Some(at) = at.filter(|_| wave64 && mode.wave64 && mode.wave64_path) else {
+        return (src.to_string(), profile.to_string());
+    };
+    let mut out = String::with_capacity(src.len() + 16);
+    out.push_str(&src[..at]);
+    out.push_str("[WaveSize(64)]\n");
+    out.push_str(&src[at..]);
+    let mut it = profile.split('_');
+    let stage = it.next().unwrap_or("cs");
+    let minor = if it.next() == Some("6") { it.next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) } else { 0 };
+    (out, format!("{stage}_6_{}", minor.max(6)))
 }
 
 pub fn extra<'a>(mode: &Mode, more: &[&'a str]) -> Vec<&'a str> {
@@ -222,7 +253,7 @@ pub fn prelaunch(blob: &[u8], root: Option<&[u8]>, rtfmt: &[u8; 8], link: Option
 pub fn prelaunch_ex(ex: &ShaderExtract, rtfmt: &[u8; 8], link: Option<&InputInterp>, mode: &Mode) -> Result<Keyed, (&'static str, String)> {
     let t = translate(ex, link, mode.cbv_raw).map_err(|e| (if e.starts_with("bind:") { "bind" } else { "translate" }, e))?;
     let src = finalize(&t.hlsl, rtfmt, mode);
-    let profile = dxc::profile_for(t.profile);
+    let (src, profile) = host_wave(&src, &dxc::profile_for(t.profile), t.wave64, mode);
     let parts = KeyParts::of(&src, &profile, mode, &[]);
     Ok(Keyed { stage: ex.stage.clone(), src, profile, parts })
 }
@@ -251,7 +282,7 @@ mod tests {
     #[test]
     fn cbv_raw_mode_is_part_of_the_key() {
         let fma = Fma::default();
-        let off = Mode { cbv_raw: CbvRaw::Off, loop_grad: true, fma };
+        let off = Mode { cbv_raw: CbvRaw::Off, loop_grad: true, fma, wave64: false, wave64_path: true };
         let on = Mode { cbv_raw: CbvRaw::On, ..off };
         let forced = Mode { cbv_raw: CbvRaw::Forced, ..off };
         let src = "float4 main() : SV_Target { return 1; }";
@@ -268,13 +299,46 @@ mod tests {
 
     #[test]
     fn mode_line_round_trips() {
-        let m = Mode { cbv_raw: CbvRaw::Forced, loop_grad: false, fma: Fma { preserve: true, any: false, hybrid: true, f2h: true } };
-        let (t, back) = Mode::parse_line(&m.line()).unwrap();
-        assert_eq!(t, TRANSLATOR_HASH);
-        assert_eq!(back, m);
-        let c = Mode { cbv_raw: CbvRaw::Copy, ..m };
-        assert_eq!(Mode::parse_line(&c.line()).unwrap().1, c);
+        for (wave64, wave64_path) in [(false, false), (false, true), (true, true)] {
+            let m = Mode { cbv_raw: CbvRaw::Forced, loop_grad: false, fma: Fma { preserve: true, any: false, hybrid: true, f2h: true }, wave64, wave64_path };
+            let (t, back) = Mode::parse_line(&m.line()).unwrap();
+            assert_eq!(t, TRANSLATOR_HASH);
+            assert_eq!(back, m);
+            let c = Mode { cbv_raw: CbvRaw::Copy, ..m };
+            assert_eq!(Mode::parse_line(&c.line()).unwrap().1, c);
+        }
         assert!(Mode::parse_line("translator=x cbraw=maybe loop_grad=1 fma=0000").is_none());
+        let (_, old) = Mode::parse_line("translator=x cbraw=off loop_grad=1 fma=0000 dxc=y").unwrap();
+        assert!(!old.wave64 && !old.wave64_path);
+    }
+
+    #[test]
+    fn switching_the_wave64_path_off_restores_the_previous_translation() {
+        let fenced = "void main() {\n    if (exec_lo & 1u) {\n    tb_lds[0] = v1;\n    GroupMemoryBarrier();\n    }\n    v2 = WaveReadLaneAt(v3, ((v4) & (WaveGetLaneCount() - 1u)));\n    GroupMemoryBarrierWithGroupSync();\n}\n";
+        let previous = "void main() {\n    if (exec_lo & 1u) {\n    tb_lds[0] = v1;\n    }\n    v2 = WaveReadLaneAt(v3, ((v4) & 31u));\n    GroupMemoryBarrierWithGroupSync();\n}\n";
+        assert_eq!(without_wave64_path(fenced), previous);
+        let on = Mode { cbv_raw: CbvRaw::Off, loop_grad: false, fma: Fma::default(), wave64: true, wave64_path: true };
+        let off = Mode { wave64: false, wave64_path: false, ..on };
+        let cs = "[numthreads(64, 1, 1)]\nvoid main() { }\n";
+        assert_eq!(host_wave(cs, "cs_6_2", true, &Mode { wave64_path: false, ..on }), (cs.to_string(), "cs_6_2".to_string()));
+        assert_ne!(Mode::parse_line(&on.line()).unwrap().1, Mode::parse_line(&off.line()).unwrap().1);
+        assert_ne!(key(fenced, "cs_6_6", &on, &[]), key(previous, "cs_6_6", &off, &[]));
+    }
+
+    #[test]
+    fn host_wave_marks_only_wave64_compute_on_a_wave64_host() {
+        let src = "groupshared uint g[4];\n[numthreads(64, 1, 1)]\nvoid main() { }\n";
+        let host = Mode { cbv_raw: CbvRaw::Off, loop_grad: true, fma: Fma::default(), wave64: true, wave64_path: true };
+        let narrow = Mode { wave64: false, ..host };
+        let (s, p) = host_wave(src, "cs_6_2", true, &host);
+        assert_eq!(s, "groupshared uint g[4];\n[WaveSize(64)]\n[numthreads(64, 1, 1)]\nvoid main() { }\n");
+        assert_eq!(p, "cs_6_6");
+        assert_eq!(host_wave(src, "cs_6_8", true, &host).1, "cs_6_8");
+        assert_eq!(host_wave(src, "cs_6_2", true, &narrow), (src.to_string(), "cs_6_2".to_string()));
+        assert_eq!(host_wave(src, "cs_6_2", false, &host), (src.to_string(), "cs_6_2".to_string()));
+        let ps = "float4 main() : SV_Target { return 1; }";
+        assert_eq!(host_wave(ps, "ps_6_2", true, &host), (ps.to_string(), "ps_6_2".to_string()));
+        assert_ne!(key(&s, &p, &host, &[]), key(src, "cs_6_2", &narrow, &[]));
     }
 
     #[test]

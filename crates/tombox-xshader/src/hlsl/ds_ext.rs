@@ -1,5 +1,54 @@
-use super::{r, Emitter};
-use crate::rdna2::{Insn, Opnd};
+use super::{gds, r, Emitter};
+use crate::rdna2::{Enc, Insn, Opnd};
+use std::collections::{BTreeSet, HashMap};
+
+pub(super) fn lds_store(m: &str) -> bool {
+    !(m.starts_with("ds_read") || m.starts_with("ds_swizzle") || m.ends_with("permute_b32") || m == "ds_nop")
+}
+
+pub(super) fn lds_load(m: &str) -> bool {
+    m.starts_with("ds_read") || m.contains("_rtn") || matches!(m, "ds_append" | "ds_consume")
+}
+
+pub(super) fn lds_hazard_stores(insns: &[Insn]) -> BTreeSet<usize> {
+    let n = insns.len();
+    let end = insns.last().map_or(0, |l| l.offset + l.dwords * 4);
+    let at: HashMap<usize, usize> = insns.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
+    let succ = |i: usize| -> Vec<usize> {
+        let x = &insns[i];
+        if x.enc != Enc::Sopp {
+            return vec![i + 1];
+        }
+        let target = || {
+            let t = x.offset as i64 + 4 + x.aux.imm * 4;
+            if t < 0 || t as usize >= end { n } else { at.get(&(t as usize)).copied().unwrap_or(n) }
+        };
+        match x.op {
+            1 => vec![],
+            2 => vec![target()],
+            4..=9 => vec![target(), i + 1],
+            _ => vec![i + 1],
+        }
+    };
+    let lds = |x: &Insn| x.enc == Enc::Ds && !gds::is_gds(x);
+    let barrier = |x: &Insn| x.enc == Enc::Sopp && x.op == 0x0a;
+    let mut reach = vec![false; n + 1];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in (0..n).rev() {
+            if reach[i] || barrier(&insns[i]) {
+                continue;
+            }
+            let x = &insns[i];
+            if (lds(x) && lds_load(&x.mnemonic)) || succ(i).into_iter().any(|j| reach[j]) {
+                reach[i] = true;
+                changed = true;
+            }
+        }
+    }
+    (0..n).filter(|&i| lds(&insns[i]) && lds_store(&insns[i].mnemonic) && succ(i).into_iter().any(|j| reach[j])).collect()
+}
 
 pub(super) fn is_wide_lds(m: &str) -> bool {
     matches!(m, "ds_write_b64" | "ds_write2_b64" | "ds_write2st64_b64" | "ds_read_b64" | "ds_read2_b64" | "ds_read2st64_b64")
@@ -60,6 +109,13 @@ pub(super) fn split_wide_lds(ins: &Insn) -> Result<Vec<Insn>, String> {
 }
 
 impl Emitter<'_> {
+    pub(super) fn lds_hazard_stores(&self) -> BTreeSet<usize> {
+        if self.ex.stage != crate::Stage::Compute {
+            return BTreeSet::new();
+        }
+        lds_hazard_stores(&self.insns)
+    }
+
     fn cs_threads(&self) -> (u32, u32, u32) {
         let p = self.ex.isa_preamble;
         (p[1].max(1), p[2].max(1), p[3].max(1))

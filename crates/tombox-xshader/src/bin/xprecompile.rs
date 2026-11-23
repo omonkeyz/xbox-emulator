@@ -147,6 +147,10 @@ fn main() -> ExitCode {
     let probe = tombox_xshader::fma_probe::probe();
     let fma = probe.fma;
     eprintln!("pack {} ({} records); fma probe on {}: preserve {} any {} [{}]{}", tombox_xshader::shader_cache::pack_path().display(), tombox_xshader::shader_cache::stats().records, probe.adapter, fma.preserve, fma.any, probe.detail, if probe.cached { " (cached)" } else { "" });
+    let wave = tombox_xshader::wave_probe::probe();
+    let wave64 = wave.wave64;
+    let wave64_path = tombox_xshader::pack_key::wave64_path_from_env();
+    eprintln!("wave probe: host wave64 {wave64}, wave64 path {wave64_path} [{}]", wave.detail);
     let t_gather = std::time::Instant::now();
     let mut work: Vec<(Vec<u8>, [u8; 8])> = Vec::new();
     let mut seen_pairs: HashSet<(u64, [u8; 8])> = HashSet::new();
@@ -215,10 +219,10 @@ fn main() -> ExitCode {
                 let r = std::panic::catch_unwind(|| {
                     let ex = extract(blob).map_err(|e| ("?".to_string(), format!("extract: {e}")))?;
                     let st = stage_name(&ex.stage).to_string();
-                    let mode = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::Off, loop_grad, fma };
+                    let mode = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::Off, loop_grad, fma, wave64, wave64_path };
                     let t = tombox_xshader::pack_key::translate(&ex, None, mode.cbv_raw).map_err(|e| (st.clone(), e.lines().next().unwrap_or("").to_string()))?;
                     let src = tombox_xshader::pack_key::finalize(&t.hlsl, rt, &mode);
-                    let profile = dxc::profile_for(t.profile);
+                    let (src, profile) = tombox_xshader::pack_key::host_wave(&src, &dxc::profile_for(t.profile), t.wave64, &mode);
                     if let Some((from, to)) = &bench {
                         let src = src.replacen(from.as_str(), to, 1);
                         let t0 = std::time::Instant::now();

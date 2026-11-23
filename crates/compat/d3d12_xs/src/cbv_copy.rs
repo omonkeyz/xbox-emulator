@@ -1099,7 +1099,7 @@ mod tests {
             return;
         };
         let hash = crate::shader_xlat::fnv1a(&blob);
-        let mode = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::Copy, loop_grad: false, fma: Default::default() };
+        let mode = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::Copy, loop_grad: false, fma: Default::default(), wave64: false, wave64_path: true };
         let count = || crate::shader_xlat::RUNTIME_SOURCES.with(|c| c.get());
         let n0 = count();
         let _ = crate::shader_xlat::runtime_source(&blob, hash, &[2, 0, 0, 0, 0, 0, 0, 0], &tombox_xshader::hlsl::InputInterp::default(), None, &mode);

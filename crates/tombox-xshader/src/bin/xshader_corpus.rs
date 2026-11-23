@@ -280,6 +280,11 @@ fn main() -> ExitCode {
         eprintln!("fma probe on {}: preserve {} any {} [{}]{}", p.adapter, p.fma.preserve, p.fma.any, p.detail, if p.cached { " (cached)" } else { "" });
         p.fma
     });
+    let wave64 = fma.is_some() && {
+        let p = tombox_xshader::wave_probe::probe();
+        eprintln!("wave probe: host wave64 {} [{}]", p.wave64, p.detail);
+        p.wave64
+    };
     let loop_grad = runtime_hlsl::loop_grad_from_env();
     eprintln!("{} shaders gathered in {:.1}s; {} jobs; mode {}", items.len(), t_gather.elapsed().as_secs_f64(), jobs, match mode {
         Mode::TranslateOnly => "translate only (no DXC)",
@@ -312,14 +317,14 @@ fn main() -> ExitCode {
                         ex.root_sig = Some(parse_root_signature(root).map_err(|e| ("extract", st.clone(), format!("pipeline root signature: {e}"), None))?);
                     }
                     let durango = tombox_xshader::gcn::is_durango(&ex.fssm);
-                    let pk = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::of(durango, durango), loop_grad, fma: fma.unwrap_or_default() };
+                    let pk = tombox_xshader::pack_key::Mode { cbv_raw: tombox_xshader::pack_key::CbvRaw::of(durango, durango), loop_grad, fma: fma.unwrap_or_default(), wave64, wave64_path: tombox_xshader::pack_key::wave64_path_from_env() };
                     let t = tombox_xshader::pack_key::translate(&ex, None, pk.cbv_raw).map_err(|e| ("translate", st.clone(), e, None))?;
                     let src = tombox_xshader::pack_key::finalize(&t.hlsl, &it.rt, &pk);
+                    let (src, profile) = tombox_xshader::pack_key::host_wave(&src, &dxc::profile_for(t.profile), t.wave64, &pk);
                     if mode == Mode::TranslateOnly {
                         return Ok((st, 0, Some(src)));
                     }
                     let Some(fma) = fma else { return Ok((st, 0, Some(src))) };
-                    let profile = dxc::profile_for(t.profile);
                     let k = tombox_xshader::pack_key::key(&src, &profile, &pk, &[]);
                     if !recompile && shader_cache::contains(k) {
                         return Ok((st, 1, Some(src)));

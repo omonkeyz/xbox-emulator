@@ -249,7 +249,7 @@ pub(crate) fn runtime_mode() -> &'static tombox_xshader::pack_key::Mode {
     M.get_or_init(|| {
         let xbox_one = crate::cbv_raw::xbox_one_title();
         let cbv_raw = crate::cbv_raw::pack_mode(xbox_one);
-        let m = tombox_xshader::pack_key::Mode { cbv_raw, loop_grad: loop_grad(), fma: fma_mode() };
+        let m = tombox_xshader::pack_key::Mode { cbv_raw, loop_grad: loop_grad(), fma: fma_mode(), wave64: host_wave64(), wave64_path: tombox_xshader::pack_key::wave64_path_from_env() };
         let line = format!("{} xbox_one={}\n", m.line(), xbox_one as u8);
         let p = tombox_xshader::shader_cache::runtime_mode_path(&title_name());
         if std::fs::read_to_string(&p).ok().as_deref() != Some(line.as_str()) {
@@ -374,8 +374,11 @@ pub(crate) fn runtime_source(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &Inp
     ANNOUNCED.call_once(|| {
         record("d3d12_xs", "shader_xlat", if use_dxc { "compiler: DXC (shader model 6.0, DXIL)" } else { "compiler: FXC (shader model 5, DXBC) - DXC not available or disabled" });
     });
-    let profile = if use_dxc { tombox_xshader::dxc::profile_for(t.profile) } else { t.profile.to_string() };
-    Ok(RtSrc { hlsl: t.hlsl, profile, use_dxc })
+    if use_dxc {
+        let (hlsl, profile) = tombox_xshader::pack_key::host_wave(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile), t.wave64, mode);
+        return Ok(RtSrc { hlsl, profile, use_dxc });
+    }
+    Ok(RtSrc { hlsl: t.hlsl, profile: t.profile.to_string(), use_dxc })
 }
 
 fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp, edit: Option<&dyn Fn(&str) -> Result<String, String>>, root: Option<&[u8]>) -> Result<Vec<u8>, String> {
@@ -579,6 +582,17 @@ fn fma_mode() -> tombox_xshader::shader_cache::Fma {
     })
 }
 
+fn host_wave64() -> bool {
+    let t0 = std::time::Instant::now();
+    let p = tombox_xshader::wave_probe::probe();
+    record("d3d12_xs", "shader_xlat", &format!(
+        "wave probe ({:.0} ms): wave64 compute programs {} [{}]",
+        t0.elapsed().as_secs_f64() * 1000.0,
+        if p.wave64 { "run as one 64-lane host wave ([WaveSize(64)])" } else { "run with the driver's default wave size" },
+        p.detail));
+    p.wave64
+}
+
 static T_XLAT: AtomicU64 = AtomicU64::new(0);
 static T_LOOKUP: AtomicU64 = AtomicU64::new(0);
 static T_DXC: AtomicU64 = AtomicU64::new(0);
@@ -634,7 +648,8 @@ fn index_ctx() -> &'static str {
     static C: OnceLock<String> = OnceLock::new();
     C.get_or_init(|| {
         let f = fma_mode();
-        format!("dxc={} cbv_raw={} loop_grad={} fma={}{}{}{}", tombox_xshader::dxc::available(), if crate::cbv_raw::copy_on() { "copy2".to_string() } else { crate::cbv_raw::enabled().to_string() }, loop_grad(), f.preserve as u8, f.any as u8, f.hybrid as u8, f.f2h as u8)
+        let m = runtime_mode();
+        format!("dxc={} cbv_raw={} loop_grad={} fma={}{}{}{} wave64={}{}", tombox_xshader::dxc::available(), if crate::cbv_raw::copy_on() { "copy2".to_string() } else { crate::cbv_raw::enabled().to_string() }, loop_grad(), f.preserve as u8, f.any as u8, f.hybrid as u8, f.f2h as u8, m.wave64 as u8, m.wave64_path as u8)
     })
 }
 
@@ -1105,8 +1120,8 @@ mod tests {
         let fma = tombox_xshader::shader_cache::Fma { preserve: true, any: false, hybrid: true, f2h: true };
         let mut compared = 0;
         for cbv in [CbvRaw::Off, CbvRaw::Forced, CbvRaw::On, CbvRaw::Copy] {
-            for loop_grad in [true, false] {
-                let mode = Mode { cbv_raw: cbv, loop_grad, fma };
+            for (loop_grad, wave64, wave64_path) in [(true, false, true), (false, false, true), (true, true, true), (true, false, false)] {
+                let mode = Mode { cbv_raw: cbv, loop_grad, fma, wave64, wave64_path };
                 for (name, blob) in &fx {
                     for rt in [[0u8; 8], [1, 0, 0, 0, 0, 0, 0, 0]] {
                         let rtm = runtime_source(blob, fnv1a(blob), &rt, &InputInterp::default(), None, &mode);

@@ -19,6 +19,7 @@ mod trans32;
 mod rootmem;
 mod smem_nr;
 mod user_data;
+mod wave64;
 
 pub const R32G32B32A32_FLOAT: u32 = 2;
 pub const R32G32B32A32_UINT: u32 = 3;

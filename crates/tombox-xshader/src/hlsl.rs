@@ -53,6 +53,7 @@ pub struct Translated {
     pub user_data_base: Option<usize>,
     pub cb_limits: BTreeMap<u32, u64>,
     pub fmask: Vec<(u32, u32, u32)>,
+    pub wave64: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -525,6 +526,7 @@ struct Emitter<'a> {
     uses_lds: bool,
     lds_w_pending: bool,
     lds_r_pending: bool,
+    lds_fence: BTreeSet<usize>,
     brace_depth: i32,
     /// Shader reads constant tables embedded in its code section.
     uses_code: bool,
@@ -1259,6 +1261,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         uses_lds: false,
         lds_w_pending: false,
         lds_r_pending: false,
+        lds_fence: BTreeSet::new(),
         brace_depth: 0,
         uses_code: false,
         vreg_array: false,
@@ -1378,7 +1381,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect(), wave64: wave64 && ex.stage == Stage::Compute })
 }
 
 impl<'a> Emitter<'a> {
@@ -2746,6 +2749,7 @@ impl<'a> Emitter<'a> {
     ///   Loops must be properly nested, have one back-edge per header, and must not be
     ///   entered from outside except through the header — otherwise `Err`.
     fn emit_body(&mut self, is_ps: bool) -> Result<(), String> {
+        self.lds_fence = self.lds_hazard_stores();
         let mut off2idx: HashMap<usize, usize> = self.insns.iter().enumerate().map(|(i, x)| (x.offset, i)).collect();
         // A branch to the address just past the last instruction leaves the program (same as
         // reaching the final s_endpgm).
@@ -3280,6 +3284,15 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_insn(&mut self, idx: usize, ins: &Insn, is_ps: bool, br: Option<usize>) -> Result<(), String> {
+        self.emit_insn_one(idx, ins, is_ps, br)?;
+        let nested = self.brace_depth > 0 || self.loop_depth > 0;
+        if nested && self.lds_fence.contains(&idx) && self.insns.get(idx).is_some_and(|o| o.mnemonic == ins.mnemonic) {
+            self.line("GroupMemoryBarrier();");
+        }
+        Ok(())
+    }
+
+    fn emit_insn_one(&mut self, idx: usize, ins: &Insn, is_ps: bool, br: Option<usize>) -> Result<(), String> {
         let m = ins.mnemonic.as_str();
         let s = &ins.src;
         let d = ins.dst.first().cloned();
@@ -4419,7 +4432,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn guest_lane(&self, lane: &str) -> String {
-        if self.wave64 {
+        if self.wave64 && self.ex.stage == Stage::Compute {
+            format!("(({lane}) & (WaveGetLaneCount() - 1u))")
+        } else if self.wave64 {
             format!("(({lane}) & 31u)")
         } else {
             format!("((WaveGetLaneIndex() & ~31u) | (({lane}) & 31u))")
