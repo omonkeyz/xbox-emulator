@@ -270,6 +270,27 @@ fn sat_int(e: &str, bits: u32) -> String {
     format!("(min(asuint(max({e}, -{h})) + {h:#x}u, {:#x}u) ^ {h:#x}u)", (h << 1) - 1)
 }
 
+fn int24_clamped(t: usize, m: &str, a: &str, b: &str, c: &str) -> (String, String) {
+    let signed = m.ends_with("_i24");
+    let field = |x: &str| if signed { format!("asuint(asint({x} << 8) >> 8)") } else { format!("({x} & 0xffffffu)") };
+    let mulhi = if signed { "tb_mulhi_i32" } else { "tb_mulhi_u32" };
+    let mut setup = format!(
+        "uint t{t}a = {}, t{t}b = {}; uint t{t}l = t{t}a * t{t}b; uint t{t}h = {mulhi}(t{t}a, t{t}b);",
+        field(a),
+        field(b)
+    );
+    if m.starts_with("v_mad") {
+        let sign = if signed { format!(" + ((asint({c}) < 0) ? 0xffffffffu : 0u)") } else { String::new() };
+        setup.push_str(&format!(" uint t{t}s = t{t}l + {c}; t{t}h += ((t{t}s < t{t}l) ? 1u : 0u){sign}; t{t}l = t{t}s;"));
+    }
+    let e = if signed {
+        format!("((t{t}h == asuint(asint(t{t}l) >> 31)) ? t{t}l : ((asint(t{t}h) < 0) ? 0x80000000u : 0x7fffffffu))")
+    } else {
+        format!("((t{t}h != 0u) ? 0xffffffffu : t{t}l)")
+    };
+    (setup, e)
+}
+
 fn f16_inline(x: f32) -> u32 {
     if (x - 0.159_154_94).abs() < 1e-7 {
         return 0x3118;
@@ -5390,6 +5411,13 @@ impl<'a> Emitter<'a> {
             let e = if sp { mode::dout(e) } else { e };
             let e = self.fres(ins, e);
             let e = if m == "v_mad_f32" && vop3 && ins.aux.imm2 != 0 { format!("asuint(tb_ftz(asfloat({e})))") } else { e };
+            return self.wv(&d, &e);
+        }
+        if vop3 && ins.aux.imm != 0 && matches!(m.as_str(), "v_mul_u32_u24" | "v_mul_i32_i24" | "v_mad_u32_u24" | "v_mad_i32_i24") {
+            let t = self.tmp;
+            self.tmp += 1;
+            let (setup, e) = int24_clamped(t, &m, &a, &b, &c);
+            self.line(&setup);
             return self.wv(&d, &e);
         }
         let mask = if vop3 { c.clone() } else { "vcc_lo".to_string() };

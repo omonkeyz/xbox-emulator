@@ -2403,6 +2403,35 @@ fn pk_int16_constants_and_clamp() {
 }
 
 #[test]
+fn int24_mul_mad_clamp_saturates_the_exact_result() {
+    let mut c = Cases::new();
+    let rows: [(&str, u32, bool, u32, u32, u32, u32); 17] = [
+        ("v_mul_u32_u24", 0x10b, true, 0x00ff_ffff, 0x00ff_ffff, 0, 0xffff_ffff),
+        ("v_mul_u32_u24", 0x10b, true, 0x0001_0000, 0x0000_ffff, 0, 0xffff_0000),
+        ("v_mul_u32_u24", 0x10b, true, 0xff00_0002, 0x7f00_0003, 0, 6),
+        ("v_mad_u32_u24", 0x143, true, 0x00ff_ffff, 0x00ff_ffff, 0xffff_ffff, 0xffff_ffff),
+        ("v_mad_u32_u24", 0x143, true, 1, 0x10, 0xffff_fff8, 0xffff_ffff),
+        ("v_mad_u32_u24", 0x143, true, 1, 0x10, 0xffff_ffe0, 0xffff_fff0),
+        ("v_mad_u32_u24", 0x143, true, 3, 5, 7, 22),
+        ("v_mad_u32_u24", 0x143, false, 0x00ff_ffff, 0x00ff_ffff, 0xffff_ffff, 0xfe00_0000),
+        ("v_mul_i32_i24", 0x109, true, 0x0080_0000, 0x0080_0000, 0, 0x7fff_ffff),
+        ("v_mul_i32_i24", 0x109, true, 0x0080_0000, 0x007f_ffff, 0, 0x8000_0000),
+        ("v_mul_i32_i24", 0x109, true, 0x00ff_fffe, 7, 0, 0xffff_fff2),
+        ("v_mad_i32_i24", 0x142, true, 1, 1, 0x7fff_ffff, 0x7fff_ffff),
+        ("v_mad_i32_i24", 0x142, true, 0x00ff_ffff, 1, 0x8000_0000, 0x8000_0000),
+        ("v_mad_i32_i24", 0x142, true, 0x0080_0000, 0x101, 0x0100_0000, 0x8080_0000),
+        ("v_mad_i32_i24", 0x142, true, 0x0080_0000, 0x100, 1, 0x8000_0001),
+        ("v_mad_i32_i24", 0x142, true, 0x0080_0000, 0x100, 0xffff_ffff, 0x8000_0000),
+        ("v_mad_i32_i24", 0x142, false, 0x0080_0000, 0x0080_0000, 0, 0),
+    ];
+    for (m, op, clamp, a, b, d, want) in rows {
+        let w = vop3m(op, 10, [v(1), v(2), v(3)], 0, 0, 0, clamp);
+        vc(&mut c, m, &[(1, a), (2, b), (3, d)], &w, &[10], &[want]);
+    }
+    c.run_both("int24_mul_mad_clamp_saturates_the_exact_result");
+}
+
+#[test]
 fn pk_int16_mul_shift_minmax() {
     let mut c = Cases::new();
     let pk = |lo: u32, hi: u32| (lo & 0xffff) | (hi << 16);
