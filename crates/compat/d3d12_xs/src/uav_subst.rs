@@ -67,7 +67,18 @@ pub unsafe fn host_support1(real: *mut c_void, format: u32) -> Option<u32> {
     }
     let mut data = [format, 0, 0];
     let f: unsafe extern "system" fn(*mut c_void, u32, *mut u32, u32) -> i32 = unsafe { core::mem::transmute(slot(real, DEV_CHECK_FEATURE_SUPPORT)) };
-    (unsafe { f(real, FEATURE_FORMAT_SUPPORT, data.as_mut_ptr(), 12) } >= 0).then_some(data[1])
+    (unsafe { f(real, FEATURE_FORMAT_SUPPORT, data.as_mut_ptr(), 12) } >= 0).then_some(masked(data[1]))
+}
+
+#[cfg(test)]
+pub static FORCE_NO_TYPED_UAV: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn masked(bits: u32) -> u32 {
+    #[cfg(test)]
+    if FORCE_NO_TYPED_UAV.load(Ordering::Relaxed) {
+        return bits & !SUPPORT1_TYPED_UAV;
+    }
+    bits
 }
 
 pub fn heap_is_gpu_only(heap_type: u32, cpu_page: u32) -> bool {
@@ -330,40 +341,103 @@ unsafe fn hook_views(real: *mut c_void) -> Result<(), &'static str> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    Encode,
+    Decode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
-    Texture(Option<Subst>),
+    Texture { subst: Option<Subst>, format: u32 },
     Footprint(u32),
 }
 
-pub fn copy_conflict(dst: Side, src: Side) -> Option<&'static str> {
-    match (dst, src) {
-        (Side::Texture(Some(_)), _) | (_, Side::Texture(Some(_))) => {
-            Some("involves a texture stored in a substitute format, and copies of such textures are not implemented")
-        }
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plan {
+    Forward,
+    Convert(Dir, Subst),
+    Refuse(&'static str),
+}
+
+fn format_of_side(side: Side) -> u32 {
+    match side {
+        Side::Texture { format, .. } | Side::Footprint(format) => format,
     }
 }
 
-unsafe fn side(loc: *const u8) -> Side {
+pub fn copy_plan(dst: Side, src: Side) -> Plan {
+    match (dst, src) {
+        (Side::Texture { subst: Some(a), .. }, Side::Texture { subst: Some(b), .. }) if a == b => Plan::Forward,
+        (Side::Texture { subst: Some(_), .. }, Side::Texture { subst: Some(_), .. }) => Plan::Refuse("copies between textures stored in different substitute formats"),
+        (other, Side::Texture { subst: Some(s), .. }) if format_of_side(other) == s.console => Plan::Convert(Dir::Encode, s),
+        (_, Side::Texture { subst: Some(_), .. }) => Plan::Refuse("the destination format is neither the substituted texture's console format nor a texture with the same substitute"),
+        (Side::Texture { subst: Some(s), .. }, other) if format_of_side(other) == s.console => Plan::Convert(Dir::Decode, s),
+        (Side::Texture { subst: Some(_), .. }, _) => Plan::Refuse("the source format is neither the substituted texture's console format nor a texture with the same substitute"),
+        _ => Plan::Forward,
+    }
+}
+
+pub fn resource_plan(dst: Option<Subst>, dd: &[u8; 0x38], src: Option<Subst>, sd: &[u8; 0x38]) -> Plan {
+    let (d, s) = (crate::console_slots_cl2::Desc::from_bytes(dd), crate::console_slots_cl2::Desc::from_bytes(sd));
+    let (dir, sub, other) = match (dst, src) {
+        (None, None) => return Plan::Forward,
+        (Some(a), Some(b)) if a == b => return Plan::Forward,
+        (Some(_), Some(_)) => return Plan::Refuse("copies between textures stored in different substitute formats"),
+        (None, Some(x)) => (Dir::Encode, x, d),
+        (Some(x), None) => (Dir::Decode, x, s),
+    };
+    if other.dim < 2 {
+        return Plan::Refuse("CopyResource between a texture and a buffer");
+    }
+    if other.format != sub.console {
+        return Plan::Refuse("the other resource's format is not the substituted texture's console format");
+    }
+    if (d.dim, d.width, d.height, d.depth_or_array, d.mips) != (s.dim, s.width, s.height, s.depth_or_array, s.mips) {
+        return Plan::Refuse("the two resources differ in dimension, size, array size or mip count");
+    }
+    Plan::Convert(dir, sub)
+}
+
+unsafe fn side(loc: *const u8) -> (Side, *mut c_void) {
     let res = unsafe { core::ptr::read_unaligned(loc as *const usize) } as *mut c_void;
     if unsafe { core::ptr::read_unaligned(loc.add(8) as *const u32) } == 1 {
-        Side::Footprint(unsafe { core::ptr::read_unaligned(loc.add(0x18) as *const u32) })
-    } else {
-        Side::Texture(unsafe { lookup(res) })
+        return (Side::Footprint(unsafe { core::ptr::read_unaligned(loc.add(0x18) as *const u32) }), res);
+    }
+    (Side::Texture { subst: unsafe { lookup(res) }, format: 0 }, res)
+}
+
+unsafe fn with_format(side: Side, res: *mut c_void) -> Side {
+    match side {
+        Side::Texture { subst: None, .. } if !res.is_null() => Side::Texture { subst: None, format: rd32(&unsafe { crate::uav_subst_copy::res_desc(res) }, 0x20) },
+        other => other,
     }
 }
 
 static REFUSED: AtomicUsize = AtomicUsize::new(0);
+static CONVERTED: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 pub fn refused_copies() -> usize {
     REFUSED.load(Ordering::Relaxed)
 }
 
+#[cfg(test)]
+pub fn converted_copies() -> usize {
+    CONVERTED.load(Ordering::Relaxed)
+}
+
 fn refuse(what: &str, why: &str) {
     let n = REFUSED.fetch_add(1, Ordering::Relaxed);
     if n < 32 || n.is_power_of_two() {
-        record("d3d12_xs", "uav_subst", &format!("{what} REFUSED (#{n}): the copy {why}"));
+        record("d3d12_xs", "uav_subst", &format!("{what} REFUSED (#{n}), nothing copied: {why}"));
+    }
+}
+
+fn converted(what: &str, dir: Dir, s: Subst) {
+    let n = CONVERTED.fetch_add(1, Ordering::Relaxed);
+    if n < 8 || n.is_power_of_two() {
+        let (a, b) = if dir == Dir::Encode { (s.host, s.console) } else { (s.console, s.host) };
+        record("d3d12_xs", "uav_subst", &format!("{what} (#{n}) converted format {a} texels to format {b} through a compute pass"));
     }
 }
 
@@ -373,47 +447,145 @@ fn cl_prev(k: usize) -> usize {
     PREV_CL[k].load(Ordering::Acquire)
 }
 
-unsafe fn texture_conflict(dst: *const u8, src: *const u8) -> Option<&'static str> {
+unsafe fn texture_plan(dst: *const u8, src: *const u8) -> (Plan, *mut c_void) {
     if SUBSTITUTED.load(Ordering::Acquire) == 0 || dst.is_null() || src.is_null() {
-        return None;
+        return (Plan::Forward, core::ptr::null_mut());
     }
-    copy_conflict(unsafe { side(dst) }, unsafe { side(src) })
+    let ((d, dres), (s, sres)) = (unsafe { side(dst) }, unsafe { side(src) });
+    if !matches!(d, Side::Texture { subst: Some(_), .. }) && !matches!(s, Side::Texture { subst: Some(_), .. }) {
+        return (Plan::Forward, sres);
+    }
+    (copy_plan(unsafe { with_format(d, dres) }, unsafe { with_format(s, sres) }), sres)
 }
 
-unsafe fn resource_conflict(dst: *mut c_void, src: *mut c_void) -> Option<&'static str> {
-    if SUBSTITUTED.load(Ordering::Acquire) == 0 {
-        return None;
+fn rd_box(src_box: *const c_void) -> Option<[u32; 6]> {
+    (!src_box.is_null()).then(|| unsafe { core::ptr::read_unaligned(src_box as *const [u32; 6]) })
+}
+
+unsafe fn read_loc(p: *const u8) -> [u8; 0x30] {
+    unsafe { core::ptr::read_unaligned(p as *const [u8; 0x30]) }
+}
+
+pub fn region_of(src: &[u8; 0x30], src_desc: Option<&[u8; 0x38]>, src_box: Option<[u32; 6]>, at: [u32; 3]) -> crate::uav_subst_copy::Region {
+    let full = match src_desc {
+        Some(d) => crate::uav_subst_copy::subresource_size(d, rd32(src, 0x10)),
+        None => [rd32(src, 0x1c), rd32(src, 0x20), rd32(src, 0x24)],
+    };
+    let size = match src_box {
+        Some(b) => [b[3].saturating_sub(b[0]), b[4].saturating_sub(b[1]), b[5].saturating_sub(b[2])],
+        None => full,
+    };
+    crate::uav_subst_copy::Region { at, size }
+}
+
+pub fn end_of(loc: &[u8; 0x30], origin: [u32; 3], bpp: u64) -> crate::uav_subst_copy::End {
+    if rd32(loc, 8) != 1 {
+        return crate::uav_subst_copy::End::Tex(*loc);
     }
-    copy_conflict(Side::Texture(unsafe { lookup(dst) }), Side::Texture(unsafe { lookup(src) }))
+    let pitch = rd32(loc, 0x28) as u64;
+    let slice = pitch * rd32(loc, 0x20) as u64;
+    let offset = u64::from_le_bytes(loc[0x10..0x18].try_into().unwrap()) + origin[2] as u64 * slice + origin[1] as u64 * pitch + origin[0] as u64 * bpp;
+    crate::uav_subst_copy::End::Buf { res: u64::from_le_bytes(loc[0..8].try_into().unwrap()) as usize, offset, pitch, slice }
+}
+
+unsafe fn convert_region(list: *mut c_void, dir: Dir, s: Subst, dst: *const u8, at: [u32; 3], src: *const u8, src_res: *mut c_void, src_box: *const c_void) -> Result<(), String> {
+    let (dl, sl) = (unsafe { read_loc(dst) }, unsafe { read_loc(src) });
+    let b = rd_box(src_box);
+    let src_is_texture = rd32(&sl, 8) != 1;
+    let src_desc = src_is_texture.then(|| unsafe { crate::uav_subst_copy::res_desc(src_res) });
+    let r = region_of(&sl, src_desc.as_ref(), b, at);
+    let bin = crate::uav_subst_copy::bytes_per_texel(dir, true);
+    let bout = crate::uav_subst_copy::bytes_per_texel(dir, false);
+    let src_end = end_of(&sl, if src_is_texture { [0; 3] } else { b.map_or([0; 3], |b| [b[0], b[1], b[2]]) }, bin);
+    let dst_end = end_of(&dl, at, bout);
+    unsafe { crate::uav_subst_copy::convert(list, dir, s, src_end, dst_end, r, if src_is_texture { b } else { None }) }
+}
+
+unsafe fn texture_copy(list: *mut c_void, what: &str, dst: *const u8, at: [u32; 3], src: *const u8, src_box: *const c_void) -> bool {
+    let (plan, sres) = unsafe { texture_plan(dst, src) };
+    match plan {
+        Plan::Forward => false,
+        Plan::Refuse(why) => {
+            refuse(what, why);
+            true
+        }
+        Plan::Convert(dir, s) => {
+            match unsafe { convert_region(list, dir, s, dst, at, src, sres, src_box) } {
+                Ok(()) => converted(what, dir, s),
+                Err(why) => refuse(what, &why),
+            }
+            true
+        }
+    }
+}
+
+unsafe fn resource_copy(list: *mut c_void, what: &str, dst: *mut c_void, src: *mut c_void, flags: Option<u32>) -> bool {
+    if SUBSTITUTED.load(Ordering::Acquire) == 0 || dst.is_null() || src.is_null() {
+        return false;
+    }
+    let (ds, ss) = (unsafe { lookup(dst) }, unsafe { lookup(src) });
+    if ds.is_none() && ss.is_none() {
+        return false;
+    }
+    let (dd, sd) = (unsafe { crate::uav_subst_copy::res_desc(dst) }, unsafe { crate::uav_subst_copy::res_desc(src) });
+    let console = |d: &[u8; 0x38]| Some(crate::console_slots_cl2::Desc::from_bytes(d));
+    let plan = match (resource_plan(ds, &dd, ss, &sd), flags) {
+        (Plan::Convert(dir, s), Some(f)) => match crate::console_slots_cl2::copy_resource_x_plan(console(&dd), console(&sd), false, f) {
+            Err(why) => Plan::Refuse(why),
+            Ok(_) => Plan::Convert(dir, s),
+        },
+        (p, _) => p,
+    };
+    match plan {
+        Plan::Forward => false,
+        Plan::Refuse(why) => {
+            refuse(what, why);
+            true
+        }
+        Plan::Convert(dir, s) => {
+            let subs = crate::console_slots_cl2::Desc::from_bytes(&dd).subresources();
+            for sub in 0..subs {
+                let (dl, sl) = (crate::uav_subst_copy::subresource(dst as usize, sub), crate::uav_subst_copy::subresource(src as usize, sub));
+                let r = crate::uav_subst_copy::Region { at: [0; 3], size: crate::uav_subst_copy::subresource_size(&sd, sub) };
+                let (se, de) = (crate::uav_subst_copy::End::Tex(sl), crate::uav_subst_copy::End::Tex(dl));
+                if let Err(why) = unsafe { crate::uav_subst_copy::convert(list, dir, s, se, de, r, None) } {
+                    refuse(what, &format!("subresource {sub} of {subs} (earlier subresources were converted): {why}"));
+                    return true;
+                }
+            }
+            converted(what, dir, s);
+            true
+        }
+    }
 }
 
 unsafe extern "system" fn copy_texture(this: *mut c_void, dst: *const u8, x: u32, y: u32, z: u32, src: *const u8, src_box: *const c_void) {
-    if let Some(why) = unsafe { texture_conflict(dst, src) } {
-        return refuse("CopyTextureRegion", why);
+    if unsafe { texture_copy(this, "CopyTextureRegion", dst, [x, y, z], src, src_box) } {
+        return;
     }
     let f: unsafe extern "system" fn(*mut c_void, *const u8, u32, u32, u32, *const u8, *const c_void) = unsafe { core::mem::transmute(cl_prev(0)) };
     unsafe { f(this, dst, x, y, z, src, src_box) }
 }
 
 unsafe extern "system" fn copy_resource(this: *mut c_void, dst: *mut c_void, src: *mut c_void) {
-    if let Some(why) = unsafe { resource_conflict(dst, src) } {
-        return refuse("CopyResource", why);
+    if unsafe { resource_copy(this, "CopyResource", dst, src, None) } {
+        return;
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void) = unsafe { core::mem::transmute(cl_prev(1)) };
     unsafe { f(this, dst, src) }
 }
 
 unsafe extern "system" fn copy_texture_x(this: *mut c_void, dst: *const u8, x: u32, y: u32, z: u32, src: *const u8, src_box: *const c_void, flags: u32) {
-    if let Some(why) = unsafe { texture_conflict(dst, src) } {
-        return refuse("CopyTextureRegionX", why);
+    if unsafe { texture_copy(this, "CopyTextureRegionX", dst, [x, y, z], src, src_box) } {
+        return;
     }
     let f: unsafe extern "system" fn(*mut c_void, *const u8, u32, u32, u32, *const u8, *const c_void, u32) = unsafe { core::mem::transmute(cl_prev(2)) };
     unsafe { f(this, dst, x, y, z, src, src_box, flags) }
 }
 
 unsafe extern "system" fn copy_resource_x(this: *mut c_void, dst: *mut c_void, src: *mut c_void, flags: u32) {
-    if let Some(why) = unsafe { resource_conflict(dst, src) } {
-        return refuse("CopyResourceX", why);
+    if unsafe { resource_copy(this, "CopyResourceX", dst, src, Some(flags)) } {
+        return;
     }
     let f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, u32) = unsafe { core::mem::transmute(cl_prev(3)) };
     unsafe { f(this, dst, src, flags) }
@@ -437,6 +609,22 @@ pub fn install_cmdlist(vt: &[AtomicUsize]) -> usize {
         n += 1;
     }
     n
+}
+
+pub fn rgb9e5_half(m: u32, e: u32) -> u16 {
+    if m == 0 {
+        return 0;
+    }
+    let p = 31 - m.leading_zeros();
+    if p + e < 10 {
+        return (m << e) as u16;
+    }
+    (((p + e - 9) << 10) | ((m << (10 - p)) & 0x3ff)) as u16
+}
+
+pub fn rgb9e5_to_rgba16f(v: u32) -> [u16; 4] {
+    let e = v >> 27;
+    [rgb9e5_half(v & 0x1ff, e), rgb9e5_half((v >> 9) & 0x1ff, e), rgb9e5_half((v >> 18) & 0x1ff, e), 0x3c00]
 }
 
 #[cfg(test)]
@@ -651,16 +839,77 @@ mod tests {
     #[test]
     fn copy_rules() {
         use Side::*;
-        let s = Some(RGB9E5);
-        assert_eq!(copy_conflict(Texture(None), Texture(None)), None);
-        assert_eq!(copy_conflict(Texture(None), Footprint(67)), None);
-        assert!(copy_conflict(Texture(s), Texture(s)).is_some());
-        assert!(copy_conflict(Texture(s), Texture(None)).is_some());
-        assert!(copy_conflict(Texture(None), Texture(s)).is_some());
-        assert!(copy_conflict(Texture(s), Footprint(67)).is_some());
-        assert!(copy_conflict(Footprint(67), Texture(s)).is_some());
-        assert!(copy_conflict(Footprint(10), Texture(s)).is_some());
-        assert!(copy_conflict(Texture(s), Footprint(10)).is_some());
+        let sub = Texture { subst: Some(RGB9E5), format: 0 };
+        let other = Subst { console: 2, host: 10 };
+        let tex = |format| Texture { subst: None, format };
+        assert_eq!(copy_plan(tex(67), tex(67)), Plan::Forward);
+        assert_eq!(copy_plan(tex(10), Footprint(67)), Plan::Forward);
+        assert_eq!(copy_plan(sub, sub), Plan::Forward);
+        assert!(matches!(copy_plan(sub, Texture { subst: Some(other), format: 0 }), Plan::Refuse(_)));
+        assert_eq!(copy_plan(Footprint(67), sub), Plan::Convert(Dir::Encode, RGB9E5));
+        assert_eq!(copy_plan(tex(67), sub), Plan::Convert(Dir::Encode, RGB9E5));
+        assert_eq!(copy_plan(sub, Footprint(67)), Plan::Convert(Dir::Decode, RGB9E5));
+        assert_eq!(copy_plan(sub, tex(67)), Plan::Convert(Dir::Decode, RGB9E5));
+        for f in [0, 10, 42, 28] {
+            assert!(matches!(copy_plan(Footprint(f), sub), Plan::Refuse(_)), "footprint {f}");
+            assert!(matches!(copy_plan(sub, Footprint(f)), Plan::Refuse(_)), "footprint {f}");
+            assert!(matches!(copy_plan(tex(f), sub), Plan::Refuse(_)), "texture {f}");
+            assert!(matches!(copy_plan(sub, tex(f)), Plan::Refuse(_)), "texture {f}");
+        }
+    }
+
+    #[test]
+    fn resource_copy_rules() {
+        let t = desc(3, 67, 0, 1);
+        let host = desc(3, 10, 4, 1);
+        assert_eq!(resource_plan(None, &t, None, &t), Plan::Forward);
+        assert_eq!(resource_plan(Some(RGB9E5), &host, Some(RGB9E5), &host), Plan::Forward);
+        assert_eq!(resource_plan(None, &t, Some(RGB9E5), &host), Plan::Convert(Dir::Encode, RGB9E5));
+        assert_eq!(resource_plan(Some(RGB9E5), &host, None, &t), Plan::Convert(Dir::Decode, RGB9E5));
+        assert!(matches!(resource_plan(None, &desc(3, 10, 0, 1), Some(RGB9E5), &host), Plan::Refuse(_)));
+        let mut small = t;
+        small[0x18..0x1c].copy_from_slice(&540u32.to_le_bytes());
+        assert!(matches!(resource_plan(None, &small, Some(RGB9E5), &host), Plan::Refuse(_)));
+        let mut mips = t;
+        mips[0x1e..0x20].copy_from_slice(&2u16.to_le_bytes());
+        assert!(matches!(resource_plan(Some(RGB9E5), &host, None, &mips), Plan::Refuse(_)));
+        assert!(matches!(resource_plan(None, &desc(1, 0, 0, 1), Some(RGB9E5), &host), Plan::Refuse(_)));
+    }
+
+    #[test]
+    fn copy_regions_and_ends() {
+        let mut fp = [0u8; 0x30];
+        fp[8] = 1;
+        fp[0x10..0x18].copy_from_slice(&0x400u64.to_le_bytes());
+        fp[0x18..0x1c].copy_from_slice(&67u32.to_le_bytes());
+        fp[0x1c..0x20].copy_from_slice(&64u32.to_le_bytes());
+        fp[0x20..0x24].copy_from_slice(&16u32.to_le_bytes());
+        fp[0x24..0x28].copy_from_slice(&2u32.to_le_bytes());
+        fp[0x28..0x2c].copy_from_slice(&256u32.to_le_bytes());
+        assert_eq!(region_of(&fp, None, None, [1, 2, 0]).size, [64, 16, 2]);
+        assert_eq!(region_of(&fp, None, Some([4, 2, 1, 20, 7, 2]), [0; 3]).size, [16, 5, 1]);
+        assert_eq!(end_of(&fp, [4, 2, 1], 4), crate::uav_subst_copy::End::Buf { res: 0, offset: 0x400 + 4096 + 512 + 16, pitch: 256, slice: 4096 });
+        let tex = crate::uav_subst_copy::subresource(7, 3);
+        assert_eq!(end_of(&tex, [9, 9, 9], 8), crate::uav_subst_copy::End::Tex(tex));
+        let mut d = desc(3, 10, 4, 1);
+        d[0x1e..0x20].copy_from_slice(&4u16.to_le_bytes());
+        assert_eq!(region_of(&tex, Some(&d), None, [0; 3]).size, [240, 135, 1]);
+    }
+
+    #[test]
+    fn decode_matches_the_exact_value_of_every_channel() {
+        for e in 0..32 {
+            for m in 0..512 {
+                assert_eq!(rgb9e5_half(m, e), f32_to_f16(rgb9e5_channel(m, e)), "m={m} e={e}");
+            }
+        }
+        let mut seed = 0x9e37_79b9u32;
+        for _ in 0..100_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let got = rgb9e5_to_rgba16f(seed);
+            let want = rgb9e5_decode(seed).map(f32_to_f16);
+            assert_eq!(got, [want[0], want[1], want[2], 0x3c00], "{seed:#010x}");
+        }
     }
 
     #[test]

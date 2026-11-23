@@ -139,8 +139,7 @@ impl Scan {
 
 fn sub_range(t: &Tracked, sub: usize) -> Option<(usize, usize)> {
     let fp = t.fps[sub];
-    let bpe = t.layout.bpe as usize;
-    let map = unsafe { t.layout.submap(sub as u32, (fp.row_size / bpe as u64) as u32, fp.rows) }?;
+    let map = unsafe { t.layout.submap(sub as u32, (fp.row_size / t.pc_bpe() as u64) as u32, fp.rows) }?;
     Some((t.p.va as usize + map.lo, map.hi - map.lo))
 }
 
@@ -307,6 +306,7 @@ struct DetileJob {
     y0: usize,
     y1: usize,
     bpe: usize,
+    widen: bool,
 }
 
 const _: () = assert!(!core::mem::needs_drop::<HashJob>());
@@ -333,7 +333,7 @@ unsafe extern "C" fn copy_job(ctx: *mut c_void) {
 
 unsafe extern "C" fn detile_job(ctx: *mut c_void) {
     let j = &*(ctx as *const DetileJob);
-    detile_span(j.dst0, j.pitch, j.src0, core::slice::from_raw_parts(j.offs, j.offs_len), j.w_e, j.y0..j.y1, j.bpe);
+    detile_span(j.dst0, j.pitch, j.src0, core::slice::from_raw_parts(j.offs, j.offs_len), j.w_e, j.y0..j.y1, j.bpe, j.widen);
 }
 
 #[track_caller]
@@ -505,6 +505,13 @@ struct Tracked {
     sent: Vec<bool>,
     freed: bool,
     rcache: Option<(Scan, u64)>,
+    widen: bool,
+}
+
+impl Tracked {
+    fn pc_bpe(&self) -> usize {
+        if self.widen { 8 } else { self.layout.bpe as usize }
+    }
 }
 
 struct Uploader {
@@ -1170,9 +1177,11 @@ unsafe fn adopt(up: &mut Uploader, res: *mut c_void, p: Placed) -> Result<Tracke
     if let Some(r) = unsupported_reason(&p) {
         return Err(r);
     }
-    if let Some(s) = crate::uav_subst::lookup(res) {
-        return Err(format!("the PC texture stores format {} as format {} (uav_subst) and console texels are not widened while mirroring, so title CPU writes do not reach it", s.console, s.host));
-    }
+    let widen = match crate::uav_subst::lookup(res) {
+        None => false,
+        Some(s) if s == crate::uav_subst::TABLE[0] => true,
+        Some(s) => return Err(format!("the PC texture stores format {} as format {} (uav_subst) and mirroring has no conversion for it", s.console, s.host)),
+    };
     let layout = layout_for(&p.desc)?;
     if layout.planes != 1 {
         return Err(format!("{} planes", layout.planes));
@@ -1196,8 +1205,12 @@ unsafe fn adopt(up: &mut Uploader, res: *mut c_void, p: Placed) -> Result<Tracke
         return Err("GetCopyableFootprints failed".into());
     }
     let fps: Vec<Footprint> = (0..nsubs as usize).map(|i| Footprint { raw: raw[i], rows: rows[i], row_size: row_sizes[i] }).collect();
-    if fps.iter().any(|f| f.row_size % layout.bpe as u64 != 0) {
-        return Err(format!("row size not a multiple of bytes-per-element {}", layout.bpe));
+    let pc_bpe = if widen { 8 } else { layout.bpe as u64 };
+    if widen && layout.bpe != 4 {
+        return Err(format!("format {} has {} bytes per element in the console layout, not the 4 that RGB9E5 widening reads", p.format(), layout.bpe));
+    }
+    if fps.iter().any(|f| f.row_size % pc_bpe != 0) {
+        return Err(format!("row size not a multiple of bytes-per-element {pc_bpe}"));
     }
     if p.layout() == 264 {
         let f0 = fps[0];
@@ -1229,7 +1242,7 @@ unsafe fn adopt(up: &mut Uploader, res: *mut c_void, p: Placed) -> Result<Tracke
         let (va, total, d) = (p.va, layout.total, res_desc(&p));
         up.ww.once(res as usize, 6, || format!("placed resource res={:#x} va={va:#x}+{total:#x} {d} is write-watched", res as usize));
     }
-    Ok(Tracked { res: res as usize, p, layout, fps, total_bytes: total, hashes: vec![None; nsubs as usize], partial: vec![0; nsubs as usize], zero: vec![false; nsubs as usize], watch: vec![0; nsubs as usize], pend: vec![up.pumps + PENDING_PUMPS; nsubs as usize], hot: up.pumps + PENDING_PUMPS, ww, ww_ranges, cpu_dirty: vec![Vec::new(); nsubs as usize], sent: vec![false; nsubs as usize], freed: false, rcache: None })
+    Ok(Tracked { res: res as usize, p, layout, fps, total_bytes: total, hashes: vec![None; nsubs as usize], partial: vec![0; nsubs as usize], zero: vec![false; nsubs as usize], watch: vec![0; nsubs as usize], pend: vec![up.pumps + PENDING_PUMPS; nsubs as usize], hot: up.pumps + PENDING_PUMPS, ww, ww_ranges, cpu_dirty: vec![Vec::new(); nsubs as usize], sent: vec![false; nsubs as usize], freed: false, rcache: None, widen })
 }
 
 struct Staged {
@@ -1250,6 +1263,7 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
     let now = up.pumps;
     let t = &mut up.tracked[idx];
     let bpe = t.layout.bpe as usize;
+    let (pc_bpe, widen) = (t.pc_bpe(), t.widen);
     let mut changed: Vec<(u32, Arc<SubMap>, u64, Option<Arc<Vec<u8>>>, Option<Vec<[u32; 6]>>)> = Vec::new();
     let mut unreadable = 0;
     let want: Vec<usize> = (0..t.fps.len()).filter(|&s| fresh_only != t.hashes[s].is_some() || (fresh_only && !t.cpu_dirty[s].is_empty())).collect();
@@ -1263,7 +1277,7 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
     let Some(whole) = whole else { return None };
     for sub in want.into_iter().map(|s| s as u32) {
         let fp = t.fps[sub as usize];
-        let (w_e, h_e) = ((fp.row_size / bpe as u64) as u32, fp.rows);
+        let (w_e, h_e) = ((fp.row_size / pc_bpe as u64) as u32, fp.rows);
         let ck = std::time::Instant::now();
         let map = t.layout.submap(sub, w_e, h_e);
         stage_time(1, ck);
@@ -1414,9 +1428,9 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         let ok = match &boxes {
             Some(bx) => bx.iter().all(|b| {
                 let (y0, y1) = ((b[1] / bh) as usize, (b[4].div_ceil(bh) as usize).min(map.h_e as usize));
-                detile_guarded(title_lo, title_len, &DetileJob { dst0: dst0 as usize, pitch, src0: src0 as usize, offs: map.offs.as_ptr(), offs_len: map.offs.len(), w_e: map.w_e as usize, y0, y1, bpe })
+                detile_guarded(title_lo, title_len, &DetileJob { dst0: dst0 as usize, pitch, src0: src0 as usize, offs: map.offs.as_ptr(), offs_len: map.offs.len(), w_e: map.w_e as usize, y0, y1, bpe, widen })
             }),
-            None => detile_rows(dst0, pitch, src0, title_lo, title_len, &map.offs, map.w_e as usize, map.h_e as usize, bpe),
+            None => detile_rows(dst0, pitch, src0, title_lo, title_len, &map.offs, map.w_e as usize, map.h_e as usize, bpe, widen),
         };
         let was_dirty = !t.cpu_dirty[sub as usize].is_empty();
         if !ok {
@@ -1450,8 +1464,8 @@ unsafe fn check(up: &mut Uploader, idx: usize, hashed: &mut u64, fresh_only: boo
         t.cpu_dirty[sub as usize].clear();
         up.uploaded_subs += 1;
         let bytes = match &boxes {
-            Some(bx) => bx.iter().map(|b| ((b[4] - b[1]).div_ceil(bh)) as u64 * map.w_e as u64 * bpe as u64).sum::<u64>(),
-            None => (map.w_e as u64) * (map.h_e as u64) * bpe as u64,
+            Some(bx) => bx.iter().map(|b| ((b[4] - b[1]).div_ceil(bh)) as u64 * map.w_e as u64 * pc_bpe as u64).sum::<u64>(),
+            None => (map.w_e as u64) * (map.h_e as u64) * pc_bpe as u64,
         };
         up.uploaded_bytes += bytes;
         if was_dirty {
@@ -1506,11 +1520,24 @@ fn pool_give(pool: &mut Vec<(u64, usize)>, pool_bytes: &mut u64, size: u64, buf:
     true
 }
 
-unsafe fn detile_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>, bpe: usize) {
+unsafe fn detile_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>, bpe: usize, widen: bool) {
+    if widen {
+        return widen_span(dst0, pitch, src0, offs, w_e, rows);
+    }
     for y in rows {
         let row = (dst0 + y * pitch) as *mut u8;
         for (x, &o) in offs[y * w_e..(y + 1) * w_e].iter().enumerate() {
             core::ptr::copy_nonoverlapping((src0 as *const u8).wrapping_add(o as usize), row.add(x * bpe), bpe);
+        }
+    }
+}
+
+unsafe fn widen_span(dst0: usize, pitch: usize, src0: usize, offs: &[u32], w_e: usize, rows: core::ops::Range<usize>) {
+    for y in rows {
+        let row = (dst0 + y * pitch) as *mut [u16; 4];
+        for (x, &o) in offs[y * w_e..(y + 1) * w_e].iter().enumerate() {
+            let v = core::ptr::read_unaligned((src0 as *const u8).wrapping_add(o as usize) as *const u32);
+            core::ptr::write_unaligned(row.add(x), crate::uav_subst::rgb9e5_to_rgba16f(v));
         }
     }
 }
@@ -1520,8 +1547,8 @@ fn detile_guarded(title_lo: usize, title_len: usize, job: &DetileJob) -> bool {
     crate::guard::guarded(title_lo, title_len, detile_job, job as *const DetileJob as *mut c_void)
 }
 
-unsafe fn detile_rows(dst0: *mut u8, pitch: usize, src0: *const u8, title_lo: usize, title_len: usize, offs: &[u32], w_e: usize, h_e: usize, bpe: usize) -> bool {
-    let job = |y0: usize, y1: usize| DetileJob { dst0: dst0 as usize, pitch, src0: src0 as usize, offs: offs.as_ptr(), offs_len: offs.len(), w_e, y0, y1, bpe };
+unsafe fn detile_rows(dst0: *mut u8, pitch: usize, src0: *const u8, title_lo: usize, title_len: usize, offs: &[u32], w_e: usize, h_e: usize, bpe: usize, widen: bool) -> bool {
+    let job = |y0: usize, y1: usize| DetileJob { dst0: dst0 as usize, pitch, src0: src0 as usize, offs: offs.as_ptr(), offs_len: offs.len(), w_e, y0, y1, bpe, widen };
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
     if w_e * h_e * bpe < PARALLEL_DETILE_BYTES || workers == 1 || h_e < 2 {
         return detile_guarded(title_lo, title_len, &job(0, h_e));
@@ -1999,7 +2026,7 @@ mod zero_watch_tests {
             let (w, h, bpe) = (32usize, 128usize, 4usize);
             let offs: Vec<u32> = (0..w * h).map(|i| ((i % (3 * PAGE / bpe)) * bpe) as u32).collect();
             let mut dst = vec![0u8; w * h * bpe];
-            assert!(!detile_rows(dst.as_mut_ptr(), w * bpe, base as *const u8, base, 3 * PAGE, &offs, w, h, bpe));
+            assert!(!detile_rows(dst.as_mut_ptr(), w * bpe, base as *const u8, base, 3 * PAGE, &offs, w, h, bpe, false));
             VirtualFree(base as *mut c_void, 0, 0x8000);
         }
     }
@@ -2050,8 +2077,8 @@ mod zero_watch_tests {
         let mut a = vec![0u8; pitch * h];
         let mut b = vec![0u8; pitch * h];
         unsafe {
-            assert!(detile_rows(a.as_mut_ptr(), pitch, src.as_ptr(), src.as_ptr() as usize, src.len(), &offs, w, h, bpe));
-            detile_span(b.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe);
+            assert!(detile_rows(a.as_mut_ptr(), pitch, src.as_ptr(), src.as_ptr() as usize, src.len(), &offs, w, h, bpe, false));
+            detile_span(b.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe, false);
         }
         assert!(w * h * bpe >= PARALLEL_DETILE_BYTES);
         assert_eq!(a, b);
@@ -2109,11 +2136,29 @@ mod detile_speed_tests {
         let mut per = f64::MAX;
         for _ in 0..10 {
             let t = std::time::Instant::now();
-            unsafe { detile_span(dst.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe) };
+            unsafe { detile_span(dst.as_mut_ptr() as usize, pitch, src.as_ptr() as usize, &offs, w, 0..h, bpe, false) };
             per = per.min(t.elapsed().as_secs_f64() * 1000.0);
         }
         eprintln!("single-thread detile of 1 MB: best of 10 {per:.2} ms");
         assert!(per < 20.0, "{per} ms");
+    }
+
+    #[test]
+    fn rgb9e5_texels_are_widened_to_rgba16f_while_detiling() {
+        let (w, h, pitch) = (48usize, 40usize, 512usize);
+        let words: Vec<u32> = (0..(w * h) as u32).map(|i| i.wrapping_mul(0x9e37_79b9) ^ (i << 27)).collect();
+        let offs: Vec<u32> = (0..w * h).map(|i| (((i * 2654435761usize) % (w * h)) * 4) as u32).collect();
+        let mut dst = vec![0xabu8; pitch * h];
+        let src = words.as_ptr() as *const u8;
+        assert!(unsafe { detile_rows(dst.as_mut_ptr(), pitch, src, src as usize, words.len() * 4, &offs, w, h, 4, true) });
+        for y in 0..h {
+            for x in 0..w {
+                let v = words[offs[y * w + x] as usize / 4];
+                let got: [u16; 4] = core::array::from_fn(|c| u16::from_le_bytes([dst[y * pitch + x * 8 + c * 2], dst[y * pitch + x * 8 + c * 2 + 1]]));
+                assert_eq!(got, crate::uav_subst::rgb9e5_to_rgba16f(v), "texel ({x},{y})");
+            }
+            assert!(dst[y * pitch + w * 8..(y + 1) * pitch].iter().all(|&b| b == 0xab), "row {y} padding was written");
+        }
     }
 }
 

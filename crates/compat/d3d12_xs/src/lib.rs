@@ -137,6 +137,7 @@ mod resolve_x;
 mod device_console_fix;
 mod depth_uav;
 mod uav_subst;
+mod uav_subst_copy;
 mod pso_ext;
 mod global_bind;
 mod kmd10;
