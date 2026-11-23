@@ -92,6 +92,33 @@ impl Emitter<'_> {
         Ok(Some(format!("#define TB_XL_GS 1\ngroupshared uint tb_xl[{n}];\ngroupshared uint tb_xm[{n}];\ngroupshared uint tb_xa[{n}];")))
     }
 
+    pub(super) fn emit_lds_wrxchg2(&mut self, ins: &Insn) -> Result<(), String> {
+        let m = ins.mnemonic.as_str();
+        let (lo, hi) = match ins.dst.first() {
+            Some(Opnd::Vgpr(v)) if *v < 255 => (Opnd::Vgpr(*v), Opnd::Vgpr(*v + 1)),
+            _ => return Err(format!("{m}: bad vdst")),
+        };
+        self.uses_lds = true;
+        self.lds_order(true, true);
+        let off = ins.aux.imm as u32;
+        let step = if m.contains("st64") { 256 } else { 4 };
+        for o in &ins.src[..3] {
+            self.touch(o);
+        }
+        let addr = r(&ins.src[0])?;
+        let at = |o: u32| format!("tb_lds[(({addr} + {:#x}u) >> 2) & 8191u]", o * step);
+        let (x0, x1) = (r(&ins.src[1])?, r(&ins.src[2])?);
+        let t = self.tmp;
+        self.tmp += 1;
+        self.line(&format!(
+            "uint t{t}a = 0u; uint t{t}b = 0u; if (exec_lo & 1u) {{ InterlockedExchange({}, {x0}, t{t}a); InterlockedExchange({}, {x1}, t{t}b); }}",
+            at(off & 0xff),
+            at((off >> 8) & 0xff)
+        ));
+        self.wv(&lo, &format!("t{t}a"))?;
+        self.wv(&hi, &format!("t{t}b"))
+    }
+
     pub(super) fn emit_ds_permute(&mut self, ins: &Insn) -> Result<(), String> {
         self.uses_wave = true;
         let d = *ins.dst.first().ok_or("permute: no vdst")?;

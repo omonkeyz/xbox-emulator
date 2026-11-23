@@ -4206,6 +4206,7 @@ impl<'a> Emitter<'a> {
                 };
                 return self.wv(&dst, &e);
             }
+            Enc::Ds if self.is_cs && matches!(m, "ds_wrxchg2_rtn_b32" | "ds_wrxchg2st64_rtn_b32") => self.emit_lds_wrxchg2(ins),
             Enc::Ds
                 if self.is_cs
                     && matches!(
@@ -4224,6 +4225,7 @@ impl<'a> Emitter<'a> {
                             | "ds_xor_b32"
                             | "ds_wrxchg_b32"
                             | "ds_cmpst_b32"
+                            | "ds_mskor_b32"
                     ) =>
             {
                 // Atomic read-modify-write on group-shared memory (the `_rtn` forms also
@@ -4252,6 +4254,7 @@ impl<'a> Emitter<'a> {
                             "ds_min_i32" => format!("asuint(min(asint({c}), asint({x0})))"),
                             "ds_max_i32" => format!("asuint(max(asint({c}), asint({x0})))"),
                             "ds_inc_u32" => format!("(({c} >= ({x0})) ? 0u : ({c} + 1u))"),
+                            "ds_mskor_b32" => format!("(({c} & ~({x0})) | ({}))", r(&s[2])?),
                             _ => format!("((({c} == 0u) || ({c} > ({x0}))) ? ({x0}) : ({c} - 1u))"),
                         };
                         format!(

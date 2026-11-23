@@ -400,6 +400,7 @@ pub fn lookup(enc: Enc, op: u32) -> Option<&'static str> {
             0x05 => Some("ds_min_i32"), 0x06 => Some("ds_max_i32"), 0x10 => Some("ds_cmpst_b32"),
             0x21 => Some("ds_sub_rtn_u32"), 0x22 => Some("ds_rsub_rtn_u32"), 0x23 => Some("ds_inc_rtn_u32"), 0x24 => Some("ds_dec_rtn_u32"),
             0x25 => Some("ds_min_rtn_i32"), 0x26 => Some("ds_max_rtn_i32"), 0x2d => Some("ds_wrxchg_rtn_b32"), 0x30 => Some("ds_cmpst_rtn_b32"),
+            0x0c => Some("ds_mskor_b32"), 0x2c => Some("ds_mskor_rtn_b32"), 0x2e => Some("ds_wrxchg2_rtn_b32"), 0x2f => Some("ds_wrxchg2st64_rtn_b32"),
             0x18 => Some("ds_gws_sema_release_all"), 0x19 => Some("ds_gws_init"), 0x1a => Some("ds_gws_sema_v"),
             0x1b => Some("ds_gws_sema_br"), 0x1c => Some("ds_gws_sema_p"), 0x1d => Some("ds_gws_barrier"),
             0x3d => Some("ds_consume"), 0x3e => Some("ds_append"), 0x3f => Some("ds_ordered_count"),

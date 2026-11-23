@@ -273,6 +273,58 @@ fn ds_lds_atomics_ext() {
 }
 
 #[test]
+fn ds_lds_mskor_wrxchg2() {
+    let mut cs = Vec::new();
+    let nb = |t: u32| t ^ 1;
+    let grid: &[(u32, u32, u32)] = &[(4, 2, 0), (2, 4, 7), (0, 13, 4), (4, 4, 4), (13, 13, 2), (2, 2, 13), (4, 0, 2), (2, 7, 4)];
+    for (k, &(old, d0, d1)) in grid.iter().enumerate() {
+        let off = if k % 2 == 0 { 0 } else { 0x104 };
+        let want = move |t: u32| (reg_val(old, t) & !reg_val(d0, t)) | reg_val(d1, t);
+        for rtn in [false, true] {
+            let a = ds(if rtn { 0x2c } else { 0x0c }, off, 1, d0, d1, 11);
+            let mut b = vec![vop1(1, 13, ic(0)), vop1(1, 11, v(4))];
+            b.extend_from_slice(&ds(0x0d, off, 1, old, 0, 0));
+            b.extend_from_slice(&a);
+            b.extend_from_slice(&ds(0x36, off, 3, 0, 0, 10));
+            if rtn {
+                cs.push(cc("ds_mskor_rtn_b32", a, b, &[11, 10], &move |t| vec![reg_val(old, t), want(nb(t))]));
+            } else {
+                cs.push(cc("ds_mskor_b32", a, b, &[11, 10], &move |t| vec![ev(t), want(nb(t))]));
+            }
+        }
+    }
+    let mut b = vec![vop1(1, 12, LIT), 0x5aa5_0ff0, vop1(1, 13, ic(0)), vop1(1, 15, ic(1))];
+    b.extend_from_slice(&[vop2(0x1a, 14, v(0), 15), vop2(0x1b, 16, ic(1), 0), vop2(0x1a, 17, v(0), 16)]);
+    b.extend_from_slice(&ds(0x0d, 0x200, 13, 12, 0, 0));
+    let a = ds(0x0c, 0x200, 13, 14, 17, 0);
+    b.extend_from_slice(&a);
+    b.extend_from_slice(&ds(0x36, 0x200, 13, 0, 0, 10));
+    cs.push(cc("ds_mskor_b32", a, b, &[10], &|_| vec![0xaaaa_aaaa]));
+    for &(o0, o1) in &[(0u32, 1u32), (1, 0), (2, 3)] {
+        let offs = o0 | (o1 << 8);
+        for (m, wr, xc, rd, own, other) in [("ds_wrxchg2_rtn_b32", 0x0eu32, 0x2eu32, 0x37u32, 5u32, 6u32), ("ds_wrxchg2st64_rtn_b32", 0x0f, 0x2f, 0x38, 1, 3)] {
+            let x = ds(xc, offs, own, 4, 0, 10);
+            let mut b = ds(wr, offs, own, 2, 4, 0).to_vec();
+            b.extend_from_slice(&x);
+            b.extend_from_slice(&ds(rd, offs, other, 0, 0, 12));
+            cs.push(cc(m, x, b, &[10, 11, 12, 13], &|t| vec![dv(t), ev(t), ev(nb(t)), nb(t)]));
+        }
+    }
+    let x = ds(0x2e, 0x0101, 5, 4, 0, 10);
+    let mut b = ds(0x0d, 4, 5, 2, 0, 0).to_vec();
+    b.extend_from_slice(&x);
+    b.extend_from_slice(&ds(0x36, 4, 6, 0, 0, 12));
+    cs.push(cc("ds_wrxchg2_rtn_b32", x, b, &[10, 11, 12], &|t| vec![dv(t), ev(t), nb(t)]));
+    let x = ds(0x2e, 0x0100, 14, 15, 0, 14);
+    let mut b = vec![vop1(1, 14, v(5)), vop1(1, 15, v(4))];
+    b.extend_from_slice(&ds(0x0e, 0x0100, 5, 2, 4, 0));
+    b.extend_from_slice(&x);
+    b.extend_from_slice(&ds(0x37, 0x0100, 6, 0, 0, 12));
+    cs.push(cc("ds_wrxchg2_rtn_b32", x, b, &[14, 15, 12, 13], &|t| vec![dv(t), ev(t), ev(nb(t)), nb(t)]));
+    run_cs_cases("ds_lds_mskor_wrxchg2", &cs);
+}
+
+#[test]
 fn ds_lds_b64_compute() {
     let mut cs = Vec::new();
     let nb = |t: u32| t ^ 1;
