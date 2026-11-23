@@ -120,6 +120,22 @@ fn wave_scc_readfirstlane_isa() {
 }
 
 #[test]
+fn leonida_nan_and_fract() {
+    let mut c = Cases::new();
+    let a = [(1, 0xaedb_e6ffu32), (2, 0x0000_8800), (3, 0x7fc1_0001), (4, 0xc020_0000)];
+    vc(&mut c, "v_fract_f32", &a, &[0x7e0a_4101], &[5], &[0x3f7f_ffff]); // v_fract_f32 v5, v1
+    vc(&mut c, "v_fract_f16", &a, &[0x7e04_bf02], &[2], &[0x0000_3bff]); // v_fract_f16 v2, v2
+    vc(&mut c, "v_max_f32", &a, &[0x200c_0903], &[6], &[0xc020_0000]); // v_max_f32 v6, v3, v4
+    vc(&mut c, "v_min_f32", &a, &[0x1e0e_0704], &[7], &[0xc020_0000]); // v_min_f32 v7, v4, v3
+    let b = [(1, 0x7fc1_0001u32), (2, 0x40e0_0000), (3, 0x40a0_0000), (4, 0x7fc1_0001), (5, 0x4060_0000), (6, 0xc020_0000)];
+    vc(&mut c, "v_med3_f32", &b, &[0xd557_0007, 0x040e_0501], &[7], &[0x40a0_0000]); // v_med3_f32 v7, v1, v2, v3
+    vc(&mut c, "v_med3_f32", &b, &[0xd557_0008, 0x041a_0b04], &[8], &[0xc020_0000]); // v_med3_f32 v8, v4, v5, v6
+    vc(&mut c, "v_min3_f32", &b, &[0xd551_0009, 0x0416_0d01], &[9], &[0xc020_0000]); // v_min3_f32 v9, v1, v6, v5
+    vc(&mut c, "v_max3_f32", &b, &[0xd554_000a, 0x0416_0d01], &[10], &[0x4060_0000]); // v_max3_f32 v10, v1, v6, v5
+    c.run_both("leonida_nan_and_fract");
+}
+
+#[test]
 fn leonida_mubuf_bounds() {
     let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut pre = pr();

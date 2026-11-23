@@ -5102,7 +5102,7 @@ impl<'a> Emitter<'a> {
             "v_min3_f32" => Some(format!("min(min({}, {}), {})", fa()?, fb()?, fc()?)),
             "v_max3_f32" => Some(format!("max(max({}, {}), {})", fa()?, fb()?, fc()?)),
             "v_med3_f32" => Some(format!(
-                "max(min({0}, {1}), min(max({0}, {1}), {2}))",
+                "((tb_nan({0}) || tb_nan({1}) || tb_nan({2})) ? min(min({0}, {1}), {2}) : max(min({0}, {1}), min(max({0}, {1}), {2})))",
                 fa()?,
                 fb()?,
                 fc()?
