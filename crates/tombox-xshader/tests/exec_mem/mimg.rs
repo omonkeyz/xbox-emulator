@@ -796,3 +796,148 @@ fn image_mimg_atomics_rdna2_silicon() {
     println!("expected values recorded on {}", super::mimg_rdna2::SOURCE);
     run_mem_cases("mimg_atomics_rdna2_silicon", &cs);
 }
+
+fn tpck(m: u32, _l: u32, x: u32, y: u32) -> [u32; 4] {
+    let v = match (m, x, y) {
+        (0, 1, 2) => 0x8000_0080,
+        (0, 6, 3) => 0xffff_8000,
+        (1, 2, 1) => 0x0000_ff80,
+        (2, 1, 1) => 0x7fff_ffff,
+        _ => 0x5000_0000 | (m << 16) | (y << 8) | x,
+    };
+    [v, 0, 0, 0]
+}
+
+fn tpck_v(m: u32, x: u32, y: u32) -> u32 {
+    tpck(m, 0, x, y)[0]
+}
+
+const IMG_PCK: Img = Img { w: 8, h: 8, layers: 1, array: false, mips: 3, fmt: R32_UINT, texel: tpck };
+
+fn pck_atomic_prefix(pre: &mut Prog) {
+    pre.vv(10, 0).vv(11, 7).vv(12, 0);
+    pre.raw(&mimg(0x19, 0x1, 1, 10, 12, 16, 0));
+}
+
+#[test]
+fn image_mimg_pck_on_atomic_images() {
+    let mut cs = Vec::new();
+    for (m, opc) in [("image_load_pck", 0x02u32), ("image_load_pck_sgn", 0x03)] {
+        for &(x, y) in &[(1u32, 2u32), (6, 3), (4, 5), (0, 7)] {
+            let op = mimg(opc, 0x1, 1, 1, 4, 16, 0);
+            let mut pre = Prog::new();
+            pck_atomic_prefix(&mut pre);
+            pre.vv(1, x).vv(2, y);
+            cs.push(MCase { m, op: op.to_vec(), words: build(&pre, &op, 4, 1, true), env: Env { uav: Some(&IMG_PCK), ..Default::default() }, rt: vec![tpck_v(0, x, y)], uav: vec![], tol: 0.0 });
+        }
+    }
+    for (m, opc) in [("image_load_mip_pck", 0x04u32), ("image_load_mip_pck_sgn", 0x05)] {
+        for &(x, y, mip) in &[(1u32, 2u32, 0u32), (2, 1, 1), (1, 1, 2), (3, 0, 1)] {
+            let op = mimg(opc, 0x1, 1, 1, 4, 16, 0);
+            let mut pre = Prog::new();
+            pck_atomic_prefix(&mut pre);
+            pre.vv(1, x).vv(2, y).vv(3, mip);
+            cs.push(MCase { m, op: op.to_vec(), words: build(&pre, &op, 4, 1, true), env: Env { uav: Some(&IMG_PCK), ..Default::default() }, rt: vec![tpck_v(mip, x, y)], uav: vec![], tol: 0.0 });
+        }
+    }
+    for &(x, y, val) in &[(2u32, 3u32, 0x8000_0080u32), (5, 0, 0xffff_ff80), (7, 6, 0x0000_8000)] {
+        let op = mimg(0x0a, 0x1, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        pck_atomic_prefix(&mut pre);
+        pre.vv(1, x).vv(2, y).vv(4, val);
+        let at = |x: u32, y: u32| (y * 8 + x) as usize;
+        let uav = vec![(0usize, at(x, y), val), (0, at(x ^ 1, y), tpck_v(0, x ^ 1, y)), (1, 0, tpck_v(1, 0, 0))];
+        cs.push(MCase { m: "image_store_pck", op: op.to_vec(), words: build(&pre, &op, 4, 0, true), env: Env { uav: Some(&IMG_PCK), ..Default::default() }, rt: vec![], uav, tol: 0.0 });
+    }
+    for &(x, y, mip, val) in &[(2u32, 1u32, 1u32, 0xffff_8000u32), (1, 0, 2, 0x8000_0001), (6, 6, 0, 0x0000_00ff)] {
+        let op = mimg(0x0b, 0x1, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        pck_atomic_prefix(&mut pre);
+        pre.vv(1, x).vv(2, y).vv(3, mip).vv(4, val);
+        let mw = 8u32 >> mip;
+        let at = |x: u32, y: u32| (y * mw + x) as usize;
+        let nm = (mip + 1) % 3;
+        let uav = vec![(mip as usize, at(x, y), val), (mip as usize, at(x ^ 1, y), tpck_v(mip, x ^ 1, y)), (nm as usize, 0, tpck_v(nm, 0, 0))];
+        cs.push(MCase { m: "image_store_mip_pck", op: op.to_vec(), words: build(&pre, &op, 4, 0, true), env: Env { uav: Some(&IMG_PCK), ..Default::default() }, rt: vec![], uav, tol: 0.0 });
+    }
+    run_mem_cases("mimg_pck", &cs);
+}
+
+#[test]
+fn image_mimg_pck_on_64bit_atomic_images() {
+    if !atomic_int64_on_typed_resource_supported() {
+        println!("SKIP image_mimg_pck_on_64bit_atomic_images: AtomicInt64OnTypedResourceSupported is false on this device");
+        return;
+    }
+    let mut cs = Vec::new();
+    let prefix = |pre: &mut Prog| {
+        pre.vv(10, 5).vv(11, 0).vv(12, 0).vv(13, 0);
+        pre.raw(&mimg(0x19, 0x3, 1, 10, 12, 16, 0));
+    };
+    for (m, opc) in [("image_load_pck", 0x02u32), ("image_load_pck_sgn", 0x03)] {
+        for &x in &[2u32, 3, 7] {
+            let op = mimg(opc, 0x3, 1, 1, 4, 16, 0);
+            let mut pre = Prog::new();
+            prefix(&mut pre);
+            pre.vv(1, x).vv(2, 0);
+            let v = AT64_INIT[x as usize];
+            cs.push(MCase { m, op: op.to_vec(), words: build(&pre, &op, 4, 2, true), env: Env { uav: Some(&IMG_AT64), ..Default::default() }, rt: vec![v as u32, (v >> 32) as u32], uav: vec![], tol: 0.0 });
+        }
+    }
+    {
+        let (x, val) = (1u32, 0x8000_0000_ffff_ff80u64);
+        let op = mimg(0x0a, 0x3, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        prefix(&mut pre);
+        pre.vv(1, x).vv(2, 0).vv(4, val as u32).vv(5, (val >> 32) as u32);
+        let nbr = AT64_INIT[0];
+        let uav = vec![(0usize, 2, val as u32), (0, 3, (val >> 32) as u32), (0, 0, nbr as u32), (0, 1, (nbr >> 32) as u32)];
+        cs.push(MCase { m: "image_store_pck", op: op.to_vec(), words: build(&pre, &op, 4, 0, true), env: Env { uav: Some(&IMG_AT64), ..Default::default() }, rt: vec![], uav, tol: 0.0 });
+    }
+    run_mem_cases("mimg_pck_64bit", &cs);
+}
+
+#[test]
+fn image_mimg_pck_and_float_atomic_refusals() {
+    let refuse = |words: &[u32], needle: &str| {
+        let err = match translate(&extract(words, false)) {
+            Ok(t) => panic!("expected refusal ({needle}), got:\n{}", t.hlsl),
+            Err(e) => e,
+        };
+        assert!(err.contains(needle), "expected {needle} in error: {err}");
+    };
+    for opc in [0x02u32, 0x03] {
+        let op = mimg(opc, 0x1, 1, 1, 4, 0, 12);
+        let mut pre = Prog::new();
+        pre.vv(1, 2).vv(2, 3);
+        refuse(&build(&pre, &op, 4, 1, false), "raw texel bits");
+    }
+    for opc in [0x02u32, 0x0a] {
+        let op = mimg(opc, 0x1, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        pre.vv(1, 2).vv(2, 3).vv(4, 9);
+        refuse(&build(&pre, &op, 4, if opc == 0x02 { 1 } else { 0 }, true), "raw texel bits");
+    }
+    {
+        let op = mimg(0x02, 0xf, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        pck_atomic_prefix(&mut pre);
+        pre.vv(1, 2).vv(2, 3);
+        refuse(&build(&pre, &op, 4, 4, true), "dmask 0xf");
+    }
+    {
+        let op = d16(mimg(0x0a, 0x1, 1, 1, 4, 16, 0));
+        let mut pre = Prog::new();
+        pck_atomic_prefix(&mut pre);
+        pre.vv(1, 2).vv(2, 3).vv(4, 9);
+        refuse(&build(&pre, &op, 4, 0, true), "D16");
+    }
+    for (opc, dmask, name) in [(0x1du32, 0x3u32, "image_atomic_fcmpswap"), (0x1e, 0x1, "image_atomic_fmin"), (0x1f, 0x1, "image_atomic_fmax")] {
+        let op = mimg(opc, dmask, 1, 1, 4, 16, 0);
+        let mut pre = Prog::new();
+        pre.vv(1, 2).vv(2, 3).vv(4, fb(1.5)).vv(5, fb(2.5));
+        let mut glc = op;
+        glc[0] |= 1 << 13;
+        refuse(&build(&pre, &glc, 4, 1, true), &format!("{name} at"));
+    }
+}

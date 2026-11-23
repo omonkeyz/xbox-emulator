@@ -6070,6 +6070,12 @@ impl<'a> Emitter<'a> {
                 return Err(format!("{} with {name} set at {:#x} is not translated", ins.mnemonic, ins.offset));
             }
         }
+        if matches!(ins.mnemonic.as_str(), "image_atomic_fcmpswap" | "image_atomic_fmin" | "image_atomic_fmax") {
+            return Err(format!(
+                "{} at {:#x} is not translated: the RDNA2 ISA only says the float compare handles NaN/INF/denorm, DXIL has no float min/max image atomic, and no RDNA2-recorded results pin the NaN, signed-zero and denormal cases",
+                ins.mnemonic, ins.offset
+            ));
+        }
         let rs = self.res.get(&idx).cloned().ok_or("unresolved image")?;
         if ins.mnemonic == "image_get_resinfo" {
             let (slot, dim, is_uav) = match rs.first() {
@@ -6117,8 +6123,12 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         // Texel-addressed ops (no sampler): image_load / image_store, on SRVs or UAVs.
-        if matches!(ins.mnemonic.as_str(), "image_load" | "image_load_mip" | "image_store" | "image_store_mip") || ins.mnemonic.starts_with("image_atomic_") {
-            let with_mip = ins.mnemonic == "image_load_mip" || ins.mnemonic == "image_store_mip";
+        let pck = matches!(
+            ins.mnemonic.as_str(),
+            "image_load_pck" | "image_load_pck_sgn" | "image_load_mip_pck" | "image_load_mip_pck_sgn" | "image_store_pck" | "image_store_mip_pck"
+        );
+        if pck || matches!(ins.mnemonic.as_str(), "image_load" | "image_load_mip" | "image_store" | "image_store_mip") || ins.mnemonic.starts_with("image_atomic_") {
+            let with_mip = ins.mnemonic.starts_with("image_load_mip") || ins.mnemonic.starts_with("image_store_mip");
             let store = ins.mnemonic.starts_with("image_store");
             let (slot, dim, is_uav) = match rs.first() {
                 Some(Res::Tex(t, d)) => (*t, *d, false),
@@ -6176,6 +6186,17 @@ impl<'a> Emitter<'a> {
             let d16_bit = ins.raw.get(1).is_some_and(|w| (w >> 31) & 1 != 0);
             if d16_bit && ins.mnemonic.starts_with("image_atomic_") {
                 return Err("D16 image atomic unsupported (16-bit atomic data is not specified)".into());
+            }
+            if pck {
+                if d16_bit {
+                    return Err(format!("{} at {:#x} with D16 is not translated: the packed (no format conversion) opcodes have no D16 form", ins.mnemonic, ins.offset));
+                }
+                if !((as_uint && ins.aux.mask == 0x1) || (as_u64 && ins.aux.mask == 0x3)) {
+                    return Err(format!(
+                        "{} at {:#x} with dmask {:#x} is not translated: raw texel bits are only reproducible on an image the shader also uses with 32-bit (dmask 0x1) or 64-bit (dmask 0x3) image atomics; any other DXIL typed load or store converts through the view format, which the translator does not know",
+                        ins.mnemonic, ins.offset, ins.aux.mask
+                    ));
+                }
             }
             let uint_zero = store && as_uint && ins.aux.mask == 1 && self.const_vgpr(idx, vd) == Some(0);
             if d16_bit && !uint_zero && as_uint {
