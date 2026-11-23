@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 mod xsys;
 
 const DIFFERS: &[(&str, &str)] = &[
-    ("every_xsystem_iid_serves_the_app_specific_device_id", "the e349bd1a table has no XSystemGetAppSpecificDeviceId at slot 5, the reference serves it from every XSystem iid"),
     ("title_id_without_a_title_is_not_found", "XGameGetXboxTitleId without a TitleId returns E_FAIL, reference E_NOT_FOUND"),
     ("title_id_without_a_title_reports_not_found_before_a_null_output", "XGameGetXboxTitleId(null) without a TitleId returns E_INVALIDARG, reference E_NOT_FOUND"),
 ];

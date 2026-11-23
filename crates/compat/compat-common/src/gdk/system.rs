@@ -317,7 +317,7 @@ unsafe extern "system" fn pls_prompt_result_slot(_t: This, block: *mut core::ffi
 
 pub fn interfaces() -> Vec<Iface> {
     vec![
-        Iface { clsid: XSYSTEM, iid: XSYSTEM, name: "XSystem(e349bd1a)", slots: vec![(3, get_console_id as usize), (4, get_sandbox_id as usize)] },
+        Iface { clsid: XSYSTEM, iid: XSYSTEM, name: "XSystem(e349bd1a)", slots: vec![(3, get_console_id as usize), (4, get_sandbox_id as usize), (5, get_app_device_id as usize)] },
         Iface { clsid: XSYSTEM, iid: XSYSTEM_V2, name: "XSystem(67ce4bfc)", slots: vec![(3, get_console_id as usize), (4, get_sandbox_id as usize), (5, get_app_device_id as usize)] },
         Iface { clsid: XSYSTEM, iid: XSYSTEM_V3, name: "XSystem(6fd71f09)", slots: vec![(3, get_console_id as usize), (4, get_sandbox_id as usize), (5, get_app_device_id as usize)] },
         Iface { clsid: ANALYTICS, iid: ANALYTICS, name: "XSystemAnalytics(b884675d)", slots: vec![(3, get_analytics_info as usize)] },
