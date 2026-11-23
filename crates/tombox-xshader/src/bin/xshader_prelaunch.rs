@@ -1,3 +1,16 @@
+#[cfg(not(windows))]
+fn main() -> std::process::ExitCode {
+    eprintln!("xshader_prelaunch needs Windows");
+    std::process::ExitCode::FAILURE
+}
+
+#[cfg(windows)]
+fn main() {
+    windows_main::main()
+}
+
+#[cfg(windows)]
+mod windows_main {
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -734,7 +747,7 @@ fn usage() {
     eprintln!("pack root: {}", shader_cache::root().display());
 }
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut title = String::new();
     let mut name = String::new();
@@ -925,4 +938,5 @@ mod tests {
         assert!(v.iter().any(|i| i.hash == 0xbb && i.root.is_none()));
         let _ = std::fs::remove_dir_all(&d);
     }
+}
 }

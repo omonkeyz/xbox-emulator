@@ -32,6 +32,7 @@ pub mod runtime_hlsl;
 pub mod cbv_raw_hlsl;
 #[cfg(windows)]
 pub mod shader_cache;
+#[cfg(windows)]
 pub mod pack_key;
 pub mod branch_free;
 #[cfg(windows)]
@@ -41,7 +42,7 @@ pub mod branch_free;
 pub(crate) mod d3d;
 #[cfg(windows)]
 pub mod fma_probe;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod sm5_helpers_tests;
 #[cfg(all(test, windows))]
 mod fma16_tests;

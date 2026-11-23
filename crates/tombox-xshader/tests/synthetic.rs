@@ -713,6 +713,7 @@ fn raw_uav_buffer_atomics_share_ubuf_instead_of_overlapping_utb() {
     assert!(t.hlsl.contains("ubuf0"), "{}", t.hlsl);
     assert!(!t.hlsl.contains("utb0"), "overlapping utb0 declaration:\n{}", t.hlsl);
     assert!(t.hlsl.contains("InterlockedOr(ubuf0["), "{}", t.hlsl);
+    #[cfg(windows)]
     if tombox_xshader::dxc::available() {
         let profile = tombox_xshader::dxc::profile_for(t.profile);
         tombox_xshader::dxc::compile(&t.hlsl, &profile).expect("DXC compile");
@@ -730,6 +731,7 @@ fn unmapped_position_export_without_clip_or_cull_distance_is_ignored() {
     let ex = shader(Stage::Vertex, &words, vec![], position(), None);
     let t = translate(&ex).expect("translate position export 13 without clip or cull distance");
     assert!(t.hlsl.contains("o.o0 ="), "{}", t.hlsl);
+    #[cfg(windows)]
     if tombox_xshader::dxc::available() {
         let profile = tombox_xshader::dxc::profile_for(t.profile);
         tombox_xshader::dxc::compile(&t.hlsl, &profile).expect("DXC compile");
@@ -761,6 +763,7 @@ fn image_atomic_64bit_emits_uint64_uav_and_sm66() {
     assert!(t.uses_typed_atomic64);
     assert!(t.hlsl.contains("RWTexture2D<uint64_t> uav0"), "{}", t.hlsl);
     assert!(t.hlsl.contains("InterlockedMax(uav0[uint2(v1, v2)], (((uint64_t)v4 << 32) | (uint64_t)v3)"), "{}", t.hlsl);
+    #[cfg(windows)]
     if tombox_xshader::dxc::available() {
         let profile = tombox_xshader::dxc::profile_for(t.profile);
         tombox_xshader::dxc::compile(&t.hlsl, &profile).expect("DXC compile ps_6_6");

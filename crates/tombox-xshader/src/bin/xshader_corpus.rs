@@ -1,3 +1,16 @@
+#[cfg(not(windows))]
+fn main() -> std::process::ExitCode {
+    eprintln!("xshader_corpus needs Windows");
+    std::process::ExitCode::FAILURE
+}
+
+#[cfg(windows)]
+fn main() -> std::process::ExitCode {
+    windows_main::main()
+}
+
+#[cfg(windows)]
+mod windows_main {
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -180,7 +193,7 @@ fn usage() {
     eprintln!("pack root: {}", shader_cache::root().display());
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut hashes: Vec<String> = Vec::new();
@@ -455,4 +468,5 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
 }
