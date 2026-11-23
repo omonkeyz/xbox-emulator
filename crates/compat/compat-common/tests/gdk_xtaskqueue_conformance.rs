@@ -16,13 +16,8 @@ const DIFFERS: &[(&str, &str)] = &[
     ("verify_multithread_manual_dispatch", "terminating the queue does not release XTaskQueueDispatch(INFINITE)"),
     ("verify_no_write_after_get_status_race", "under load, intermittent: the async block is written after XAsyncGetStatus(wait) has returned"),
     ("verify_queue_monitor_has_correct_ports", "the base queue monitor does not report its port for a shared port"),
-    ("verify_queue_termination", "XTaskQueueRegisterWaiter returns E_NOTIMPL"),
-    ("verify_register_with_auto_reset", "XTaskQueueRegisterWaiter returns E_NOTIMPL"),
-    ("verify_shared_port_queue_rundown_drops_its_wait_handles", "XTaskQueueRegisterWaiter returns E_NOTIMPL"),
-    ("verify_shared_port_queue_rundown_keeps_other_waiters", "XTaskQueueRegisterWaiter returns E_NOTIMPL"),
     ("verify_terminate_waits_for_async_in_flight", "termination finishes while an XAsync call on the queue is still pending"),
     ("verify_termination_of_base_queue_keeps_composites", "the composite's pending callback runs canceled, reference runs it normally"),
-    ("verify_termination_of_composite_queue", "XTaskQueueRegisterWaiter returns E_NOTIMPL"),
     ("verify_thread_pool_callbacks_can_block", "24 blocking thread-pool callbacks cannot all run at once"),
     ("verify_wait_for_completion", "intermittent: XAsyncGetStatus(wait) on a completed call with a result returns before the completion callback has finished"),
 ];
