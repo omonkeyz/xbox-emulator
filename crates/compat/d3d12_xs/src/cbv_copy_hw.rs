@@ -791,3 +791,123 @@ fn hw_cbv_copy_unaligned_descriptor_table_cbv_reads_through_a_raw_view_next_to_a
     }
     eprintln!("table CBV at +{:#x} from 256 read through a raw SRV next to a real root CBV: {} bytes bit-exact", table_va % SLOT_ALIGN, CB_BYTES);
 }
+
+fn issue105_shader_container(root: &[u8], value: u32) -> Vec<u8> {
+    let store = [0, 0, 0, 0, 0x7e02_0280, 0x7e08_02ff, value, 0xf408_0002, 0xfa00_0000,
+        0xe010_2000, 0x8000_0401, 0xbf81_0000];
+    let mut fssm = vec![0; 0xe0];
+    fssm[..4].copy_from_slice(b"FSSM");
+    fssm[0xc0..0xc4].copy_from_slice(&0xe0u32.to_le_bytes());
+    fssm[0xc8..0xcc].copy_from_slice(&((store.len() * 4) as u32).to_le_bytes());
+    fssm.extend(store.into_iter().flat_map(u32::to_le_bytes));
+
+    let mut dxil: Vec<_> = [0x0005_0060u32, 0, 0x4c49_5844, 0, 24, 4]
+        .into_iter().flat_map(u32::to_le_bytes).collect();
+    dxil.extend_from_slice(b"XDAT\0\0\0\0NOBC");
+    let len = u16::try_from(fssm.len()).unwrap();
+    dxil.extend_from_slice(&[0x78, 0x01, 0x01]);
+    dxil.extend_from_slice(&len.to_le_bytes());
+    dxil.extend_from_slice(&(!len).to_le_bytes());
+    dxil.extend_from_slice(&fssm);
+    let (a, b) = fssm.iter().fold((1u32, 0u32), |(a, b), &byte| {
+        let a = (a + u32::from(byte)) % 65521;
+        (a, (a + b) % 65521)
+    });
+    dxil.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    dxil.resize(dxil.len().next_multiple_of(4), 0);
+
+    let root_offset = 48 + dxil.len() as u32;
+    let size = root_offset + 8 + root.len() as u32;
+    let mut blob = b"DXBC".to_vec();
+    blob.extend_from_slice(&[0; 16]);
+    blob.extend([1u32, size, 2, 40, root_offset].into_iter().flat_map(u32::to_le_bytes));
+    for (name, bytes) in [(b"DXIL", dxil.as_slice()), (b"RTS0", root)] {
+        blob.extend_from_slice(name);
+        blob.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        blob.extend_from_slice(bytes);
+    }
+    blob
+}
+
+#[test]
+#[ignore = "requires Direct3D 12 and TOMBOX_TBUF_COMPUTE=1"]
+fn hw_issue105_compute_switches_and_restores_pipeline() {
+    assert!(crate::tbuf_compute::enabled(), "set TOMBOX_TBUF_COMPUTE=1");
+    assert!(!crate::pso_async::enabled(), "set TOMBOX_PSO_ASYNC=0 for this test");
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let g = gpu();
+    const VALUE: u32 = 0xc0ff_ee00;
+    const FORMATS: [u32; 4] = [42, 43, 42, 41];
+
+    unsafe {
+        let root_blob = compile(
+            r#"[RootSignature("RootFlags(0), DescriptorTable(UAV(u0, flags=DATA_VOLATILE))")]
+               [numthreads(1, 1, 1)] void main() {}"#,
+            "cs_6_0",
+        );
+        let dxbc = tombox_xshader::Dxbc::parse(&root_blob).unwrap();
+        let rts = dxbc.chunk(b"RTS0").unwrap();
+        let shader = issue105_shader_container(&root_blob[rts.offset..rts.offset + rts.size], VALUE);
+        let translated = tombox_xshader::hlsl::translate(&tombox_xshader::extract(&shader).unwrap()).unwrap();
+        assert_eq!(translated.tbuf_unresolved, [(true, 0)]);
+        assert!(translated.hlsl.contains("RWBuffer<float4> utb0"));
+
+        call!(g.dev, 1, () -> u32);
+        let wrapper = crate::device_wrap::wrap_device(g.dev as *mut c_void);
+        let root = root_sig(wrapper as usize, &root_blob);
+        let pso = compute_pso(wrapper as usize, root, &shader);
+        assert_eq!(crate::tbuf_compute::cached_variants_for_test(pso), Some(0), "pipeline metadata missing");
+
+        let out = buffer(g.dev, HEAP_DEFAULT, 16, 4, ST_UAV, None);
+        let readback = buffer(g.dev, HEAP_READBACK, 16, 0, ST_COPY_DEST, None);
+        let mut heap: *mut c_void = core::ptr::null_mut();
+        let heap_desc = [0u32, FORMATS.len() as u32, 1, 0];
+        let hr = call!(wrapper, 14, (*const u32, *const Guid, *mut *mut c_void) -> i32,
+            heap_desc.as_ptr(), &IID_DESC_HEAP, &mut heap);
+        assert!(hr >= 0 && !heap.is_null(), "CreateDescriptorHeap hr={hr:#010x}");
+        let stride = call!(g.dev, 15, (u32) -> u32, 0) as u64;
+        let cpu = call!(heap, 9, () -> usize);
+        let gpu = call!(heap, 10, () -> u64);
+        for (i, fmt) in FORMATS.into_iter().enumerate() {
+            let mut d = [0u8; 40];
+            d[..4].copy_from_slice(&fmt.to_le_bytes());
+            d[4..8].copy_from_slice(&1u32.to_le_bytes());
+            d[8..16].copy_from_slice(&(i as u64).to_le_bytes());
+            d[16..20].copy_from_slice(&1u32.to_le_bytes());
+            call!(g.dev, 19, (usize, *mut c_void, *const u8, usize) -> (),
+                out.res, core::ptr::null_mut(), d.as_ptr(), cpu + i * stride as usize);
+            assert_eq!(
+                crate::bindtrace::typed_buffer_format(&[heap as usize], gpu + i as u64 * stride, 0, true),
+                Some(fmt), "descriptor {i} was not recognized",
+            );
+        }
+
+        let mut run = run_new(g, LIST_COMPUTE);
+        let shim = crate::cmdlist_wrap::wrap(run.list as *mut c_void);
+        call!(shim, 32, (u32, *const *mut c_void) -> (), 1, &heap);
+        call!(shim, 33, (usize) -> (), root);
+        call!(shim, 25, (usize) -> (), pso);
+        for (index, (count, extended)) in [(1, false), (2, true), (2, false)].into_iter().enumerate() {
+            call!(shim, 35, (u32, u64) -> (), 0, gpu + index as u64 * stride);
+            if extended {
+                call!(shim, crate::console_slots::CL_DISPATCH_X, (u32, u32, u32, u32) -> (), 1, 1, 1, 0);
+            } else {
+                call!(shim, 14, (u32, u32, u32) -> (), 1, 1, 1);
+            }
+            assert_eq!(crate::tbuf_compute::cached_variants_for_test(pso), Some(count), "dispatch {index}");
+        }
+
+        call!(shim, 35, (u32, u64) -> (), 0, gpu + 3 * stride);
+        call!(run.list, P_DISPATCH, (u32, u32, u32) -> (), 1, 1, 1);
+        barrier(run.list, out.res, ST_UAV, ST_COPY_SOURCE);
+        call!(run.list, 15, (usize, u64, usize, u64, u64) -> (), readback.res, 0, out.res, 0, 16);
+        execute(g, &mut run);
+        assert_eq!(get(&readback, 0, 16), VALUE.to_le_bytes().repeat(4));
+        println!("ISSUE 105 GPU PASS: UINT, SINT, cached UINT, restored FLOAT");
+
+        call!(shim, 2, () -> u32);
+        for obj in [run.alloc, run.fence, out.res, readback.res, heap as usize, pso, root, wrapper as usize] {
+            call!(obj, 2, () -> u32);
+        }
+    }
+}

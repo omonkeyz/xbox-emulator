@@ -16,7 +16,7 @@ use core::ffi::c_void;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Desc {
     Cbv { va: u64, size: u32 },
     Srv { res: usize, desc: Option<[u8; 40]> },
@@ -31,6 +31,8 @@ struct Entry {
 }
 
 struct Heap {
+    owner: Option<usize>,
+    heap_type: u32,
     cpu: usize,
     gpu: u64,
     count: usize,
@@ -84,12 +86,86 @@ pub fn increment(heap_type: u32) -> usize {
     with(|s| s.inc.get(heap_type as usize).copied().unwrap_or(0))
 }
 
-pub fn note_heap(cpu: usize, gpu: u64, count: u32, heap_type: u32) {
+pub fn note_heap(owner: usize, cpu: usize, gpu: u64, count: u32, heap_type: u32) {
     with(|s| {
         let inc = s.inc.get(heap_type as usize).copied().unwrap_or(0);
-        s.heaps.retain(|h| h.cpu != cpu);
-        s.heaps.push(Heap { cpu, gpu, count: count as usize, inc });
+        if crate::tbuf_compute::enabled() && heap_type == 0 {
+            if let Some(end) = (count as usize).checked_mul(inc).and_then(|n| cpu.checked_add(n)) {
+                s.descs.retain(|&handle, _| handle < cpu || handle >= end);
+            }
+        }
+        s.heaps.retain(|h| h.cpu != cpu && h.owner != Some(owner));
+        if gpu != 0 {
+            s.heaps.push(Heap { owner: Some(owner), heap_type, cpu, gpu, count: count as usize, inc });
+        }
     });
+}
+
+pub fn typed_buffer_format(heaps: &[usize], table: u64, index: u32, uav: bool) -> Option<u32> {
+    if table == 0 || crate::title_heap::locate(table).is_some() {
+        return None;
+    }
+    with(|s| s.typed_buffer_format(heaps, table, index, uav, |cpu, inc| unsafe { desc_bytes(cpu, inc) }))
+}
+
+impl State {
+    fn typed_buffer_format(
+        &self,
+        heaps: &[usize],
+        table: u64,
+        index: u32,
+        uav: bool,
+        bytes_at: impl FnOnce(usize, usize) -> Option<Vec<u8>>,
+    ) -> Option<u32> {
+        let (heap, slot) = self.heaps.iter().filter(|h| h.heap_type == 0 && h.owner.is_some_and(|owner| heaps.contains(&owner)))
+            .find_map(|heap| {
+                let bytes = usize::try_from(table.checked_sub(heap.gpu)?).ok()?;
+                if heap.inc == 0 || bytes % heap.inc != 0 || bytes / heap.inc >= heap.count {
+                    return None;
+                }
+                let slot = (bytes / heap.inc).checked_add(index as usize)?;
+                (slot < heap.count).then_some((heap, slot))
+            })?;
+        let cpu = heap.cpu.checked_add(slot.checked_mul(heap.inc)?)?;
+        let observed = &self.descs.get(&cpu)?.d;
+        if self.by_bytes.get(&bytes_at(cpu, heap.inc)?)? != observed {
+            return None;
+        }
+        let (desc, stride) = match (uav, observed) {
+            (false, Desc::Srv { res, desc: Some(desc) }) if *res != 0 => (desc, 28),
+            (true, Desc::Uav { res, desc: Some(desc) }) if *res != 0 => (desc, 20),
+            _ => return None,
+        };
+        let word = |i: usize| u32::from_le_bytes(desc[i..i + 4].try_into().unwrap());
+        (word(4) == 1 && word(stride) == 0 && word(32) == 0).then(|| word(0))
+    }
+}
+
+#[cfg(test)]
+mod typed_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn typed_format_requires_a_current_matching_descriptor_on_the_bound_heap() {
+        let mut desc = [0u8; 40];
+        desc[..4].copy_from_slice(&42u32.to_le_bytes());
+        desc[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let view = Desc::Uav { res: 1, desc: Some(desc) };
+        let mut state = State::default();
+        state.heaps.push(Heap { owner: Some(42), heap_type: 0, cpu: 0x1000, gpu: 0x8000, count: 3, inc: 32 });
+        state.descs.insert(0x1040, Entry { d: view.clone(), frame: 0 });
+        state.by_bytes.insert(vec![4; 32], view);
+        let lookup = |heaps: &[usize], table, uav, live_byte| state.typed_buffer_format(heaps, table, 1, uav,
+            |cpu, inc| (cpu == 0x1040 && inc == 32).then(|| vec![live_byte; inc]));
+        assert_eq!(lookup(&[42], 0x8020, true, 4), Some(42));
+        assert_eq!(lookup(&[42], 0x8020, true, 5), None);
+        assert_eq!(lookup(&[42], 0x8020, false, 4), None);
+        assert_eq!(lookup(&[7], 0x8020, true, 4), None);
+        assert_eq!(lookup(&[42], 0x8021, true, 4), None);
+        assert_eq!(lookup(&[42], 0x8040, true, 4), None);
+        state.heaps[0].owner = None;
+        assert_eq!(state.typed_buffer_format(&[42], 0x8020, 1, true, |_, inc| Some(vec![4; inc])), None);
+    }
 }
 
 extern "system" {
@@ -247,7 +323,7 @@ pub unsafe fn read_va(va: u64, n: usize) -> Option<Vec<u8>> {
 pub fn note_heap_inc(cpu: usize, gpu: u64, count: u32, inc: usize) {
     with(|s| {
         s.heaps.retain(|h| h.cpu != cpu);
-        s.heaps.push(Heap { cpu, gpu, count: count as usize, inc });
+        s.heaps.push(Heap { owner: None, heap_type: 0, cpu, gpu, count: count as usize, inc });
     });
 }
 

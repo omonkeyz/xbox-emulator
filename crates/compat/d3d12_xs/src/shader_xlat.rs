@@ -291,6 +291,18 @@ fn log_pack_miss(hash: u64, rtfmt: &[u8; 8], linked: bool, src: &str, profile: &
 }
 
 pub(crate) fn runtime_source(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp, root: Option<&[u8]>, mode: &tombox_xshader::pack_key::Mode) -> Result<RtSrc, String> {
+    runtime_source_with_classes(blob, hash, rtfmt, link, root, mode, &Default::default())
+}
+
+fn runtime_source_with_classes(
+    blob: &[u8],
+    hash: u64,
+    rtfmt: &[u8; 8],
+    link: &InputInterp,
+    root: Option<&[u8]>,
+    mode: &tombox_xshader::pack_key::Mode,
+    classes: &crate::tbuf_bindings::Classes,
+) -> Result<RtSrc, String> {
     let mut ex = tombox_xshader::extract(blob).map_err(|e| {
         dump_failure(hash, blob, None, &e);
         format!("extract: {e}")
@@ -298,7 +310,7 @@ pub(crate) fn runtime_source(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &Inp
     if let Some(root) = root.filter(|_| !ex.has_root_sig) {
         ex.root_sig = Some(tombox_xshader::parse_root_signature(root).map_err(|e| format!("pipeline root signature: {e}"))?);
     }
-    let mut t = tombox_xshader::pack_key::translate(&ex, Some(link), mode.cbv_raw).map_err(|e| {
+    let mut t = tombox_xshader::pack_key::translate_with_tbuf_classes(&ex, Some(link), mode.cbv_raw, classes).map_err(|e| {
         dump_failure(hash, blob, None, &e);
         e
     })?;
@@ -376,6 +388,27 @@ pub(crate) fn runtime_source(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &Inp
     });
     let profile = if use_dxc { tombox_xshader::dxc::profile_for(t.profile) } else { t.profile.to_string() };
     Ok(RtSrc { hlsl: t.hlsl, profile, use_dxc })
+}
+
+pub(crate) fn compile_tbuf_compute(
+    blob: &[u8],
+    root: &[u8],
+    classes: &crate::tbuf_bindings::Classes,
+) -> Result<Vec<u8>, String> {
+    std::panic::catch_unwind(|| {
+        let mode = runtime_mode();
+        let source = runtime_source_with_classes(
+            blob, fnv1a(blob), &[0; 8], &InputInterp::default(), Some(root), mode, classes,
+        )?;
+        if !source.use_dxc {
+            return Err("typed buffer specialization requires DXC".into());
+        }
+        let extra = tombox_xshader::pack_key::extra(mode, &[]);
+        tombox_xshader::shader_cache::compile_cached_with(
+            &source.hlsl, &source.profile, mode.fma, &extra,
+            || tombox_xshader::dxc::compile_fma(&source.hlsl, &source.profile, mode.fma, &[]),
+        ).map(|compiled| compiled.code)
+    }).unwrap_or_else(|_| Err("typed buffer translator panicked".into()))
 }
 
 fn translate_uncached_with(blob: &[u8], hash: u64, rtfmt: &[u8; 8], link: &InputInterp, edit: Option<&dyn Fn(&str) -> Result<String, String>>, root: Option<&[u8]>) -> Result<Vec<u8>, String> {

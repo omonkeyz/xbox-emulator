@@ -476,13 +476,55 @@ fn shader_psv(words: &[u32], root: tombox_xshader::meta::RootSig, psv: &[tombox_
     ex
 }
 
-pub fn run_res_psv(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Option<&[u32]>, tex: Option<&Tex>, samp: [u8; 52], pos: bool, psv: &[tombox_xshader::meta::PsvResource]) -> Result<ResOut, String> {
+
+pub fn run_res_psv(
+    words: &[u32],
+    root: tombox_xshader::meta::RootSig,
+    buf: Option<&[u32]>,
+    tex: Option<&Tex>,
+    samp: [u8; 52],
+    pos: bool,
+    psv: &[tombox_xshader::meta::PsvResource],
+) -> Result<ResOut, String> {
+    run_res_psv_fmt(words, root, buf, tex, samp, pos, psv, None)
+}
+
+
+fn run_res_psv_fmt(
+    words: &[u32],
+    root: tombox_xshader::meta::RootSig,
+    buf: Option<&[u32]>,
+    tex: Option<&Tex>,
+    samp: [u8; 52],
+    pos: bool,
+    psv: &[tombox_xshader::meta::PsvResource],
+    view_format: Option<u32>,
+) -> Result<ResOut, String> {
+    run_res_psv_fmt_classes(
+        words, root, buf, tex, samp, pos, psv, view_format,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+fn run_res_psv_fmt_classes(
+    words: &[u32],
+    root: tombox_xshader::meta::RootSig,
+    buf: Option<&[u32]>,
+    tex: Option<&Tex>,
+    samp: [u8; 52],
+    pos: bool,
+    psv: &[tombox_xshader::meta::PsvResource],
+    view_format: Option<u32>,
+    classes: &std::collections::BTreeMap<(bool, u32), tombox_xshader::hlsl::TbufClass>,
+) -> Result<ResOut, String> {
+
+
     use tombox_xshader::meta::RootParamKind;
     let mut ex = shader_psv(words, root.clone(), psv);
     if pos {
         ex.input_sig = vec![sig("SV_Position", 1, 3, 0, 0xf)];
     }
-    let t = translate(&ex)?;
+    let t = tombox_xshader::hlsl::translate_linked_tbuf_classes(&ex, None, classes)?;
     let code = dxc::compile(&t.hlsl, &dxc::profile_for(t.profile)).map_err(|e| format!("dxc: {e}\n{}", t.hlsl))?;
     let params: Vec<(u32, u32)> = root
         .params
@@ -569,6 +611,11 @@ pub fn run_res_psv(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Opti
         } else if hlsl.contains("RWBuffer<float>") {
             fmt = 41;
         }
+        if let Some(format) = view_format {
+            fmt = format;
+            stride = 0;
+        }
+
         let mut tbl_gpu = Vec::new();
         for (i, &(ty, _)) in params.iter().enumerate() {
             if ty == 3 {
@@ -582,7 +629,15 @@ pub fn run_res_psv(words: &[u32], root: tombox_xshader::meta::RootSig, buf: Opti
             let base = vcpu + i * 64 * vinc;
             tbl_gpu.push(vgpu + (i * 64 * vinc) as u64);
             if ty == 1 && !ubuf.is_null() {
-                let esz = if stride != 0 { stride } else if fmt == 2 || fmt == 3 { 16 } else { 4 };
+                let esz = if stride != 0 {
+                    stride
+                } else {
+                    match fmt {
+                        2..=4 => 16,
+                        16..=18 => 8,
+                        _ => 4,
+                    }
+                };
                 for slot in 0..8u32 {
                     let first = (slot * 128 / esz) as u64;
                     let mut ud = [0u8; 40];
@@ -2685,4 +2740,182 @@ fn pkaccum_u8_packs_four_bytes_into_one_register() {
     p.raw(&words);
     let got = run(&p.words()).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(got[1], 0x0403_0201, "{got:08x?}");
+}
+
+#[test]
+fn issue105_typed_buffer_load_specializes_unresolved_view() {
+    let root = tombox_xshader::meta::RootSig {
+        version: 2,
+        flags: 1,
+        params: vec![rtable(1, 8)],
+        num_static_samplers: 0,
+        static_samplers: Vec::new(),
+    };
+
+    let mut p = Prog::new();
+    p.vv(1, 0).vv(4, 0).vv(5, 0);
+    p.raw(&[0xf408_0004, 0xfa00_0000]);
+    p.raw(&mubuf(0x00, 0, false, true, false, 1, 4));
+    p.raw(&[vop1(1, 0, v(4)), vop1(1, 1, v(5))]);
+
+    let translated = translate(&shader_root(&p.words(), root.clone()))
+        .expect("shader translation must succeed");
+
+    assert_eq!(
+        translated.tbuf_unresolved,
+        vec![(true, 0)],
+        "typed UAV slot 0 should have no format evidence"
+    );
+
+
+
+    for (class, expected, view_format) in [
+        (tombox_xshader::hlsl::TbufClass::Float, "RWBuffer<float4> utb0", 41u32),
+        (tombox_xshader::hlsl::TbufClass::Uint, "RWBuffer<uint4> utb0", 42u32),
+        (tombox_xshader::hlsl::TbufClass::Sint, "RWBuffer<int4> utb0", 43u32),
+    ] {
+
+        let classes = std::collections::BTreeMap::from([((true, 0u32), class)]);
+
+        let variant = tombox_xshader::hlsl::translate_linked_tbuf_classes(
+            &shader_root(&p.words(), root.clone()),
+            None,
+            &classes,
+        )
+        .expect("typed buffer specialization must translate");
+
+        assert_eq!(variant.tbuf_unresolved, vec![(true, 0)]);
+
+        assert!(
+            variant.hlsl.contains(expected),
+            "expected {expected}, got:\n{}",
+            variant.hlsl
+        );
+        let output = run_res_psv_fmt_classes(
+            &p.words(),
+            root.clone(),
+            Some(&BUF),
+            None,
+            sampler(0, 3, 0),
+            false,
+            &[],
+            Some(view_format),
+            &classes,
+        )
+        .expect("specialized typed buffer must execute on WARP");
+
+        assert_eq!(
+            output.rt[0],
+            BUF[0],
+            "{class:?} must preserve the exact 32-bit value"
+        );
+    }
+    assert!(translated.hlsl.contains("RWBuffer<float4> utb0"));
+}
+
+
+
+#[test]
+fn issue105_typed_buffer_classes_multiple_values() {
+    use tombox_xshader::hlsl::TbufClass;
+
+    let root = tombox_xshader::meta::RootSig {
+        version: 2,
+        flags: 1,
+        params: vec![rtable(1, 8)],
+        num_static_samplers: 0,
+        static_samplers: Vec::new(),
+    };
+
+    for (class, format) in [
+        (TbufClass::Float, 41u32),
+        (TbufClass::Uint, 42u32),
+        (TbufClass::Sint, 43u32),
+    ] {
+        let indices: Vec<usize> = match class {
+            TbufClass::Float => vec![0, 1, 2, 3],
+            _ => (0..BUF.len()).collect(),
+        };
+
+        let classes = std::collections::BTreeMap::from([
+            ((true, 0u32), class),
+        ]);
+
+        for idx in indices {
+            let mut p = Prog::new();
+            p.vv(1, idx as u32).vv(4, 0).vv(5, 0);
+            p.raw(&[0xf408_0004, 0xfa00_0000]);
+            p.raw(&mubuf(0x00, 0, false, true, false, 1, 4));
+            p.raw(&[vop1(1, 0, v(4)), vop1(1, 1, v(5))]);
+
+            let output = run_res_psv_fmt_classes(
+                &p.words(),
+                root.clone(),
+                Some(&BUF),
+                None,
+                sampler(0, 3, 0),
+                false,
+                &[],
+                Some(format),
+                &classes,
+            )
+            .expect("specialized buffer execution must succeed");
+
+            assert_eq!(
+                output.rt[0],
+                BUF[idx],
+                "{class:?} index {idx}: expected {:08x}, got {:08x}",
+                BUF[idx],
+                output.rt[0]
+            );
+        }
+    }
+}
+
+#[test]
+fn issue105_typed_buffer_stores_preserve_bits_and_neighbors() {
+    use tombox_xshader::hlsl::TbufClass;
+
+    let root = tombox_xshader::meta::RootSig {
+        version: 2,
+        flags: 1,
+        params: vec![rtable(1, 8)],
+        num_static_samplers: 0,
+        static_samplers: Vec::new(),
+    };
+    for (class, format, written) in [
+        (TbufClass::Float, 41, &[0xc0ff_ee00][..]),
+        (TbufClass::Uint, 42, &[0xffff_fff0][..]),
+        (TbufClass::Sint, 43, &[0x8000_0000][..]),
+        (TbufClass::Sint, 18, &[0x8000_0000, 0x7fff_ffff][..]),
+    ] {
+        let index = 2;
+        let mut p = Prog::new();
+        p.vv(1, index as u32);
+        for (component, &bits) in written.iter().enumerate() {
+            p.vv(4 + component as u32, bits);
+        }
+        p.raw(&[0xf408_0004, 0xfa00_0000]);
+        p.raw(&mubuf(0x04 + written.len() as u32 - 1, 0, false, true, false, 1, 4));
+        p.vv(0, 0).vv(1, 0);
+        let classes = std::collections::BTreeMap::from([((true, 0), class)]);
+
+        let output = run_res_psv_fmt_classes(
+            &p.words(),
+            root.clone(),
+            Some(&BUF),
+            None,
+            sampler(0, 3, 0),
+            false,
+            &[],
+            Some(format),
+            &classes,
+        )
+        .expect("specialized typed buffer store must execute");
+
+        let mut expected = BUF;
+        let start = index * written.len();
+        expected[start..start + written.len()].copy_from_slice(written);
+        assert_eq!(&output.buf[..BUF.len()], &expected, "{class:?}, format {format}");
+    }
 }

@@ -134,6 +134,13 @@ impl Dxbc {
 }
 
 pub fn parse_root_signature(data: &[u8]) -> Result<meta::RootSig, String> {
+    parse_root_signature_with_range_flags(data, |_, _, _| {})
+}
+
+pub fn parse_root_signature_with_range_flags(
+    data: &[u8],
+    range_flags: impl FnMut(usize, usize, u32),
+) -> Result<meta::RootSig, String> {
     let body = if data.starts_with(b"DXBC") {
         let dxbc = Dxbc::parse(data)?;
         let rts = dxbc.chunk(b"RTS0").ok_or("DXBC has no RTS0 chunk")?;
@@ -145,7 +152,7 @@ pub fn parse_root_signature(data: &[u8]) -> Result<meta::RootSig, String> {
     if !(1..=3).contains(&version) {
         return Err(format!("unsupported root signature version {version}"));
     }
-    meta::parse_rts0(body)
+    meta::parse_rts0_with_range_flags(body, range_flags)
 }
 
 pub use hlsl::infer::infer_root_signature;

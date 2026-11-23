@@ -169,7 +169,9 @@ unsafe extern "system" fn create_descriptor_heap(
         // Keep the heap REAL (so it works when passed to SetDescriptorHeaps etc.);
         // patch the shared heap vtable once to fix the handle-getter ABI.
         crate::heap_wrap::ensure_patched(unsafe { *ppv });
-        if (crate::rtcap::enabled() || crate::passcap::tables_on()) && !pdesc.is_null() {
+        if (crate::rtcap::enabled() || crate::passcap::tables_on() || crate::tbuf_compute::enabled())
+            && !pdesc.is_null()
+        {
             // Binding trace: remember shader-visible heaps (GPU handle -> CPU handle).
             let d = pdesc as *const u32;
             let (htype, numd, flags) = unsafe { (*d.add(0), *d.add(1), *d.add(2)) };
@@ -177,12 +179,13 @@ unsafe extern "system" fn create_descriptor_heap(
             for t in 0..4 {
                 crate::bindtrace::set_increment(t, unsafe { inc(real, t) });
             }
-            if flags & 1 != 0 {
+            if flags & 1 != 0 || (htype == 0 && crate::tbuf_compute::enabled()) {
                 let heap = unsafe { *ppv };
                 let hv = unsafe { *(heap as *const *const usize) };
                 let c: unsafe extern "system" fn(*mut c_void) -> u64 = unsafe { core::mem::transmute(*hv.add(9)) };
                 let g: unsafe extern "system" fn(*mut c_void) -> u64 = unsafe { core::mem::transmute(*hv.add(10)) };
-                crate::bindtrace::note_heap(unsafe { c(heap) } as usize, unsafe { g(heap) }, numd, htype);
+                let gpu = if flags & 1 != 0 { unsafe { g(heap) } } else { 0 };
+                crate::bindtrace::note_heap(heap as usize, unsafe { c(heap) } as usize, gpu, numd, htype);
             }
         }
         // Log DESC { Type@0, NumDescriptors@4, Flags@8, NodeMask@0xC } + GPU base so
@@ -1412,8 +1415,9 @@ unsafe fn patch_real_device(real: *mut c_void) {
             return;
         }
         let full = crate::rtcap::enabled();
+        let tables = crate::passcap::tables_on();
         for (slot, f) in hooks {
-            if slot == 16 && !full {
+            if (slot == 16 && !full) || (slot == 22 && !full && !tables) {
                 continue;
             }
             REAL_ORIG[slot].store(*vt.add(slot), Ordering::Relaxed);
@@ -1766,6 +1770,10 @@ unsafe extern "system" fn create_compute_pso_sync(
     if hr == 0 && !ppv.is_null() {
         crate::dred_marks::note(unsafe { *ppv }, unsafe { crate::dred_marks::compute_hashes(pdesc) }, false);
         crate::device_x::register_compute(unsafe { *ppv }, &desc, code.clone());
+        if crate::tbuf_compute::enabled() {
+            let shader = (_num_ext == 0).then(|| unsafe { core::slice::from_raw_parts(p, n) });
+            unsafe { crate::tbuf_compute::register(real, *ppv, riid, &desc, shader) };
+        }
     }
     if hr == 0 {
         let k = OK.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2155,7 +2163,9 @@ pub fn wrap_device(real: *mut c_void) -> *mut c_void {
         unsafe { crate::shader_xlat::probe_typed_atomic64(real) };
         crate::blend_probe::note_device(real);
     }
-    if (crate::rtcap::enabled() || crate::passcap::tables_on()) && !real.is_null() {
+    if (crate::rtcap::enabled() || crate::passcap::tables_on() || crate::tbuf_compute::enabled())
+        && !real.is_null()
+    {
         unsafe { patch_real_device(real) };
     }
     let w = Box::new(DeviceWrapper { vtable: vtable(), real, refs: AtomicU32::new(1) });

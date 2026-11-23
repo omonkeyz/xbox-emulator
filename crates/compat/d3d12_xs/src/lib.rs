@@ -83,6 +83,8 @@ mod fmask_check;
 #[cfg(test)]
 mod passcap_tests;
 mod bindtrace;
+mod tbuf_bindings;
+mod tbuf_compute;
 mod replay;
 mod map_x;
 mod alias;

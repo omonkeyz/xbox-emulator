@@ -121,8 +121,18 @@ impl Mode {
 }
 
 pub fn translate(ex: &ShaderExtract, link: Option<&InputInterp>, cbv: CbvRaw) -> Result<Translated, String> {
+    translate_with_tbuf_classes(ex, link, cbv, &std::collections::BTreeMap::new())
+}
+
+pub fn translate_with_tbuf_classes(
+    ex: &ShaderExtract,
+    link: Option<&InputInterp>,
+    cbv: CbvRaw,
+    classes: &std::collections::BTreeMap<(bool, u32), hlsl::TbufClass>,
+) -> Result<Translated, String> {
     let link = link.filter(|l| !l.0.is_empty());
-    let mut t = hlsl::translate_linked(ex, link).map_err(|e| format!("translate: {e}"))?;
+    let mut t = hlsl::translate_linked_tbuf_classes(ex, link, classes)
+        .map_err(|e| format!("translate: {e}"))?;
     if cbv.rewrites() {
         if cbv == CbvRaw::On && !gcn::is_durango(&ex.fssm) {
             return Err("bind: Xbox One title shader is not a Durango program; its constant buffers cannot follow the raw-SRV binding".into());

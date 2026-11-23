@@ -429,6 +429,7 @@ pub fn apply(real_list: *mut c_void) {
             crate::dred_marks::install(&XBOX_VT);
             crate::depth_uav::install_cmdlist(&XBOX_VT);
             crate::pso_async::install(&XBOX_VT);
+            crate::tbuf_compute::install(&XBOX_VT);
             crate::cbv_raw::install_draw_check(&XBOX_VT);
             crate::passcap::install(&XBOX_VT);
             crate::gpuprof::install_ops(&XBOX_VT);

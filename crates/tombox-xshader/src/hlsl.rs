@@ -53,6 +53,14 @@ pub struct Translated {
     pub user_data_base: Option<usize>,
     pub cb_limits: BTreeMap<u32, u64>,
     pub fmask: Vec<(u32, u32, u32)>,
+    pub tbuf_unresolved: Vec<(bool, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TbufClass {
+    Float,
+    Uint,
+    Sint,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -504,6 +512,7 @@ struct Emitter<'a> {
     tbuf_uint: BTreeSet<u32>,         // typed UAV slots whose element must be uint (atomics)
     /// Inferred integer element type of typed buffers: (is_uav, slot) -> 1 uint, 2 sint.
     tbuf_ty: BTreeMap<(bool, u32), u8>,
+    tbuf_unresolved: BTreeSet<(bool, u32)>,
     /// Inferred integer texel type of textures read with texel fetches / written with image
     /// stores: (is_uav, slot) -> 1 uint, 2 sint. Absent = float (the default).
     img_ty: BTreeMap<(bool, u32), u8>,
@@ -1168,23 +1177,36 @@ pub fn translate(ex: &ShaderExtract) -> Result<Translated, String> {
     translate_linked(ex, None)
 }
 
-pub fn translate_linked(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
+
+pub fn translate_linked(
+    ex: &ShaderExtract,
+    feeds_ps: Option<&InputInterp>,
+) -> Result<Translated, String> {
+    translate_linked_tbuf_classes(ex, feeds_ps, &BTreeMap::new())
+}
+
+pub fn translate_linked_tbuf_classes(
+    ex: &ShaderExtract,
+    feeds_ps: Option<&InputInterp>,
+    classes: &BTreeMap<(bool, u32), TbufClass>,
+) -> Result<Translated, String> {
     if ex.root_sig.is_none() && std::env::var_os("TOMBOX_INFER_ROOT_SIG").is_some() {
         if let Ok(sig) = infer::infer_root_signature(ex) {
             let mut inferred = ex.clone();
             inferred.root_sig = Some(sig);
-            return translate_linked(&inferred, feeds_ps);
+            return translate_linked_tbuf_classes(&inferred, feeds_ps, classes);
         }
     }
-    translate_linked_with(ex, feeds_ps, false)
+    translate_linked_with(ex, feeds_ps, false, classes)
 }
 
+
 pub fn translate_user_data(ex: &ShaderExtract) -> Result<Translated, String> {
-    translate_linked_with(ex, None, true)
+    translate_linked_with(ex, None, true, &BTreeMap::new())
 }
 
 pub fn translate_linked_user_data(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>) -> Result<Translated, String> {
-    translate_linked_with(ex, feeds_ps, true)
+    translate_linked_with(ex, feeds_ps, true, &BTreeMap::new())
 }
 
 pub fn translate_with_inference(ex: &ShaderExtract) -> Result<Translated, String> {
@@ -1198,18 +1220,34 @@ pub fn translate_with_inference(ex: &ShaderExtract) -> Result<Translated, String
     translate(&inferred)
 }
 
-fn translate_linked_with(ex: &ShaderExtract, feeds_ps: Option<&InputInterp>, user_data: bool) -> Result<Translated, String> {
+
+fn translate_linked_with(
+    ex: &ShaderExtract,
+    feeds_ps: Option<&InputInterp>,
+    user_data: bool,
+    classes: &BTreeMap<(bool, u32), TbufClass>,
+) -> Result<Translated, String> {
+
     let out_interp = match ex.stage {
         Stage::Vertex | Stage::Geometry | Stage::Mesh => feeds_ps.cloned().unwrap_or_default(),
         _ => InputInterp::default(),
     };
-    match translate_with(ex, &out_interp, None, BTreeSet::new(), user_data) {
-        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new(), user_data).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
+    match translate_with(ex, &out_interp, None, BTreeSet::new(), user_data, classes) {
+        Err(e) if disassemble(&ex.isa).iter().take(16).any(|i| i.mnemonic == "s_swappc_b64") => translate_with(ex, &out_interp, Some(8), BTreeSet::new(), user_data, classes).map_err(|e2| if e2.contains("not a buffer descriptor") || e2.contains("not a root table") { e } else { e2 }),
         r => r,
     }
 }
 
-fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_override: Option<usize>, uav_force: BTreeSet<u32>, user_data: bool) -> Result<Translated, String> {
+
+fn translate_with(
+    ex: &ShaderExtract,
+    out_interp: &InputInterp,
+    user_base_override: Option<usize>,
+    uav_force: BTreeSet<u32>,
+    user_data: bool,
+    classes: &BTreeMap<(bool, u32), TbufClass>,
+) -> Result<Translated, String> {
+
     let (profile, is_ps) = match ex.stage {
         Stage::Vertex => ("vs_5_0", false),
         Stage::Pixel => ("ps_5_0", true),
@@ -1249,6 +1287,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         tbuf: BTreeSet::new(),
         tbuf_uint: BTreeSet::new(),
         tbuf_ty: BTreeMap::new(),
+        tbuf_unresolved: BTreeSet::new(),
         img_ty: BTreeMap::new(),
         epilog_pack: HashMap::new(),
         epilog_exp: HashMap::new(),
@@ -1332,12 +1371,26 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
     if !clash.is_empty() {
         let mut force = em.uav_force.clone();
         force.extend(clash);
-        return translate_with(ex, out_interp, user_base_override, force, user_data);
+        return translate_with(ex, out_interp, user_base_override, force, user_data, classes);
     }
     if is_ps {
         em.find_export_epilogs();
     }
     em.infer_tbuf_types();
+    for (&key, &class) in classes {
+        if em.tbuf_unresolved.contains(&key) {
+            match class {
+                TbufClass::Float => {}
+                TbufClass::Uint => {
+                    em.tbuf_ty.insert(key, 1);
+                }
+                TbufClass::Sint => {
+                    em.tbuf_ty.insert(key, 2);
+                }
+            }
+        }
+    }
+
     let live_in = em.live_in();
     em.live = live_in.clone();
     em.emit_body(is_ps)?;
@@ -1378,7 +1431,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         (_, Some("ms")) => "ms_6_8",
         _ => profile,
     };
-    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect() })
+    Ok(Translated { hlsl, entry: "main", profile, mip_uavs: em.uav_mips.iter().copied().collect(), mip_srvs: em.tex_mips.iter().copied().collect(), needs_gmem: em.uses_bvh, needs_global: em.uses_global, uses_typed_atomic64: !em.uav_u64.is_empty(), user_data_base: em.ud_active().then(|| em.user_base()), cb_limits: em.cb_limits(), fmask: em.fmask_loc.iter().copied().collect(), tbuf_unresolved: em.tbuf_unresolved.into_iter().collect() })
 }
 
 impl<'a> Emitter<'a> {
@@ -1982,6 +2035,17 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
+        self.tbuf_unresolved = votes
+            .iter()
+            .filter_map(|(&(is_img, is_uav, slot), evidence)| {
+                (!is_img
+                    && evidence.iter().all(|&n| n == 0)
+                    && !ty.contains_key(&(is_img, is_uav, slot))
+                    && !(is_uav && self.tbuf_uint.contains(&slot)))
+                    .then_some((is_uav, slot))
+            })
+            .collect();
+
         for ((is_img, is_uav, slot), t) in ty {
             if !is_img {
                 self.tbuf_ty.insert((is_uav, slot), t);
@@ -5657,8 +5721,6 @@ impl<'a> Emitter<'a> {
             }
         }
         if let Some(Res::TBuf(slot, is_uav)) = self.res.get(&idx).and_then(|v| v.first()).copied() {
-            // Typed buffer. The element type is declared float4: the view format is not
-            // visible in the shader, so integer-format buffers are a known gap (TECHNICAL_DEBT).
             let (offen, idxen) = (ins.aux.mask & 1 != 0, ins.aux.mask & 2 != 0);
             if offen || ins.aux.imm != 0 || !matches!(ins.src[2], Opnd::ConstInt(0)) {
                 return Err("typed-buffer MUBUF with offset addressing unsupported".into());
@@ -5681,30 +5743,35 @@ impl<'a> Emitter<'a> {
                 if !is_uav {
                     return Err("buffer_store_format to a non-UAV table".into());
                 }
-                let mut c = vec![];
-                for k in 0..4u8 {
-                    if k < n {
-                        let o = Opnd::Vgpr(vd + k);
-                        self.touch(&o);
-                        c.push(f(&o)?);
-                    } else {
-                        c.push("0.0".into());
+                let class = self.tbuf_ty.get(&(is_uav, slot)).copied();
+                let zero = match class {
+                    Some(2) => "0",
+                    Some(_) => "0u",
+                    None => "0.0",
+                };
+                let mut components = Vec::with_capacity(4);
+                for k in 0..4 {
+                    if k >= n {
+                        components.push(zero.to_string());
+                        continue;
                     }
+                    let reg = Opnd::Vgpr(vd + k);
+                    self.touch(&reg);
+                    components.push(match class {
+                        Some(2) => format!("asint({})", r(&reg)?),
+                        Some(_) => r(&reg)?,
+                        None => f(&reg)?,
+                    });
                 }
-                match self.tbuf_ty.get(&(is_uav, slot)) {
-                    Some(t) => {
-                        let mut c = vec![];
-                        for k in 0..4u8 {
-                            c.push(if k < n { r(&Opnd::Vgpr(vd + k))? } else { "0u".into() });
-                        }
-                        let ctor = if *t == 2 { "int4" } else { "uint4" };
-                        self.line(&format!("if (exec_lo & 1u) {nm}[{index}] = {ctor}({});", c.join(", ")));
-                    }
+                let components = components.join(", ");
+                let addr = format!("{nm}[{index}]");
+                match class {
+                    Some(2) => self.line(&format!("if (exec_lo & 1u) {addr} = int4({components});")),
+                    Some(_) => self.line(&format!("if (exec_lo & 1u) {addr} = uint4({components});")),
                     None => {
-                        let addr = format!("{nm}[{index}]");
                         let t = self.tmp;
                         self.tmp += 1;
-                        self.line(&format!("float4 t{t} = float4({});", c.join(", ")));
+                        self.line(&format!("float4 t{t} = float4({components});"));
                         self.line(&format!("if (exec_lo & 1u) {{ {addr} = t{t}; {} }}", small_float_store_fixup(&addr, &format!("t{t}"))));
                     }
                 }
@@ -5720,8 +5787,7 @@ impl<'a> Emitter<'a> {
                 for k in 0..n {
                     let c = XYZW[k as usize];
                     let e = match ety {
-                        "float4" => format!("asuint(t{t}.{c})"),
-                        "int4" => format!("(uint)t{t}.{c}"),
+                        "float4" | "int4" => format!("asuint(t{t}.{c})"),
                         _ => format!("t{t}.{c}"),
                     };
                     self.wv(&Opnd::Vgpr(vd + k), &e)?;

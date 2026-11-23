@@ -253,6 +253,13 @@ pub struct StaticSampler {
 
 /// Parse an RTS0 (serialized root signature) chunk body.
 pub fn parse_rts0(body: &[u8]) -> Result<RootSig, String> {
+    parse_rts0_with_range_flags(body, |_, _, _| {})
+}
+
+pub fn parse_rts0_with_range_flags(
+    body: &[u8],
+    mut range_flags: impl FnMut(usize, usize, u32),
+) -> Result<RootSig, String> {
     let version = u32_at(body, 0)?;
     let nparams = u32_at(body, 4)? as usize;
     let params_off = u32_at(body, 8)? as usize;
@@ -279,6 +286,8 @@ pub fn parse_rts0(body: &[u8]) -> Result<RootSig, String> {
                 let mut ranges = Vec::with_capacity(nranges);
                 for r in 0..nranges {
                     let q = roff + r * stride;
+                    let flags = if v11 { u32_at(body, q + 16)? } else { 1 };
+                    range_flags(i, r, flags);
                     ranges.push(RootRange {
                         range_type: u32_at(body, q)?,
                         num: u32_at(body, q + 4)?,

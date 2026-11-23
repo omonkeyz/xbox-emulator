@@ -297,7 +297,7 @@ impl ListState {
     }
 
     pub fn merge_bundle(&mut self, b: &ListState) {
-        if let Some(h) = &b.heaps { self.heaps = Some(h.clone()); }
+        if let Some(h) = &b.heaps { self.set_heaps(h.clone()); }
         for side in 0..2u8 {
             if let Some(rs) = b.root[side as usize] { self.set_root(side, rs); }
         }
@@ -321,6 +321,13 @@ impl ListState {
         for (k, v) in &b.vbs { self.vbs.insert(*k, *v); }
         if b.depth_bounds.is_some() { self.depth_bounds = b.depth_bounds; }
         if b.xstate.hi_stencil.is_some() { self.xstate.hi_stencil = b.xstate.hi_stencil; }
+    }
+
+    fn set_heaps(&mut self, heaps: Vec<usize>) {
+        if crate::tbuf_compute::enabled() && self.heaps.as_ref() != Some(&heaps) {
+            self.args.retain(|(side, _), arg| *side != 0 || !matches!(arg, RootArg::Table(_)));
+        }
+        self.heaps = Some(heaps);
     }
 
     pub fn set_root(&mut self, side: u8, rs: usize) {
@@ -376,6 +383,23 @@ pub fn on_new_list(list: *mut c_void) {
 
 pub(crate) fn bound_pso(list: *mut c_void) -> Option<usize> {
     with(list, |s| s.pso)
+}
+
+pub(crate) fn compute_tbuf_classes(
+    list: *mut c_void,
+    root: usize,
+    layout: &crate::tbuf_bindings::Layout,
+) -> Option<crate::tbuf_bindings::Classes> {
+    with(list, |s| {
+        if s.root[0] != Some(root) {
+            return None;
+        }
+        let heaps = s.heaps.as_deref()?;
+        layout.classes(|uav, param, offset| {
+            let RootArg::Table(table) = s.args.get(&(0, param))? else { return None };
+            crate::bindtrace::typed_buffer_format(heaps, *table, offset, uav)
+        })
+    })
 }
 
 pub(crate) fn predication_of(list: *mut c_void) -> Option<(usize, u64, u32)> {
@@ -499,7 +523,7 @@ unsafe fn reapply_predication(this: *mut c_void, res: *mut c_void, off: u64, op:
 
 unsafe extern "system" fn w_heaps(this: *mut c_void, n: u32, p: *const usize) {
     let v: Vec<usize> = if p.is_null() { Vec::new() } else { (0..n as usize).map(|i| unsafe { *p.add(i) }).collect() };
-    rec(this, |s| s.heaps = Some(v));
+    rec(this, |s| s.set_heaps(v));
     fwd!(X_HEAPS, fn(u32, *const usize), this, n, p)
 }
 
