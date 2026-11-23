@@ -2005,6 +2005,124 @@ pub fn verify_pending_begin_stays_pending() {
     a.close(q);
 }
 
+const BEGIN_FAILURE: i32 = 0x8009_1234u32 as i32;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Completes {
+    BeginReturns,
+    InsideBegin,
+    FromAnotherThreadInBegin,
+    InDoWork,
+    InDoWorkWithPayload,
+}
+
+struct BeginCase {
+    ops: [AtomicU32; 5],
+    hr: i32,
+    how: Completes,
+}
+
+unsafe extern "system" fn begin_case_provider(op: u32, d: *const Data) -> i32 {
+    let c = &*((*d).context as *const BeginCase);
+    c.ops[op as usize].fetch_add(1, SeqCst);
+    match (op, c.how) {
+        (OP_BEGIN, Completes::BeginReturns) => c.hr,
+        (OP_BEGIN, Completes::InsideBegin) => {
+            api().complete((*d).block, c.hr, 0);
+            0
+        }
+        (OP_BEGIN, Completes::FromAnotherThreadInBegin) => {
+            let (b, hr) = ((*d).block as usize, c.hr);
+            std::thread::spawn(move || api().complete(b as *mut Block, hr, 0)).join().unwrap();
+            0
+        }
+        (OP_BEGIN, _) => api().schedule((*d).block, 0),
+        (OP_DO_WORK, how) => {
+            api().complete((*d).block, c.hr, if how == Completes::InDoWorkWithPayload { 4 } else { 0 });
+            E_PENDING
+        }
+        _ => 0,
+    }
+}
+
+fn begin_case(hr: i32, how: Completes) -> BeginCase {
+    BeginCase { ops: Default::default(), hr, how }
+}
+
+fn op_counts(c: &BeginCase) -> [u32; 5] {
+    core::array::from_fn(|i| c.ops[i].load(SeqCst))
+}
+
+pub fn verify_failed_begin_reports_its_failure() {
+    let a = api();
+    let q = a.create(MANUAL, MANUAL);
+    let case = begin_case(BEGIN_FAILURE, Completes::BeginReturns);
+    let mut b = Block::new(q);
+    let done = counter();
+    let in_callback = Arc::new(AtomicI32::new(0));
+    let (c, s) = (done.clone(), in_callback.clone());
+    on_done(&mut b, move |b| {
+        s.store(api().status(b, false), SeqCst);
+        c.fetch_add(1, SeqCst);
+    });
+    assert_eq!(a.begin(&mut *b, &case as *const _ as usize, 0, begin_case_provider), 0, "XAsyncBegin succeeds even when the Begin op fails");
+    assert_eq!(a.status(&mut *b, false), BEGIN_FAILURE, "XAsyncGetStatus right after XAsyncBegin returned");
+    let mut size = 7usize;
+    assert_eq!(a.result_size(&mut *b, &mut size), BEGIN_FAILURE);
+    assert_eq!(done.load(SeqCst), 0, "the completion callback waits for its port");
+    assert_eq!(a.schedule(&mut *b, 0), BEGIN_FAILURE, "XAsyncSchedule on a call its Begin failed");
+    assert!(!a.dispatch(q, WORK, 0), "a failed Begin queues no work");
+    assert!(a.dispatch(q, COMPLETION, 0), "the completion callback of a failed Begin is queued");
+    assert_eq!((done.load(SeqCst), in_callback.load(SeqCst)), (1, BEGIN_FAILURE), "callback count and the status it read");
+    assert!(!a.dispatch(q, COMPLETION, 0));
+    assert_eq!(a.status(&mut *b, false), BEGIN_FAILURE);
+    assert_eq!(a.schedule(&mut *b, 0), BEGIN_FAILURE);
+    assert!(!a.dispatch(q, WORK, 0));
+    assert_eq!(op_counts(&case), [1, 0, 0, 0, 1], "ops seen as [Begin, DoWork, GetResult, Cancel, Cleanup]");
+    a.close(q);
+}
+
+pub fn verify_cleanup_waits_for_the_callback_when_begin_completes() {
+    let a = api();
+    for how in [Completes::BeginReturns, Completes::InsideBegin, Completes::FromAnotherThreadInBegin, Completes::InDoWork, Completes::InDoWorkWithPayload] {
+        for hr in [BEGIN_FAILURE, 0] {
+            for with_callback in [true, false] {
+                if how == Completes::BeginReturns && hr == 0 {
+                    continue;
+                }
+                let what = format!("case {} hr {hr:#x} callback {with_callback}", how as u32);
+                let q = a.create(MANUAL, MANUAL);
+                let case = begin_case(hr, how);
+                let cp = &case as *const BeginCase as usize;
+                let mut b = Block::new(q);
+                let seen = Arc::new(AtomicI32::new(-1));
+                let s = seen.clone();
+                if with_callback {
+                    on_done(&mut b, move |_| s.store(unsafe { &*(cp as *const BeginCase) }.ops[OP_CLEANUP as usize].load(SeqCst) as i32, SeqCst));
+                }
+                assert_eq!(a.begin(&mut *b, cp, 0, begin_case_provider), 0, "{what}");
+                let in_begin = how != Completes::InDoWork && how != Completes::InDoWorkWithPayload;
+                assert_eq!(a.dispatch(q, WORK, 0), !in_begin, "{what}");
+                assert_eq!(a.status(&mut *b, false), hr, "{what}");
+                let payload = how == Completes::InDoWorkWithPayload && hr == 0;
+                let early = if payload || (in_begin && with_callback) { 0 } else { 1 };
+                assert_eq!(op_counts(&case)[OP_CLEANUP as usize], early, "{what}: Cleanup ops before the completion port is dispatched");
+                assert_eq!(a.dispatch(q, COMPLETION, 0), with_callback, "{what}");
+                if with_callback {
+                    assert_eq!(seen.load(SeqCst), early as i32, "{what}: Cleanup ops the completion callback saw");
+                }
+                assert_eq!(op_counts(&case)[OP_CLEANUP as usize], if payload { 0 } else { 1 }, "{what}: Cleanup ops after the completion callback");
+                let works = op_counts(&case)[OP_DO_WORK as usize];
+                let again = a.schedule(&mut *b, 0);
+                assert_eq!(again, if hr < 0 { hr } else if payload { 0 } else { E_INVALIDARG }, "{what}: XAsyncSchedule on the completed call");
+                assert_eq!(a.dispatch(q, WORK, 0), payload, "{what}");
+                assert_eq!(op_counts(&case)[OP_DO_WORK as usize], works + payload as u32, "{what}");
+                a.close(q);
+            }
+        }
+    }
+}
+
 pub fn verify_zero_payload_cleans_up_fast() {
     let a = api();
     let q = a.create(MANUAL, MANUAL);
@@ -2243,7 +2361,8 @@ macro_rules! xtq_tests {
             verify_cancellation, verify_cleanup_waits_for_work, verify_cleanup_waits_for_work_distributed,
             verify_run_async, verify_custom_queue, verify_cant_schedule_twice, verify_wait_for_completion,
             verify_periodic_pattern, verify_run_alot_async, verify_get_async_status_no_deadlock,
-            verify_failed_begin_completes, verify_pending_begin_stays_pending, verify_zero_payload_cleans_up_fast, verify_complete_in_begin,
+            verify_failed_begin_completes, verify_pending_begin_stays_pending, verify_failed_begin_reports_its_failure,
+            verify_cleanup_waits_for_the_callback_when_begin_completes, verify_zero_payload_cleans_up_fast, verify_complete_in_begin,
             verify_begin_after_terminate, verify_failure_in_do_work, verify_duplicate_result_calls_fail,
             verify_duplicate_pending_result_calls_succeed, verify_no_write_after_get_status_race,
             verify_result_buffer_checks);

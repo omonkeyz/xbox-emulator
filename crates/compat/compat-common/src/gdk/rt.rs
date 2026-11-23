@@ -758,6 +758,7 @@ struct AState {
     queue: usize,
     canceled: AtomicBool,
     scheduled: AtomicBool,
+    in_begin: AtomicBool,
     data: Box<core::cell::UnsafeCell<ProviderData>>,
 }
 
@@ -837,6 +838,7 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
         queue: (*block).queue,
         canceled: AtomicBool::new(false),
         scheduled: AtomicBool::new(false),
+        in_begin: AtomicBool::new(true),
         data: Box::new(core::cell::UnsafeCell::new(ProviderData { block: block as *mut c_void, buffer_size: 0, buffer: core::ptr::null_mut(), context: ctx })),
     });
     states().lock().unwrap_or_else(|e| e.into_inner()).insert(block as usize, s.clone());
@@ -845,11 +847,23 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
     if hr < 0 && hr != E_PENDING {
         complete_state(&s, block, hr, 0);
     }
+    s.in_begin.store(false, Ordering::Release);
     S_OK
 }
 
 pub unsafe fn schedule(block: *mut Block, delay: u32) -> i32 {
-    let Some(s) = state(block as usize) else { return E_INVALIDARG };
+    if block.is_null() {
+        return E_INVALIDARG;
+    }
+    let Some(s) = state(block as usize) else {
+        return marked(block).filter(|hr| *hr < 0 && *hr != E_PENDING).unwrap_or(E_INVALIDARG);
+    };
+    match *s.status.lock().unwrap_or_else(|e| e.into_inner()) {
+        (E_PENDING, _) => {}
+        (hr, _) if hr < 0 => return hr,
+        (_, 0) => return E_INVALIDARG,
+        _ => {}
+    }
     if s.scheduled.swap(true, Ordering::AcqRel) {
         return E_UNEXPECTED;
     }
@@ -891,7 +905,8 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
         *st = (hr, size);
     }
     let keep = hr >= 0 && size > 0;
-    if !keep {
+    let after_callback = !keep && (*block).callback.is_some() && s.in_begin.load(Ordering::Acquire);
+    if !keep && !after_callback {
         cleanup(&s, block);
     }
     mark(block, hr, keep);
@@ -909,14 +924,23 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
     match (*block).callback {
         Some(cb) => {
             let b = SendPtr(block as usize);
+            let owner = s.clone();
             let job: Job = Box::new(move |_| {
                 cb(b.0 as *mut c_void);
+                if after_callback {
+                    cleanup(&owner, b.0 as *mut Block);
+                }
                 notify();
             });
             match queued(s.queue, 1, job) {
                 Queued::Ready(p, tag, j) => p.submit_tagged(tag, j),
                 Queued::Aborted(j) => j(true),
-                Queued::Invalid(_) => s.cv.notify_all(),
+                Queued::Invalid(_) => {
+                    if after_callback {
+                        cleanup(s, block);
+                    }
+                    s.cv.notify_all()
+                }
             }
         }
         None => notify(),
