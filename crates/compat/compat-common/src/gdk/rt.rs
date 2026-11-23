@@ -757,7 +757,8 @@ struct AState {
     signaled: AtomicBool,
     cleaned: AtomicBool,
     queue: usize,
-    canceled: AtomicBool,
+    in_cancel: AtomicBool,
+    cleanup_after_cancel: AtomicBool,
     scheduled: AtomicBool,
     in_begin: AtomicBool,
     data: Box<core::cell::UnsafeCell<ProviderData>>,
@@ -846,7 +847,8 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
         signaled: AtomicBool::new(false),
         cleaned: AtomicBool::new(false),
         queue: (*block).queue,
-        canceled: AtomicBool::new(false),
+        in_cancel: AtomicBool::new(false),
+        cleanup_after_cancel: AtomicBool::new(false),
         scheduled: AtomicBool::new(false),
         in_begin: AtomicBool::new(true),
         data: Box::new(core::cell::UnsafeCell::new(ProviderData { block: block as *mut c_void, buffer_size: 0, buffer: core::ptr::null_mut(), context: ctx })),
@@ -883,7 +885,8 @@ pub unsafe fn schedule(block: *mut Block, delay: u32) -> i32 {
         owner.scheduled.store(false, Ordering::Release);
         let block = b.0 as *mut Block;
         let Some(s) = state(block as usize).filter(|c| Arc::ptr_eq(c, &owner)) else { return };
-        if canceled || s.canceled.load(Ordering::Acquire) {
+        if canceled {
+            cancel(block);
             complete(block, E_ABORT, 0);
             return;
         }
@@ -908,7 +911,7 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
         return;
     }
     let keep = hr >= 0 && size > 0;
-    let callback = {
+    let (callback, in_cancel) = {
         let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
         if st.0 != E_PENDING {
             return;
@@ -921,10 +924,14 @@ unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usiz
                 m.remove(&(block as usize));
             }
         }
-        (*block).callback
+        let in_cancel = s.in_cancel.load(Ordering::Acquire);
+        if !keep && in_cancel && (*block).callback.is_none() {
+            s.cleanup_after_cancel.store(true, Ordering::Release);
+        }
+        ((*block).callback, in_cancel)
     };
-    let after_callback = !keep && callback.is_some() && s.in_begin.load(Ordering::Acquire);
-    if !keep && !after_callback {
+    let after_callback = !keep && callback.is_some() && (in_cancel || s.in_begin.load(Ordering::Acquire));
+    if !keep && !after_callback && !in_cancel {
         cleanup(&s, block);
     }
     match callback {
@@ -965,8 +972,16 @@ pub unsafe fn get_status(block: *mut Block, wait: bool) -> i32 {
             }
             st.0
         }
-        None => marked(block).unwrap_or(E_INVALIDARG),
+        None => match marked(block).unwrap_or_else(|| raw_status(block)) {
+            E_PENDING if wait => E_INVALIDARG,
+            hr => hr,
+        },
     }
+}
+
+unsafe fn raw_status(block: *const Block) -> i32 {
+    let i = &(*block).internal;
+    i32::from_le_bytes([i[8], i[9], i[10], i[11]])
 }
 
 pub unsafe fn get_result_size(block: *mut Block, out: *mut usize) -> i32 {
@@ -985,15 +1000,16 @@ pub unsafe fn get_result_size(block: *mut Block, out: *mut usize) -> i32 {
         }
         None => {
             *out = 0;
-            marked(block).unwrap_or(E_INVALIDARG)
+            marked(block).unwrap_or_else(|| raw_status(block))
         }
     }
 }
 
 pub unsafe fn get_result(block: *mut Block, identity: usize, size: usize, buf: *mut c_void, used: *mut usize) -> i32 {
     let Some(s) = state(block as usize) else {
-        let hr = marked(block).unwrap_or(E_INVALIDARG);
-        if hr >= 0 && (*block).internal[9] == 1 {
+        let mark = marked(block);
+        let hr = mark.unwrap_or_else(|| raw_status(block));
+        if hr >= 0 && mark.is_some() && (*block).internal[9] == 1 {
             return 0x8000_000Eu32 as i32;
         }
         if hr >= 0 && !used.is_null() {
@@ -1001,27 +1017,27 @@ pub unsafe fn get_result(block: *mut Block, identity: usize, size: usize, buf: *
         }
         return hr;
     };
-    if identity != 0 && s.identity != 0 && identity != s.identity {
-        return E_INVALIDARG;
-    }
     let (hr, need) = *s.status.lock().unwrap_or_else(|e| e.into_inner());
     if hr < 0 || hr == E_PENDING {
         return hr;
     }
-    if buf.is_null() && need > 0 {
-        return E_INVALIDARG;
-    }
-    if size < need {
-        return E_NOT_SUFFICIENT_BUFFER;
-    }
-    let r = if need > 0 { call(&s, 2, block, need, buf) } else { S_OK };
-    if !used.is_null() {
-        *used = need;
+    let r = if identity != s.identity || buf.is_null() {
+        E_INVALIDARG
+    } else if size < need {
+        E_NOT_SUFFICIENT_BUFFER
+    } else {
+        if !used.is_null() {
+            *used = need;
+        }
+        call(&s, 2, block, need, buf)
+    };
+    if r == E_PENDING {
+        return r;
     }
     cleanup(&s, block);
     states().lock().unwrap_or_else(|e| e.into_inner()).remove(&(block as usize));
     mark(block, hr, false);
-    (*block).internal[9] = (need > 0 && r >= 0) as u8;
+    (*block).internal[9] = 1;
     r
 }
 
@@ -1030,9 +1046,18 @@ pub unsafe fn cancel(block: *mut Block) {
     if s.status.lock().unwrap_or_else(|e| e.into_inner()).0 != E_PENDING {
         return;
     }
-    s.canceled.store(true, Ordering::Release);
+    if s.in_cancel.swap(true, Ordering::AcqRel) {
+        return;
+    }
     call(&s, 3, block, 0, core::ptr::null_mut());
-    complete(block, E_ABORT, 0);
+    let deferred = {
+        let _st = s.status.lock().unwrap_or_else(|e| e.into_inner());
+        s.in_cancel.store(false, Ordering::Release);
+        s.cleanup_after_cancel.load(Ordering::Acquire)
+    };
+    if deferred {
+        cleanup(&s, block);
+    }
 }
 
 unsafe extern "system" fn run_provider(op: u32, d: *const ProviderData) -> i32 {

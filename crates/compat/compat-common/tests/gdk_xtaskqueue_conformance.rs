@@ -6,9 +6,6 @@ use std::sync::OnceLock;
 mod xtq;
 
 const DIFFERS: &[(&str, &str)] = &[
-    ("verify_cancellation", "XAsyncCancel completes the call itself with E_ABORT, reference leaves it pending until the provider completes it"),
-    ("verify_cleanup_waits_for_work", "XAsyncCancel completes the call itself with E_ABORT, reference leaves it pending until the provider completes it"),
-    ("verify_cleanup_waits_for_work_distributed", "XAsyncCancel completes the call itself with E_ABORT, reference leaves it pending until the provider completes it"),
     ("verify_close_keeps_queued_callbacks", "closing the handle cancels the 21 queued callbacks, reference runs all 21"),
     ("verify_dispatch_on_pool_port", "XTaskQueueDispatch on a thread-pool port with a queued item returns false"),
     ("verify_duplicate_queue_handle", "XTaskQueueDuplicateHandle returns the same handle, reference a new one"),

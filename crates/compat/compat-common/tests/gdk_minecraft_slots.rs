@@ -61,8 +61,8 @@ fn shared_vtable_iids_reuse_the_same_slot_functions() {
         let size_f: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut u32) -> i32 = core::mem::transmute(size_f);
         let mut idle = Box::new(Block { queue: 0, context: 0, callback: 0, internal: [0; 32] });
         let mut sz = 0x5a5a_5a5au32;
-        assert!(size_f(uo, &mut *idle as *mut Block as *mut c_void, &mut sz) < 0);
-        assert_eq!(sz, 0x5a5a_5a5a);
+        assert_eq!(size_f(uo, &mut *idle as *mut Block as *mut c_void, &mut sz), 0);
+        assert_eq!(sz, 0);
         assert_eq!(method(user::CLSID, user::IID_V1, 13).1, method(user::CLSID, user::IID_V2, 13).1);
         let (o, guest) = method(user::CLSID, user::IID_V1, 13);
         let guest: unsafe extern "system" fn(*mut c_void, usize, *mut bool) -> i32 = core::mem::transmute(guest);
