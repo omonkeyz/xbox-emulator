@@ -3171,7 +3171,7 @@ impl<'a> Emitter<'a> {
                 let cd = sdst(ins.raw[0])?;
                 if !matches!(cd, Opnd::Null) {
                     self.touch(&cd);
-                    self.ws(&cd, &co)?;
+                    self.ws(&cd, &format!("((exec_lo & 1u) != 0u) ? {co} : 0u"))?;
                 }
                 self.wv(&d, &format!("t{t}l"))?;
                 return self.wv(&hi64(&d), &format!("t{t}h"));

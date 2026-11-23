@@ -1767,6 +1767,13 @@ fn vector_f64() {
         let _ = ovf;
         c.add("v_mad_i64_i32", &pre, &vop3b(0x177, 10, 20, [v(2), v(4), v(6)]), &post, &[sw as u64 as u32, ((sw as u64) >> 32) as u32]);
     }
+    for &(m, op, a, b, cc) in &[("v_mad_u64_u32", 0x176u32, 0xffff_ffffu32, 0xffff_ffffu32, 0xffff_ffff_ffff_ffffu64), ("v_mad_i64_i32", 0x177, 0x7fff_ffff, 0x7fff_ffff, 0x7fff_ffff_ffff_ffff)] {
+        let mut pre = pr();
+        pre.vv(2, a).vv(4, b).vv(6, cc as u32).vv(7, (cc >> 32) as u32).vv(10, 0xaaaa).vv(11, 0xbbbb).sv(20, 0x55).sv(126, 0);
+        let mut post = pr();
+        post.sv(126, 0xffff_ffff).raw(&[vop1(1, 0, v(10)), vop1(1, 1, v(11))]).s2v(2, 20);
+        c.add(m, &pre, &vop3b(op, 10, 20, [v(2), v(4), v(6)]), &post, &[0xaaaa, 0xbbbb, 0]);
+    }
     for &(a, b, d) in &[(0x1122_3344u32, 0x0066_0088u32, 5u32), (0xff00_ff00, 0x0101_0101, 0), (0x8080_8080, 0, 9)] {
         let s: u32 = (0..4).map(|k| { let (x, y) = ((a >> (8 * k)) & 0xff, (b >> (8 * k)) & 0xff); if y == 0 { 0 } else { (x as i32 - y as i32).unsigned_abs() } }).sum();
         v3c(&mut c, "v_msad_u8", 0x171, a, b, d, s + d);
