@@ -17,7 +17,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  rust-core:
+  rust-core-tests:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -86,6 +86,20 @@ jobs:
           echo "shard $((SHARD_INDEX + 1)) of $SHARD_TOTAL: $(wc -l < "$RUNNER_TEMP/exec_shard.txt") of $(wc -l < "$RUNNER_TEMP/exec_all.txt") tests"
           test -s "$RUNNER_TEMP/exec_shard.txt"
           xargs cargo test --locked -p tombox-xshader --test exec -- --exact < "$RUNNER_TEMP/exec_shard.txt"
+
+  rust-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [rust-core-tests, xshader-exec]
+    if: always()
+    steps:
+      - name: every test job succeeded
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "rust-core-tests xshader-exec: $RESULTS"
+          [ "$RESULTS" = "success success" ]
 
   rust-workspace-check:
     runs-on: windows-latest
