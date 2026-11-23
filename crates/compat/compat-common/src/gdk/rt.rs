@@ -1,3 +1,4 @@
+use super::streaming::E_NO_TASK_QUEUE;
 use super::xasync::{ProviderData, XASYNC};
 use super::{log, setting, Iface, This, E_ABORT, E_INVALIDARG, E_NOT_SUFFICIENT_BUFFER, E_PENDING, S_OK};
 use core::ffi::c_void;
@@ -745,6 +746,7 @@ pub struct Block {
 }
 
 const BMAGIC: u32 = 0x4158_4254;
+const E_UNEXPECTED: i32 = 0x8000_FFFFu32 as i32;
 
 struct AState {
     provider: Provider,
@@ -755,6 +757,7 @@ struct AState {
     cleaned: AtomicBool,
     queue: usize,
     canceled: AtomicBool,
+    scheduled: AtomicBool,
     data: Box<core::cell::UnsafeCell<ProviderData>>,
 }
 
@@ -811,6 +814,19 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
             return E_INVALIDARG;
         }
     }
+    let qh = (*block).queue;
+    let early = if qh == 0 && process_queue() == 0 {
+        E_NO_TASK_QUEUE
+    } else if queue(qh).is_some_and(|q| q.ended.load(Ordering::Acquire) || q.work.terminated.load(Ordering::Acquire)) {
+        E_ABORT
+    } else {
+        S_OK
+    };
+    if early < 0 {
+        states().lock().unwrap_or_else(|e| e.into_inner()).remove(&(block as usize));
+        mark(block, early, false);
+        return early;
+    }
     let s = Arc::new(AState {
         provider,
         ctx: ctx as usize,
@@ -820,32 +836,36 @@ pub unsafe fn begin(block: *mut Block, ctx: *mut c_void, identity: usize, _name:
         cleaned: AtomicBool::new(false),
         queue: (*block).queue,
         canceled: AtomicBool::new(false),
+        scheduled: AtomicBool::new(false),
         data: Box::new(core::cell::UnsafeCell::new(ProviderData { block: block as *mut c_void, buffer_size: 0, buffer: core::ptr::null_mut(), context: ctx })),
     });
     states().lock().unwrap_or_else(|e| e.into_inner()).insert(block as usize, s.clone());
     mark(block, E_PENDING, true);
     let hr = call(&s, 0, block, 0, core::ptr::null_mut());
     if hr < 0 {
-        states().lock().unwrap_or_else(|e| e.into_inner()).remove(&(block as usize));
-        mark(block, hr, false);
-        return hr;
+        complete_state(&s, block, hr, 0);
     }
     S_OK
 }
 
 pub unsafe fn schedule(block: *mut Block, delay: u32) -> i32 {
     let Some(s) = state(block as usize) else { return E_INVALIDARG };
+    if s.scheduled.swap(true, Ordering::AcqRel) {
+        return E_UNEXPECTED;
+    }
+    let owner = s.clone();
     let b = SendPtr(block as usize);
     let job: Job = Box::new(move |canceled| {
+        owner.scheduled.store(false, Ordering::Release);
         let block = b.0 as *mut Block;
-        let Some(s) = state(block as usize) else { return };
+        let Some(s) = state(block as usize).filter(|c| Arc::ptr_eq(c, &owner)) else { return };
         if canceled || s.canceled.load(Ordering::Acquire) {
             complete(block, E_ABORT, 0);
             return;
         }
         let hr = call(&s, 1, block, 0, core::ptr::null_mut());
         if hr != E_PENDING {
-            complete(block, hr, 0);
+            complete_state(&s, block, if hr >= 0 { E_UNEXPECTED } else { hr }, 0);
         }
     });
     submit_delayed(s.queue, 0, delay, job)
@@ -856,6 +876,10 @@ pub unsafe fn complete(block: *mut Block, hr: i32, size: usize) {
         return;
     }
     let Some(s) = state(block as usize) else { return };
+    complete_state(&s, block, hr, size)
+}
+
+unsafe fn complete_state(s: &Arc<AState>, block: *mut Block, hr: i32, size: usize) {
     {
         let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
         if st.0 != E_PENDING {
@@ -920,17 +944,15 @@ pub unsafe fn get_result_size(block: *mut Block, out: *mut usize) -> i32 {
         Some(s) => {
             let st = *s.status.lock().unwrap_or_else(|e| e.into_inner());
             if st.0 < 0 || st.0 == E_PENDING {
+                *out = 0;
                 return st.0;
             }
             *out = st.1;
             S_OK
         }
         None => {
-            let hr = marked(block).unwrap_or(E_INVALIDARG);
-            if hr >= 0 {
-                *out = 0;
-            }
-            hr
+            *out = 0;
+            marked(block).unwrap_or(E_INVALIDARG)
         }
     }
 }
@@ -953,7 +975,10 @@ pub unsafe fn get_result(block: *mut Block, identity: usize, size: usize, buf: *
     if hr < 0 || hr == E_PENDING {
         return hr;
     }
-    if size < need || (buf.is_null() && need > 0) {
+    if buf.is_null() && need > 0 {
+        return E_INVALIDARG;
+    }
+    if size < need {
         return E_NOT_SUFFICIENT_BUFFER;
     }
     let r = if need > 0 { call(&s, 2, block, need, buf) } else { S_OK };
@@ -980,7 +1005,7 @@ pub unsafe fn cancel(block: *mut Block) {
 unsafe extern "system" fn run_provider(op: u32, d: *const ProviderData) -> i32 {
     if op == 1 {
         let w: AsyncWork = core::mem::transmute((*d).context);
-        return w((*d).block);
+        complete((*d).block as *mut Block, w((*d).block), 0);
     }
     S_OK
 }
