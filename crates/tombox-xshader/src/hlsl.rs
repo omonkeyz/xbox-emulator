@@ -21,6 +21,7 @@ use std::fmt::Write as _;
 
 mod mode;
 mod ds_ext;
+mod lds64;
 mod gds;
 mod mtbuf;
 mod fcmp;
@@ -525,6 +526,8 @@ struct Emitter<'a> {
     uses_lds: bool,
     lds_w_pending: bool,
     lds_r_pending: bool,
+    lds_nested: bool,
+    lds64_nested: bool,
     brace_depth: i32,
     /// Shader reads constant tables embedded in its code section.
     uses_code: bool,
@@ -1259,6 +1262,8 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         uses_lds: false,
         lds_w_pending: false,
         lds_r_pending: false,
+        lds_nested: false,
+        lds64_nested: false,
         brace_depth: 0,
         uses_code: false,
         vreg_array: false,
@@ -2678,6 +2683,9 @@ impl<'a> Emitter<'a> {
         }
         if reads {
             self.lds_r_pending = true;
+        }
+        if self.brace_depth != 0 || self.loop_depth != 0 {
+            self.lds_nested = true;
         }
     }
 
@@ -4258,6 +4266,7 @@ impl<'a> Emitter<'a> {
                 return self.wv(&dst, &e);
             }
             Enc::Ds if self.is_cs && matches!(m, "ds_wrxchg2_rtn_b32" | "ds_wrxchg2st64_rtn_b32") => self.emit_lds_wrxchg2(ins),
+            Enc::Ds if self.is_cs && lds64::is_atomic64(m) => self.emit_lds_atomic64(ins),
             Enc::Ds
                 if self.is_cs
                     && matches!(
@@ -7117,8 +7126,17 @@ impl<'a> Emitter<'a> {
                 .collect();
             let _ = writeln!(h, "static const uint tb_code[{}] = {{ {} }};", words.len().max(1), if words.is_empty() { "0".to_string() } else { words.join(", ") });
         }
+        let lds64 = self.lds64_dwords()?;
         if self.is_cs && self.uses_lds {
-            let _ = writeln!(h, "groupshared uint tb_lds[8192];");
+            match lds64 {
+                Some(n) => {
+                    let _ = writeln!(h, "groupshared uint tb_lds[{n}];
+groupshared uint tb_lds64_lock; // held by every 64-bit LDS atomic: they are serialised against each other only, not against a 32-bit atomic or a plain write to the same dwords");
+                }
+                None => {
+                    let _ = writeln!(h, "groupshared uint tb_lds[8192];");
+                }
+            }
         }
         if let Some(x) = self.xlane_header()? {
             let _ = writeln!(h, "{x}");
@@ -7172,7 +7190,15 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
             let _ = writeln!(h, "    s{} = gid.x; s{} = gid.y; s{} = gid.z;", g, g + 1, g + 2);
             h.push_str(&dg_init);
             h.push_str(&static_init);
-            h.push_str(&self.body);
+            match lds64 {
+                Some(n) => {
+                    h.push_str("    tb_lds64_lock = 0u;
+    GroupMemoryBarrierWithGroupSync();
+");
+                    h.push_str(&self.body.replace("& 8191u]", &format!("% {n}u]")));
+                }
+                None => h.push_str(&self.body),
+            }
             h.push_str("}
 ");
             return Ok(h);

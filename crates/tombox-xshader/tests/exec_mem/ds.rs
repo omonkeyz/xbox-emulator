@@ -485,3 +485,221 @@ fn ds_permute_with_lds_is_refused() {
     };
     assert!(e.contains("groupshared"), "{e}");
 }
+
+#[derive(Clone, Copy)]
+enum Src {
+    Lit(u32, u32),
+    Mem,
+    Swap,
+}
+
+fn val64(s: Src, t: u32) -> u64 {
+    let (lo, hi) = match s {
+        Src::Lit(lo, hi) => (lo, hi),
+        Src::Mem => (dv(t), ev(t)),
+        Src::Swap => (ev(t), dv(t)),
+    };
+    (hi as u64) << 32 | lo as u64
+}
+
+fn load64(b: &mut Vec<u32>, reg: u32, s: Src) {
+    match s {
+        Src::Lit(lo, hi) => b.extend_from_slice(&[vop1(1, reg, LIT), lo, vop1(1, reg + 1, LIT), hi]),
+        Src::Mem => b.extend_from_slice(&[vop1(1, reg, v(2)), vop1(1, reg + 1, v(4))]),
+        Src::Swap => b.extend_from_slice(&[vop1(1, reg, v(4)), vop1(1, reg + 1, v(2))]),
+    }
+}
+
+fn op64(key: &str, o: u64, d: u64, e: u64) -> u64 {
+    match key {
+        "add" => o.wrapping_add(d),
+        "sub" => o.wrapping_sub(d),
+        "rsub" => d.wrapping_sub(o),
+        "inc" => if o >= d { 0 } else { o + 1 },
+        "dec" => if o == 0 || o > d { d } else { o - 1 },
+        "min_i" => if (d as i64) < (o as i64) { d } else { o },
+        "max_i" => if (d as i64) > (o as i64) { d } else { o },
+        "min_u" => o.min(d),
+        "max_u" => o.max(d),
+        "and" => o & d,
+        "or" => o | d,
+        "xor" => o ^ d,
+        "mskor" => (o & !d) | e,
+        "cmpst" => if o == d { e } else { o },
+        _ => d,
+    }
+}
+
+const OPS64: [(&str, u32, &str, &str); 15] = [
+    ("add", 0x40, "ds_add_u64", "ds_add_rtn_u64"),
+    ("sub", 0x41, "ds_sub_u64", "ds_sub_rtn_u64"),
+    ("rsub", 0x42, "ds_rsub_u64", "ds_rsub_rtn_u64"),
+    ("inc", 0x43, "ds_inc_u64", "ds_inc_rtn_u64"),
+    ("dec", 0x44, "ds_dec_u64", "ds_dec_rtn_u64"),
+    ("min_i", 0x45, "ds_min_i64", "ds_min_rtn_i64"),
+    ("max_i", 0x46, "ds_max_i64", "ds_max_rtn_i64"),
+    ("min_u", 0x47, "ds_min_u64", "ds_min_rtn_u64"),
+    ("max_u", 0x48, "ds_max_u64", "ds_max_rtn_u64"),
+    ("and", 0x49, "ds_and_b64", "ds_and_rtn_b64"),
+    ("or", 0x4a, "ds_or_b64", "ds_or_rtn_b64"),
+    ("xor", 0x4b, "ds_xor_b64", "ds_xor_rtn_b64"),
+    ("mskor", 0x4c, "ds_mskor_b64", "ds_mskor_rtn_b64"),
+    ("cmpst", 0x50, "ds_cmpst_b64", "ds_cmpst_rtn_b64"),
+    ("xchg", 0x4d, "", "ds_wrxchg_rtn_b64"),
+];
+
+fn lds_fssm(granules: u32) -> Vec<u8> {
+    cs_fssm(granules << 15 | 0x10)
+}
+
+fn one64(cs: &mut Vec<CsCase>, k: usize, rtn: bool, off: u32, mem: Src, d: Src, e: Src) {
+    let (key, op, plain, ret) = OPS64[k];
+    let mut b = Vec::new();
+    load64(&mut b, 20, mem);
+    load64(&mut b, 22, d);
+    load64(&mut b, 24, e);
+    b.extend_from_slice(&[vop1(1, 10, LIT), 0x5a5a_0001, vop1(1, 11, LIT), 0x5a5a_0002]);
+    b.extend_from_slice(&ds(0x4d, off, 5, 20, 0, 0));
+    let w = ds(if rtn { op + 0x20 } else { op }, off, 5, 22, 24, 10);
+    b.extend_from_slice(&w);
+    b.extend_from_slice(&ds(0x76, off, 5, 0, 0, 14));
+    cs.push(cc(if rtn { ret } else { plain }, w, b, &[10, 11, 14, 15], &move |t| {
+        let o = val64(mem, t);
+        let n = op64(key, o, val64(d, t), val64(e, t));
+        let (r0, r1) = if rtn { (o as u32, (o >> 32) as u32) } else { (0x5a5a_0001, 0x5a5a_0002) };
+        vec![r0, r1, n as u32, (n >> 32) as u32]
+    }));
+}
+
+fn all64(cs: &mut Vec<CsCase>, k: usize, off: u32, mem: Src, d: Src, e: Src) {
+    if !OPS64[k].2.is_empty() {
+        one64(cs, k, false, off, mem, d, e);
+    }
+    one64(cs, k, true, off, mem, d, e);
+}
+
+#[test]
+fn ds_lds_atomic64() {
+    let mut cs = Vec::new();
+    let e = Src::Lit(0x0f0f_00ff, 0x1234_8000);
+    for k in 0..OPS64.len() {
+        all64(&mut cs, k, 0, Src::Mem, Src::Lit(0xffff_ff00, 0x8000_0000), e);
+        all64(&mut cs, k, 0x104, Src::Mem, Src::Swap, e);
+    }
+    let edge: [(usize, Src, Src); 12] = [
+        (0, Src::Lit(0xffff_ffff, 0), Src::Lit(1, 0)),
+        (0, Src::Lit(0xffff_ffff, 0xffff_ffff), Src::Lit(1, 0)),
+        (1, Src::Lit(0, 1), Src::Lit(1, 0)),
+        (2, Src::Lit(1, 0), Src::Lit(0, 1)),
+        (3, Src::Lit(0xffff_ffff, 0), Src::Lit(0, 0x10)),
+        (3, Src::Lit(7, 7), Src::Lit(7, 7)),
+        (4, Src::Lit(0, 0), Src::Lit(9, 9)),
+        (4, Src::Lit(0, 1), Src::Lit(0, 2)),
+        (5, Src::Lit(0, 0x8000_0000), Src::Lit(1, 0)),
+        (7, Src::Lit(0, 0x8000_0000), Src::Lit(1, 0)),
+        (6, Src::Lit(0xffff_ffff, 0xffff_ffff), Src::Lit(0, 0)),
+        (8, Src::Lit(0xffff_ffff, 0xffff_ffff), Src::Lit(0, 0)),
+    ];
+    for &(k, mem, d) in &edge {
+        all64(&mut cs, k, 8, mem, d, e);
+    }
+    all64(&mut cs, 13, 0, Src::Mem, Src::Mem, e);
+    all64(&mut cs, 1, 0, Src::Mem, Src::Mem, e);
+    {
+        let mut b = Vec::new();
+        load64(&mut b, 20, Src::Mem);
+        load64(&mut b, 22, Src::Swap);
+        b.extend_from_slice(&ds(0x4d, 0, 5, 20, 0, 0));
+        let w = ds(0x6d, 0, 5, 22, 0, 22);
+        b.extend_from_slice(&w);
+        b.extend_from_slice(&ds(0x76, 0, 5, 0, 0, 14));
+        cs.push(cc("ds_wrxchg_rtn_b64", w, b, &[22, 23, 14, 15], &|t| vec![dv(t), ev(t), ev(t), dv(t)]));
+    }
+    for &(m, op, unit, shift, o0, o1) in &[
+        ("ds_wrxchg2_rtn_b64", 0x6eu32, 8u32, 5i32, 0u32, 1u32),
+        ("ds_wrxchg2_rtn_b64", 0x6e, 8, 5, 3, 1),
+        ("ds_wrxchg2st64_rtn_b64", 0x6f, 512, 4, 0, 2),
+        ("ds_wrxchg2st64_rtn_b64", 0x6f, 512, 4, 2, 0),
+    ] {
+        for back in [false, true] {
+            let mut b = vec![vop2(0x1a, 26, ic(shift), 0)];
+            load64(&mut b, 20, Src::Mem);
+            load64(&mut b, 28, Src::Swap);
+            load64(&mut b, 22, Src::Lit(0x1111_2222, 0x3333_4444));
+            load64(&mut b, 24, Src::Lit(0x5555_6666, 0x7777_8888));
+            b.extend_from_slice(&ds(0x4d, o0 * unit, 26, 20, 0, 0));
+            b.extend_from_slice(&ds(0x4d, o1 * unit, 26, 28, 0, 0));
+            let w = ds(op, o0 | o1 << 8, 26, 22, 24, 10);
+            b.extend_from_slice(&w);
+            b.extend_from_slice(&ds(0x76, o0 * unit, 26, 0, 0, 14));
+            b.extend_from_slice(&ds(0x76, o1 * unit, 26, 0, 0, 16));
+            if back {
+                cs.push(cc(m, w, b, &[14, 15, 16, 17], &|_| vec![0x1111_2222, 0x3333_4444, 0x5555_6666, 0x7777_8888]));
+            } else {
+                cs.push(cc(m, w, b, &[10, 11, 12, 13], &|t| vec![dv(t), ev(t), ev(t), dv(t)]));
+            }
+        }
+    }
+    let init = Src::Lit(0x8000_0001, 0x0000_0003);
+    for &k in &[0usize, 11, 8, 5, 1] {
+        let (key, op, plain, _) = OPS64[k];
+        let mut b = vec![vop1(1, 30, LIT), 0x140];
+        load64(&mut b, 20, init);
+        load64(&mut b, 22, Src::Mem);
+        b.extend_from_slice(&ds(0x4d, 0, 30, 20, 0, 0));
+        let w = ds(op, 0, 30, 22, 0, 10);
+        b.extend_from_slice(&w);
+        b.extend_from_slice(&ds(0x76, 0, 30, 0, 0, 14));
+        let want = (0..T).fold(val64(init, 0), |a, t| op64(key, a, val64(Src::Mem, t), 0));
+        cs.push(cc(plain, w, b, &[14, 15], &move |_| vec![want as u32, (want >> 32) as u32]));
+    }
+    for flip in [false, true] {
+        let (first, second) = if flip { (0x41u32, 0x40u32) } else { (0x40, 0x41) };
+        let mut b = vec![vop1(1, 30, LIT), 0x140, vop2(0x1b, 31, ic(1), 0)];
+        load64(&mut b, 20, init);
+        load64(&mut b, 22, Src::Mem);
+        b.extend_from_slice(&ds(0x4d, 0, 30, 20, 0, 0));
+        let w = ds(first, 0, 30, 22, 0, 10);
+        b.extend_from_slice(&[vopc(0xc2, ic(0), 31), sopp(0x06, 3)]);
+        b.extend_from_slice(&w);
+        b.push(sopp(0x02, 2));
+        b.extend_from_slice(&ds(second, 0, 30, 22, 0, 10));
+        b.extend_from_slice(&ds(0x76, 0, 30, 0, 0, 14));
+        let want = (0..T).fold(val64(init, 0), |a, t| op64(if (t & 1 == 0) != flip { "add" } else { "sub" }, a, val64(Src::Mem, t), 0));
+        cs.push(cc(OPS64[flip as usize].2, w, b, &[14, 15], &move |_| vec![want as u32, (want >> 32) as u32]));
+    }
+    run_cs_cases_fssm("ds_lds_atomic64", &cs, &lds_fssm(5));
+}
+
+#[test]
+fn ds_lds_atomic64_sizing() {
+    let body = |off: u32| cs_prog(&ds(0x40, off, 5, 22, 24, 10), &[10]);
+    let err = |words: &[u32], fssm: &[u8]| translate(&cs_extract_fssm(words, T, fssm)).map(|t| t.hlsl).unwrap_err();
+    assert!(err(&body(0), &[]).contains("COMPUTE_PGM_RSRC2 not found"));
+    assert!(err(&body(0), &lds_fssm(0)).contains("declares no LDS"));
+    assert!(err(&body(0), &lds_fssm(64)).contains("no room for the lock word"));
+    assert!(err(&body(0), &cs_fssm(5 << 15 | 0x50)).contains("not trusted as an LDS size"));
+    assert!(err(&body(0), &cs_fssm(5 << 15 | 0x0100_0010)).contains("not trusted as an LDS size"));
+    assert!(err(&body(0x9fc), &lds_fssm(5)).contains("past the 2560 bytes the shader declares"));
+    let h = translate(&cs_extract_fssm(&body(0x9f8), T, &lds_fssm(5))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[640];") && h.contains("groupshared uint tb_lds64_lock;") && h.contains("% 640u]") && !h.contains("& 8191u]"));
+    assert!(h.contains("tb_lds64_lock = 0u;\n    GroupMemoryBarrierWithGroupSync();"));
+    let h = translate(&cs_extract_fssm(&body(0), T, &lds_fssm(63))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[8064];"));
+    let arms = |second: [u32; 2]| {
+        let mut b = vec![vop2(0x1b, 31, ic(1), 0), vopc(0xc2, ic(0), 31), sopp(0x06, 3)];
+        b.extend_from_slice(&ds(0x40, 0, 5, 22, 0, 10));
+        b.push(sopp(0x02, 2));
+        b.extend_from_slice(&second);
+        cs_prog(&b, &[10])
+    };
+    for other in [ds(0x0d, 0, 1, 2, 0, 0), ds(0x00, 0, 1, 2, 0, 10), ds(0x36, 0, 1, 0, 0, 10)] {
+        assert!(err(&arms(other), &lds_fssm(5)).contains("serialised only against each other"));
+    }
+    assert!(translate(&cs_extract_fssm(&arms(ds(0x41, 0, 5, 22, 0, 10)), T, &lds_fssm(5))).is_ok());
+    let plain = cs_prog(&ds(0x00, 0, 1, 2, 0, 10), &[10]);
+    for fssm in [Vec::new(), lds_fssm(5)] {
+        let h = translate(&cs_extract_fssm(&plain, T, &fssm)).map(|t| t.hlsl).unwrap();
+        assert!(h.contains("groupshared uint tb_lds[8192];") && h.contains("& 8191u]") && !h.contains("tb_lds64_lock"));
+    }
+}
