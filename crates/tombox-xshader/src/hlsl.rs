@@ -253,6 +253,7 @@ fn name(o: &Opnd) -> Result<String, String> {
 /// Operand as a `uint` rvalue expression.
 fn r(o: &Opnd) -> Result<String, String> {
     Ok(match o {
+        Opnd::Null => "0u".into(),
         Opnd::ConstInt(v) => format!("{:#x}u", *v as i32 as u32),
         Opnd::ConstF32(f) => format!("{:#x}u", f.to_bits()),
         Opnd::Literal(v) => format!("{v:#x}u"),

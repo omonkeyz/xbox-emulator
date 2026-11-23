@@ -724,6 +724,29 @@ fn pr() -> Prog {
     Prog::new()
 }
 
+#[test]
+fn scalar_null_reads_zero_after_discarded_writes() {
+    let mut cases = Cases::new();
+    for value in [1, 0x8000_0000, 0xffff_ffff] {
+        let mut pre = pr();
+        pre.sv(125, value);
+        let mut post = pr();
+        post.s2v(0, 125).s2v(1, 20);
+        cases.add("s_mov_b32", &pre, &[sop1(3, 20, 125)], &post, &[0, 0]);
+    }
+    for (a, b, carry) in [(1, 2, 0), (0xffff_ffff, 1, 1)] {
+        let mut pre = pr();
+        pre.sv(10, a).sv(12, b);
+        let mut post = pr();
+        post.scc_to_v(0).s2v(1, 125);
+        cases.add("s_add_u32", &pre, &[sop2(0, 125, 10, 12)], &post, &[carry, 0]);
+    }
+    let mut post = pr();
+    post.scc_to_v(0).s2v(1, 125);
+    cases.add("s_not_b32", &pr(), &[sop1(7, 125, 125)], &post, &[1, 0]);
+    cases.run("scalar_null_reads_zero_after_discarded_writes");
+}
+
 fn s2(c: &mut Cases, m: &'static str, op: u32, a: u32, b: u32, cin: u32, res: u32, scc: u32) {
     let mut pre = pr();
     pre.sv(10, a).sv(12, b).raw(&[if cin != 0 { SCC1 } else { SCC0 }]);
