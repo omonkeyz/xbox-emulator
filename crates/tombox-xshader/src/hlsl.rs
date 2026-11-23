@@ -5341,6 +5341,7 @@ impl<'a> Emitter<'a> {
         if let Some(e) = fexpr {
             let e = if sp { mode::dout(e) } else { e };
             let e = self.fres(ins, e);
+            let e = if m == "v_mad_f32" && vop3 && ins.aux.imm2 != 0 { format!("asuint(tb_ftz(asfloat({e})))") } else { e };
             return self.wv(&d, &e);
         }
         let mask = if vop3 { c.clone() } else { "vcc_lo".to_string() };

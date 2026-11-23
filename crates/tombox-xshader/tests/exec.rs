@@ -2439,6 +2439,21 @@ fn scalar_mode_f16_f64() {
     vc(&mut z, "v_mad_f32", &[(1, 0x200), (2, big), (3, 0)], &m3, &[10], &[0]);
     vc(&mut z, "v_mad_f32", &[(1, tiny), (2, tiny), (3, 0)], &m3, &[10], &[0]);
     vc(&mut z, "v_mad_f32", &[(1, fb(2.0)), (2, fb(3.0)), (3, 0x200)], &m3, &[10], &[fb(6.0)]);
+    let mo = |op: u32, omod: u32, clamp: bool| {
+        let mut w = vop3m(op, 10, [v(1), v(2), v(3)], 0, 0, 0, clamp);
+        w[1] |= omod << 27;
+        w
+    };
+    let (fmin, one, nz) = (0x0080_0000u32, fb(1.0), 0x8000_0000u32);
+    vc(&mut z, "v_mad_f32", &[(1, fmin), (2, one), (3, 0)], &mo(0x141, 3, false), &[10], &[0]);
+    vc(&mut z, "v_mad_f32", &[(1, fmin | nz), (2, one), (3, nz)], &mo(0x141, 3, false), &[10], &[nz]);
+    vc(&mut z, "v_mad_f32", &[(1, fmin | nz), (2, one), (3, nz)], &mo(0x141, 3, true), &[10], &[0]);
+    vc(&mut z, "v_mad_f32", &[(1, 0x00c0_0000), (2, one), (3, fmin | nz)], &mo(0x141, 1, false), &[10], &[0]);
+    vc(&mut z, "v_mad_f32", &[(1, 0x00c0_0000), (2, one), (3, fmin | nz)], &mo(0x141, 2, false), &[10], &[0]);
+    vc(&mut z, "v_mad_f32", &[(1, 0x0040_0000), (2, one), (3, 0)], &mo(0x141, 1, false), &[10], &[0]);
+    vc(&mut z, "v_mad_legacy_f32", &[(1, fmin), (2, one), (3, 0)], &mo(0x140, 3, false), &[10], &[0]);
+    vc(&mut z, "v_mad_legacy_f32", &[(1, 0x00c0_0000), (2, one), (3, fmin | nz)], &mo(0x140, 1, false), &[10], &[0]);
+    vc(&mut z, "v_mad_f32", &[(1, fb(3.0)), (2, one), (3, fb(1.0))], &mo(0x141, 3, false), &[10], &[fb(2.0)]);
     vc(&mut z, "v_mac_f32", &[(1, tiny), (2, tiny), (10, 0)], &[vop2(0x1f, 10, v(1), 2)], &[10], &[0]);
     vc(&mut z, "v_madak_f32", &[(1, 0x200), (2, big)], &[vop2(0x21, 10, v(1), 2), 0], &[10], &[0]);
     vc(&mut z, "v_madmk_f32", &[(1, tiny), (2, 0)], &[vop2(0x20, 10, v(1), 2), tiny], &[10], &[0]);
