@@ -783,7 +783,7 @@ fn vop3_ops(s: &mut Suite) {
         ("v_mad_i32_i24", 0x142, Class::U32, |a, b, c| ((s24(a) * s24(b)) as u32).wrapping_add(c)),
         ("v_mad_u32_u24", 0x143, Class::U32, |a, b, c| (((a as u64 & 0xff_ffff) * (b as u64 & 0xff_ffff)) as u32).wrapping_add(c)),
         ("v_bfe_u32", 0x148, Class::U32, |a, off, w| bfe_u(a, off, w)),
-        ("v_bfe_i32", 0x149, Class::Small, |a, b, c| bfe_i(a, b, c)),
+        ("v_bfe_i32", 0x149, Class::U32, |a, off, w| bfe_i(a, off, w)),
         ("v_bfi_b32", 0x14a, Class::U32, |a, b, c| (a & b) | (!a & c)),
         ("v_lerp_u8", 0x14d, Class::U32, |a, b, c| (0..4).fold(0, |acc, k| acc | (((((a >> (8 * k)) & 0xff) + ((b >> (8 * k)) & 0xff) + ((c >> (8 * k)) & 1)) >> 1) << (8 * k)))),
         ("v_alignbit_b32", 0x14e, Class::Small, |a, b, c| ((((a as u64) << 32) | b as u64) >> (c & 31)) as u32),
