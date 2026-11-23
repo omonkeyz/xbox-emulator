@@ -384,6 +384,39 @@ fn vertex_fetch_reads_sparse_attributes_from_a_vertex_buffer() {
     assert_eq!(result.unwrap_or_else(|e| panic!("{e}\n{}", vs.hlsl)), [0, 0, 0x1234, 0x3f80_0000]);
 }
 
+#[test]
+fn d3d12_takes_a_changed_container_only_with_the_recomputed_dxil_hash() {
+    use tombox_xshader::dxil_hash::{stamp, stored, Stored};
+    let expect = [0x11, 0x22, 0x33, 0x44];
+    let code = dxc::compile("uint4 main() : SV_Target { return uint4(0x11, 0x22, 0x33, 0x44); }", "ps_6_0").unwrap();
+    assert_eq!(stored(&code), Ok(Stored::Retail));
+    let parts = tombox_xshader::Dxbc::parse(&code).unwrap().chunks;
+    let names: Vec<String> = parts.iter().map(|p| String::from_utf8_lossy(&p.fourcc).into_owned()).collect();
+    let part = [b"HASH", b"ILDN", b"STAT"]
+        .into_iter()
+        .find_map(|tag| parts.iter().find(|p| p.fourcc == *tag && p.size != 0))
+        .unwrap_or_else(|| panic!("no part to change without changing the program, container has {names:?}"));
+    let mut stale = code.clone();
+    stale[part.offset + part.size - 1] ^= 1;
+    assert_eq!(stored(&stale), Ok(Stored::Mismatch));
+    let mut stamped = stale.clone();
+    stamp(&mut stamped).unwrap();
+    assert_eq!(stored(&stamped), Ok(Stored::Retail));
+    assert_ne!(stamped[4..20], code[4..20]);
+    let mut zero = code.clone();
+    zero[4..20].fill(0);
+    let mut c = CTX.get_or_init(|| Mutex::new(unsafe { ctx_new() })).lock().unwrap_or_else(|e| e.into_inner());
+    let changed = String::from_utf8_lossy(&part.fourcc).into_owned();
+    unsafe {
+        assert_eq!(draw(&mut c, &code), Ok(expect), "container as DXC wrote it");
+        assert_eq!(draw(&mut c, &stamped), Ok(expect), "{changed} part changed, digest recomputed");
+        let refused = draw(&mut c, &stale).expect_err("a stale digest was accepted");
+        assert!(refused.contains("CreateGraphicsPipelineState"), "{changed} part changed, digest left: {refused}");
+        let refused = draw(&mut c, &zero).expect_err("a zero digest was accepted");
+        assert!(refused.contains("CreateGraphicsPipelineState"), "zero digest: {refused}");
+    }
+}
+
 pub fn hlsl_of(words: &[u32]) -> Result<String, String> {
     translate(&shader(words)).map(|t| t.hlsl)
 }

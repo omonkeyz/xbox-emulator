@@ -18,6 +18,7 @@ pub mod hlsl;
 pub mod dxc;
 pub mod meta;
 pub mod dxil_meta;
+pub mod dxil_hash;
 pub mod decls;
 pub mod uearchive;
 pub mod rdna2;
