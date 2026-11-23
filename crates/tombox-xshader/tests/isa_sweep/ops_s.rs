@@ -95,7 +95,7 @@ fn sop2_ops(s: &mut Suite) {
         ("s_lshl_b32", 0x1e, Class::Small, |a, b, _| { let r = a << (b & 31); (r, Some(nz(r as u64))) }),
         ("s_lshr_b32", 0x20, Class::Small, |a, b, _| { let r = a >> (b & 31); (r, Some(nz(r as u64))) }),
         ("s_ashr_i32", 0x22, Class::Small, |a, b, _| { let r = ((a as i32) >> (b & 31)) as u32; (r, Some(nz(r as u64))) }),
-        ("s_bfm_b32", 0x24, Class::Small, |a, b, _| ((((1u64 << (a & 31)) - 1) as u32) << (b & 31), None)),
+        ("s_bfm_b32", 0x24, Class::U32, |a, b, _| ((((1u64 << (a & 31)) - 1) as u32) << (b & 31), None)),
         ("s_mul_i32", 0x26, Class::U32, |a, b, _| ((a as i32).wrapping_mul(b as i32) as u32, None)),
         ("s_absdiff_i32", 0x2c, Class::U32, |a, b, _| { let r = (a as i32).wrapping_sub(b as i32).wrapping_abs() as u32; (r, Some(nz(r as u64))) }),
         ("s_lshl1_add_u32", 0x2e, Class::U32, |a, b, _| { let r = ((a as u64) << 1) + b as u64; (r as u32, Some((r >> 32 != 0) as u32)) }),
