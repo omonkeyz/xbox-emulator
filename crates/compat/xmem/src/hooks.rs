@@ -20,6 +20,9 @@ extern "system" {
 
 const TLS_OUT_OF_INDEXES: u32 = 0xffff_ffff;
 const SLOTS: usize = 4;
+pub(crate) const MEM_SLOTS: usize = 8;
+pub(crate) const WIN32_DLLS: &[&[u8]] = &[b"kernel32.dll\0", b"kernelbase.dll\0"];
+pub(crate) const NTDLL_DLLS: &[&[u8]] = &[b"ntdll.dll\0"];
 
 static TLS: AtomicU32 = AtomicU32::new(TLS_OUT_OF_INDEXES);
 
@@ -265,7 +268,13 @@ fn heap_known() -> &'static Vec<(usize, Kind)> {
 pub(crate) fn is_ours(v: usize) -> bool {
     KINDS.iter().any(|&k| wrappers(k).contains(&v))
         || winhttp_wrappers().contains(&v)
-        || [vfree_w as *const () as usize, valloc_w as *const () as usize, valloc2_w as *const () as usize, map3_w as *const () as usize, vallocex_w as *const () as usize, vfreeex_w as *const () as usize].contains(&v)
+        || vfree_wrappers().contains(&v)
+        || valloc_wrappers().contains(&v)
+        || valloc2_wrappers().contains(&v)
+        || map3_wrappers().contains(&v)
+        || vallocex_wrappers().contains(&v)
+        || vfreeex_wrappers().contains(&v)
+        || crate::range_hooks::wrappers().contains(&v)
         || crate::crt_hooks::wrappers().contains(&v)
 }
 
@@ -389,13 +398,29 @@ pub fn install_winhttp_hooks() {
     record(M, "XMemSetWinHttpHooks", &format!("WinHttp imports redirected through hook dispatch: {n} slots"));
 }
 
-static VFREE_ORIG: AtomicUsize = AtomicUsize::new(0);
-static VALLOC2_ORIG: AtomicUsize = AtomicUsize::new(0);
-static MAP3_ORIG: AtomicUsize = AtomicUsize::new(0);
+macro_rules! mem_slot_array {
+    ($f:ident) => {
+        [
+            $f::<0> as *const () as usize,
+            $f::<1> as *const () as usize,
+            $f::<2> as *const () as usize,
+            $f::<3> as *const () as usize,
+            $f::<4> as *const () as usize,
+            $f::<5> as *const () as usize,
+            $f::<6> as *const () as usize,
+            $f::<7> as *const () as usize,
+        ]
+    };
+}
+pub(crate) use mem_slot_array;
 
-unsafe extern "system" fn vfree_w(addr: usize, size: usize, kind: u32) -> i32 {
+static VFREE_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
+static VALLOC2_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
+static MAP3_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
+
+unsafe extern "system" fn vfree_w<const I: usize>(addr: usize, size: usize, kind: u32) -> i32 {
     let (lo, hi) = crate::epoch::bump_free(addr, size);
-    let r = crate::title_acct::track_free(addr, size, kind, || vfree_inner(addr, size, kind));
+    let r = crate::title_acct::track_free(addr, size, kind, || vfree_inner(I, addr, size, kind));
     if r != 0 && kind & MEM_RELEASE != 0 {
         crate::write_watch::forget_range(addr, size);
     }
@@ -403,7 +428,7 @@ unsafe extern "system" fn vfree_w(addr: usize, size: usize, kind: u32) -> i32 {
     r
 }
 
-unsafe fn vfree_inner(addr: usize, size: usize, kind: u32) -> i32 {
+unsafe fn vfree_inner(slot: usize, addr: usize, size: usize, kind: u32) -> i32 {
     if kind & MEM_RELEASE != 0 {
         if let Some(r) = crate::phys::release_region(addr, size) {
             return r;
@@ -417,18 +442,18 @@ unsafe fn vfree_inner(addr: usize, size: usize, kind: u32) -> i32 {
             return r;
         }
     }
-    let f = VFREE_ORIG.load(Ordering::Acquire);
+    let f = VFREE_ORIG[slot].load(Ordering::Acquire);
     let f = if f != 0 { f } else { VirtualFree as *const () as usize };
     core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, u32) -> i32>(f)(addr, size, kind)
 }
 
-static VALLOC_ORIG: AtomicUsize = AtomicUsize::new(0);
+static VALLOC_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
 
-unsafe extern "system" fn valloc_w(addr: usize, size: usize, kind: u32, protect: u32) -> usize {
-    crate::title_acct::track_alloc(addr, size, kind, || valloc_inner(addr, size, kind, protect))
+unsafe extern "system" fn valloc_w<const I: usize>(addr: usize, size: usize, kind: u32, protect: u32) -> usize {
+    crate::title_acct::track_alloc(addr, size, kind, || valloc_inner(I, addr, size, kind, protect))
 }
 
-unsafe fn valloc_inner(addr: usize, size: usize, kind: u32, protect: u32) -> usize {
+unsafe fn valloc_inner(slot: usize, addr: usize, size: usize, kind: u32, protect: u32) -> usize {
     if addr != 0 && kind & MEM_COMMIT != 0 {
         if let Some(r) = crate::phys::commit_owned(addr, size, protect) {
             crate::write_note::committed(r, size);
@@ -444,7 +469,7 @@ unsafe fn valloc_inner(addr: usize, size: usize, kind: u32, protect: u32) -> usi
             return r;
         }
     }
-    let f = VALLOC_ORIG.load(Ordering::Acquire);
+    let f = VALLOC_ORIG[slot].load(Ordering::Acquire);
     let f = if f != 0 { f } else { VirtualAlloc as *const () as usize };
     let r = core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, u32, u32) -> usize>(f)(addr, size, kind, protect);
     if r != 0 && kind & MEM_RESERVE != 0 {
@@ -461,7 +486,7 @@ unsafe fn valloc_inner(addr: usize, size: usize, kind: u32, protect: u32) -> usi
 }
 
 pub fn valloc_wrapper() -> usize {
-    valloc_w as *const () as usize
+    vfree_rule(b"kernel32.dll", Some(b"VirtualAlloc"), VirtualAlloc as *const () as usize).unwrap_or(valloc_w::<0> as *const () as usize)
 }
 
 const PARAM_PARTITION_HANDLE: u64 = 3;
@@ -482,14 +507,14 @@ fn strip_partition(params: usize, count: u32) -> Vec<[u64; 2]> {
     out
 }
 
-fn is_self(process: usize) -> bool {
+pub(crate) fn is_self(process: usize) -> bool {
     process == usize::MAX || process == 0 || unsafe { GetProcessId(process) == GetCurrentProcessId() }
 }
 
-unsafe extern "system" fn valloc2_w(process: usize, base: usize, size: usize, kind: u32, protect: u32, params: usize, count: u32) -> usize {
+unsafe extern "system" fn valloc2_w<const I: usize>(process: usize, base: usize, size: usize, kind: u32, protect: u32, params: usize, count: u32) -> usize {
     let v = strip_partition(params, count);
     let (pp, pc) = if v.is_empty() { (0, 0) } else { (v.as_ptr() as usize, v.len() as u32) };
-    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32, u32, usize, u32) -> usize>(VALLOC2_ORIG.load(Ordering::Acquire))(process, base, size, kind, protect, pp, pc);
+    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32, u32, usize, u32) -> usize>(VALLOC2_ORIG[I].load(Ordering::Acquire))(process, base, size, kind, protect, pp, pc);
     if is_self(process) {
         crate::title_acct::track_alloc(base, size, kind, call)
     } else {
@@ -497,11 +522,11 @@ unsafe extern "system" fn valloc2_w(process: usize, base: usize, size: usize, ki
     }
 }
 
-static VALLOCEX_ORIG: AtomicUsize = AtomicUsize::new(0);
-static VFREEEX_ORIG: AtomicUsize = AtomicUsize::new(0);
+static VALLOCEX_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
+static VFREEEX_ORIG: [AtomicUsize; MEM_SLOTS] = [const { AtomicUsize::new(0) }; MEM_SLOTS];
 
-unsafe extern "system" fn vallocex_w(process: usize, addr: usize, size: usize, kind: u32, protect: u32) -> usize {
-    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32, u32) -> usize>(VALLOCEX_ORIG.load(Ordering::Acquire))(process, addr, size, kind, protect);
+unsafe extern "system" fn vallocex_w<const I: usize>(process: usize, addr: usize, size: usize, kind: u32, protect: u32) -> usize {
+    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32, u32) -> usize>(VALLOCEX_ORIG[I].load(Ordering::Acquire))(process, addr, size, kind, protect);
     if is_self(process) {
         let r = crate::title_acct::track_alloc(addr, size, kind, call);
         if r != 0 && kind & MEM_RESERVE != 0 {
@@ -513,8 +538,8 @@ unsafe extern "system" fn vallocex_w(process: usize, addr: usize, size: usize, k
     }
 }
 
-unsafe extern "system" fn vfreeex_w(process: usize, addr: usize, size: usize, kind: u32) -> i32 {
-    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32) -> i32>(VFREEEX_ORIG.load(Ordering::Acquire))(process, addr, size, kind);
+unsafe extern "system" fn vfreeex_w<const I: usize>(process: usize, addr: usize, size: usize, kind: u32) -> i32 {
+    let call = || core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u32) -> i32>(VFREEEX_ORIG[I].load(Ordering::Acquire))(process, addr, size, kind);
     if is_self(process) {
         let (lo, hi) = crate::epoch::bump_free(addr, size);
         let r = crate::title_acct::track_free(addr, size, kind, call);
@@ -528,16 +553,40 @@ unsafe extern "system" fn vfreeex_w(process: usize, addr: usize, size: usize, ki
     }
 }
 
+fn vfree_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(vfree_w)
+}
+
+fn valloc_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(valloc_w)
+}
+
+fn valloc2_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(valloc2_w)
+}
+
+fn map3_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(map3_w)
+}
+
+fn vallocex_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(vallocex_w)
+}
+
+fn vfreeex_wrappers() -> [usize; MEM_SLOTS] {
+    mem_slot_array!(vfreeex_w)
+}
+
 pub fn vex_rule(_dll: &[u8], name: Option<&[u8]>, value: usize) -> Option<usize> {
-    single_rule(&[b"VirtualAllocEx"], &VALLOCEX_ORIG, vallocex_w as *const () as usize, name, value)
-        .or_else(|| single_rule(&[b"VirtualFreeEx"], &VFREEEX_ORIG, vfreeex_w as *const () as usize, name, value))
+    multi_rule(WIN32_DLLS, &[b"VirtualAllocEx"], &VALLOCEX_ORIG, &vallocex_wrappers(), name, value)
+        .or_else(|| multi_rule(WIN32_DLLS, &[b"VirtualFreeEx"], &VFREEEX_ORIG, &vfreeex_wrappers(), name, value))
 }
 
 #[cfg(test)]
 pub fn ex_wrappers_for_test() -> (usize, usize) {
-    vex_rule(b"KERNEL32.dll", Some(b"VirtualAllocEx"), VirtualAllocEx as *const () as usize);
-    vex_rule(b"KERNEL32.dll", Some(b"VirtualFreeEx"), VirtualFreeEx as *const () as usize);
-    (vallocex_w as *const () as usize, vfreeex_w as *const () as usize)
+    let a = vex_rule(b"KERNEL32.dll", Some(b"VirtualAllocEx"), VirtualAllocEx as *const () as usize).expect("VirtualAllocEx hook");
+    let f = vex_rule(b"KERNEL32.dll", Some(b"VirtualFreeEx"), VirtualFreeEx as *const () as usize).expect("VirtualFreeEx hook");
+    (a, f)
 }
 
 #[cfg(test)]
@@ -547,10 +596,9 @@ pub fn partition_wrappers_for_test() -> (usize, usize) {
         fn GetProcAddress(h: usize, name: *const u8) -> usize;
     }
     let kb = unsafe { GetModuleHandleA(b"kernelbase.dll\0".as_ptr()) };
-    partition_rule(b"api-ms-win-core-memory-l1-1-6.dll", Some(b"VirtualAlloc2"), unsafe { GetProcAddress(kb, b"VirtualAlloc2\0".as_ptr()) });
-    partition_rule(b"api-ms-win-core-memory-l1-1-6.dll", Some(b"MapViewOfFile3"), unsafe { GetProcAddress(kb, b"MapViewOfFile3\0".as_ptr()) });
-    assert!(VALLOC2_ORIG.load(Ordering::Acquire) != 0 && MAP3_ORIG.load(Ordering::Acquire) != 0);
-    (valloc2_w as *const () as usize, map3_w as *const () as usize)
+    let a2 = partition_rule(b"api-ms-win-core-memory-l1-1-6.dll", Some(b"VirtualAlloc2"), unsafe { GetProcAddress(kb, b"VirtualAlloc2\0".as_ptr()) }).expect("VirtualAlloc2 hook");
+    let m3 = partition_rule(b"api-ms-win-core-memory-l1-1-6.dll", Some(b"MapViewOfFile3"), unsafe { GetProcAddress(kb, b"MapViewOfFile3\0".as_ptr()) }).expect("MapViewOfFile3 hook");
+    (a2, m3)
 }
 
 #[cfg(test)]
@@ -560,40 +608,43 @@ extern "system" {
     fn VirtualFreeEx(process: usize, addr: usize, size: usize, kind: u32) -> i32;
 }
 
-unsafe extern "system" fn map3_w(file: usize, process: usize, base: usize, offset: u64, size: usize, kind: u32, protect: u32, params: usize, count: u32) -> usize {
+unsafe extern "system" fn map3_w<const I: usize>(file: usize, process: usize, base: usize, offset: u64, size: usize, kind: u32, protect: u32, params: usize, count: u32) -> usize {
     let v = strip_partition(params, count);
     let (pp, pc) = if v.is_empty() { (0, 0) } else { (v.as_ptr() as usize, v.len() as u32) };
-    core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u64, usize, u32, u32, usize, u32) -> usize>(MAP3_ORIG.load(Ordering::Acquire))(file, process, base, offset, size, kind, protect, pp, pc)
+    core::mem::transmute::<usize, unsafe extern "system" fn(usize, usize, usize, u64, usize, u32, u32, usize, u32) -> usize>(MAP3_ORIG[I].load(Ordering::Acquire))(file, process, base, offset, size, kind, protect, pp, pc)
 }
 
-pub(crate) fn single_rule(names: &[&[u8]], orig: &AtomicUsize, wrapper: usize, name: Option<&[u8]>, value: usize) -> Option<usize> {
-    if is_ours(value) {
+pub(crate) fn multi_rule<const N: usize>(dlls: &[&[u8]], names: &[&[u8]], origs: &[AtomicUsize; N], wrappers: &[usize; N], name: Option<&[u8]>, value: usize) -> Option<usize> {
+    if value == 0 || is_ours(value) {
         return None;
     }
     let by_name = name.map(|n| names.contains(&n)).unwrap_or(false);
     let by_value = !by_name && {
         let z: Vec<Vec<u8>> = names.iter().map(|n| [*n, b"\0"].concat()).collect();
         let refs: Vec<&[u8]> = z.iter().map(|v| v.as_slice()).collect();
-        resolve(&[b"kernel32.dll\0", b"kernelbase.dll\0"], &refs).iter().any(|(f, _)| *f == value)
+        resolve(dlls, &refs).iter().any(|(f, _)| *f == value)
     };
     if !by_name && !by_value {
         return None;
     }
-    match orig.compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Some(wrapper),
-        Err(v) if v == value => Some(wrapper),
-        Err(_) => None,
+    for (i, s) in origs.iter().enumerate() {
+        match s.compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(wrappers[i]),
+            Err(v) if v == value => return Some(wrappers[i]),
+            Err(_) => {}
+        }
     }
+    None
 }
 
 pub fn vfree_rule(_dll: &[u8], name: Option<&[u8]>, value: usize) -> Option<usize> {
-    single_rule(&[b"VirtualFree"], &VFREE_ORIG, vfree_w as *const () as usize, name, value)
-        .or_else(|| single_rule(&[b"VirtualAlloc"], &VALLOC_ORIG, valloc_w as *const () as usize, name, value))
+    multi_rule(WIN32_DLLS, &[b"VirtualFree"], &VFREE_ORIG, &vfree_wrappers(), name, value)
+        .or_else(|| multi_rule(WIN32_DLLS, &[b"VirtualAlloc"], &VALLOC_ORIG, &valloc_wrappers(), name, value))
 }
 
 pub fn partition_rule(_dll: &[u8], name: Option<&[u8]>, value: usize) -> Option<usize> {
-    single_rule(&[b"VirtualAlloc2"], &VALLOC2_ORIG, valloc2_w as *const () as usize, name, value)
-        .or_else(|| single_rule(&[b"MapViewOfFile3"], &MAP3_ORIG, map3_w as *const () as usize, name, value))
+    multi_rule(WIN32_DLLS, &[b"VirtualAlloc2"], &VALLOC2_ORIG, &valloc2_wrappers(), name, value)
+        .or_else(|| multi_rule(WIN32_DLLS, &[b"MapViewOfFile3"], &MAP3_ORIG, &map3_wrappers(), name, value))
 }
 
 pub fn install_vfree_hook() {
@@ -613,7 +664,7 @@ pub fn install_partition_hooks() {
 }
 
 pub fn vfree_wrapper() -> usize {
-    vfree_w as *const () as usize
+    vfree_rule(b"kernel32.dll", Some(b"VirtualFree"), VirtualFree as *const () as usize).unwrap_or(vfree_w::<0> as *const () as usize)
 }
 
 #[cfg(test)]
@@ -708,5 +759,48 @@ mod ww_heap_tests {
             assert!(!crate::ww_heap::is_block(o));
             assert_eq!(free(other, 0, o), 1);
         }
+    }
+
+    #[test]
+    fn multi_rule_claims_per_target_slots_and_reuses_or_rejects_full() {
+        static ORIG: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+        let wraps = [0x1111_0001usize, 0x1111_0002usize];
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0), None);
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0x2222_0001), Some(wraps[0]));
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0x2222_0002), Some(wraps[1]));
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0x2222_0001), Some(wraps[0]));
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0x2222_0002), Some(wraps[1]));
+        assert_eq!(multi_rule(WIN32_DLLS, &[b"VirtualFree"], &ORIG, &wraps, Some(b"VirtualFree"), 0x2222_0003), None);
+    }
+
+    #[test]
+    fn multi_target_vfree_dispatches_to_distinct_originals_and_bumps_epoch() {
+        static HITS_A: AtomicUsize = AtomicUsize::new(0);
+        static HITS_B: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "system" fn fake_free_a(_addr: usize, _size: usize, _kind: u32) -> i32 {
+            HITS_A.fetch_add(1, Ordering::AcqRel);
+            1
+        }
+        unsafe extern "system" fn fake_free_b(_addr: usize, _size: usize, _kind: u32) -> i32 {
+            HITS_B.fetch_add(1, Ordering::AcqRel);
+            0
+        }
+        let wa = vfree_rule(b"kernel32.dll", Some(b"VirtualFree"), fake_free_a as *const () as usize).expect("first target slot");
+        let wb = vfree_rule(b"kernelbase.dll", Some(b"VirtualFree"), fake_free_b as *const () as usize).expect("second target slot");
+        assert_ne!(wa, wb);
+        assert!(is_ours(wa) && is_ours(wb));
+        assert_eq!(vfree_rule(b"kernel32.dll", Some(b"VirtualFree"), fake_free_a as *const () as usize), Some(wa));
+        assert_eq!(vfree_rule(b"kernel32.dll", Some(b"VirtualFree"), wa), None);
+
+        let fa: unsafe extern "system" fn(usize, usize, u32) -> i32 = unsafe { core::mem::transmute(wa) };
+        let fb: unsafe extern "system" fn(usize, usize, u32) -> i32 = unsafe { core::mem::transmute(wb) };
+        let s0 = crate::epoch::TomboxAddressSpaceEpoch();
+        assert_eq!(unsafe { fa(0x5555_1000, 0x1000, MEM_RESET) }, 1);
+        assert!(crate::epoch::TomboxAddressSpaceChangedSince(s0, 0x5555_1000, 0x5555_2000) != 0);
+        assert_eq!((HITS_A.load(Ordering::Acquire), HITS_B.load(Ordering::Acquire)), (1, 0));
+        let s1 = crate::epoch::TomboxAddressSpaceEpoch();
+        assert_eq!(unsafe { fb(0x6666_1000, 0x1000, MEM_RESET) }, 0);
+        assert!(crate::epoch::TomboxAddressSpaceChangedSince(s1, 0x6666_1000, 0x6666_2000) != 0);
+        assert_eq!((HITS_A.load(Ordering::Acquire), HITS_B.load(Ordering::Acquire)), (1, 1));
     }
 }

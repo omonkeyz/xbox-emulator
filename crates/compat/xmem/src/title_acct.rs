@@ -245,19 +245,27 @@ pub fn track_alloc(addr: usize, size: usize, kind: u32, op: impl FnOnce() -> usi
     track_commit(if addr == 0 { None } else { Some(commit_range(addr, size, kind)) }, op)
 }
 
-pub fn track_free(addr: usize, size: usize, kind: u32, op: impl FnOnce() -> i32) -> i32 {
+fn track_free_with(addr: usize, size: usize, kind: u32, ok: impl FnOnce(i32) -> bool, op: impl FnOnce() -> i32) -> i32 {
     if !enabled() || kind & (MEM_RELEASE | MEM_DECOMMIT) == 0 || addr == 0 {
         return op();
     }
     let (lo, hi) = free_range(addr, size);
     let before = committed_private(lo, hi);
     let r = op();
-    if r != 0 {
+    if ok(r) {
         let gone = kind & MEM_RELEASE != 0 && kind & MEM_PRESERVE_PLACEHOLDER == 0;
         let after = if gone { 0 } else { committed_private(lo, hi) };
         note_virt(after as i64 - before as i64);
     }
     r
+}
+
+pub fn track_free(addr: usize, size: usize, kind: u32, op: impl FnOnce() -> i32) -> i32 {
+    track_free_with(addr, size, kind, |r| r != 0, op)
+}
+
+pub fn track_free_nt(addr: usize, size: usize, kind: u32, op: impl FnOnce() -> i32) -> i32 {
+    track_free_with(addr, size, kind, |st| st >= 0, op)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -292,6 +300,7 @@ pub fn title_rule(dll: &[u8], name: Option<&[u8]>, value: usize) -> Option<usize
         .or_else(|| crate::hooks::vfree_rule(dll, name, value))
         .or_else(|| crate::hooks::vex_rule(dll, name, value))
         .or_else(|| crate::hooks::partition_rule(dll, name, value))
+        .or_else(|| crate::range_hooks::rule(dll, name, value))
         .or_else(|| crate::crt_hooks::crt_rule(dll, name, value))
 }
 
