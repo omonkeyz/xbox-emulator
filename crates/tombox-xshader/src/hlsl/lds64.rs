@@ -57,7 +57,7 @@ fn compute_pgm_rsrc2(ex: &ShaderExtract) -> Result<u32, String> {
     le32(&ex.fssm, at).ok_or_else(|| format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 not found in the shader container (byte {at:#x} is past its end), so the LDS size is unknown and the lock word cannot be placed"))
 }
 
-pub(super) fn lds_dwords(ex: &ShaderExtract) -> Result<u32, String> {
+fn declared_dwords(ex: &ShaderExtract) -> Result<u32, String> {
     let w = compute_pgm_rsrc2(ex)?;
     if w & RSRC2_MUST_BE_ZERO != 0 {
         return Err(format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 {w:#010x} has TRAP_PRESENT, EXCP_EN or bit 31 set, not trusted as an LDS size"));
@@ -66,6 +66,11 @@ pub(super) fn lds_dwords(ex: &ShaderExtract) -> Result<u32, String> {
     if n == 0 {
         return Err(format!("64-bit LDS atomic: COMPUTE_PGM_RSRC2 {w:#010x} declares no LDS"));
     }
+    Ok(n)
+}
+
+pub(super) fn lds_dwords(ex: &ShaderExtract) -> Result<u32, String> {
+    let n = declared_dwords(ex)?;
     if n * 4 + 4 > GROUPSHARED_BYTES {
         return Err(format!("64-bit LDS atomic: the shader declares {} bytes of LDS, no room for the lock word under the {GROUPSHARED_BYTES}-byte groupshared limit", n * 4));
     }
@@ -104,13 +109,25 @@ fn pair_hi(m: &str, o: &Opnd) -> Result<Opnd, String> {
 
 impl Emitter<'_> {
     pub(super) fn plan_lds64(&mut self) {
-        if self.is_cs && !self.is_ms() && self.insns.iter().any(|i| i.enc == Enc::Ds && is_atomic64(&i.mnemonic)) {
+        if !self.is_cs || self.is_ms() || self.is_as() {
+            return;
+        }
+        let ds: Vec<&Insn> = self.insns.iter().filter(|i| i.enc == Enc::Ds && !gds::is_gds(i)).collect();
+        if ds.iter().any(|i| is_atomic64(&i.mnemonic)) {
             self.lds64_n = lds_dwords(self.ex).ok();
+            self.lds_n = self.lds64_n;
+        } else if !ds.is_empty() {
+            self.lds_n = declared_dwords(self.ex).ok().filter(|&n| n * 4 <= GROUPSHARED_BYTES && ds.iter().all(|i| ds_reach(i).is_none_or(|r| r <= n * 4)));
         }
     }
 
+    pub(super) fn lds_dwords_planned(&self) -> Option<u32> {
+        self.lds_n
+    }
+
     pub(super) fn lds_wrap(&self) -> String {
-        match self.lds64_n {
+        match self.lds_n {
+            Some(n) if n.is_power_of_two() => format!("& {}u", n - 1),
             Some(n) => format!("% {n}u"),
             None => "& 8191u".into(),
         }

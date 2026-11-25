@@ -91,11 +91,14 @@ impl Emitter<'_> {
         if !self.is_cs || !self.body.contains("tb_xl[") {
             return Ok(None);
         }
-        if self.uses_lds {
-            return Err("ds_permute/ds_bpermute in a compute shader that also uses LDS: the 32-lane exchange needs groupshared space beyond the 32 KiB LDS mirror".into());
-        }
         let (x, y, z) = self.cs_threads();
         let n = x * y * z;
+        if self.uses_lds {
+            let lds = self.lds_dwords_planned().unwrap_or(8192) + u32::from(self.lds64_dwords()?.is_some());
+            if (lds + 3 * n) * 4 > 32768 {
+                return Err("ds_permute/ds_bpermute in a compute shader that also uses LDS: the 32-lane exchange needs groupshared space beyond the 32 KiB LDS mirror".into());
+            }
+        }
         Ok(Some(format!("#define TB_XL_GS 1\ngroupshared uint tb_xl[{n}];\ngroupshared uint tb_xm[{n}];\ngroupshared uint tb_xa[{n}];")))
     }
 

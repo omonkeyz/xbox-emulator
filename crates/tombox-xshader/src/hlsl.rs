@@ -582,6 +582,7 @@ struct Emitter<'a> {
     lds_nested: bool,
     lds64_nested: bool,
     lds64_n: Option<u32>,
+    lds_n: Option<u32>,
     brace_depth: i32,
     /// Shader reads constant tables embedded in its code section.
     uses_code: bool,
@@ -1435,6 +1436,7 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         lds_nested: false,
         lds64_nested: false,
         lds64_n: None,
+        lds_n: None,
         brace_depth: 0,
         uses_code: false,
         vreg_array: false,
@@ -8013,7 +8015,7 @@ impl<'a> Emitter<'a> {
 groupshared uint tb_lds64_lock; // held by every 64-bit LDS atomic: they are serialised against each other only, not against a 32-bit atomic or a plain write to the same dwords");
                 }
                 None => {
-                    let _ = writeln!(h, "groupshared uint tb_lds[8192];");
+                    let _ = writeln!(h, "groupshared uint tb_lds[{}];", self.lds_dwords_planned().unwrap_or(8192));
                 }
             }
         }

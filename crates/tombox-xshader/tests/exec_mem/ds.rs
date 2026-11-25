@@ -79,6 +79,27 @@ fn cc(m: &'static str, op: [u32; 2], body: Vec<u32>, outs: &[u32], f: &dyn Fn(u3
 
 #[test]
 fn ds_lds_compute() {
+    run_cs_cases("ds_lds", &lds_cases());
+}
+
+#[test]
+fn ds_lds_compute_in_the_declared_lds() {
+    let cs = lds_cases();
+    let h = translate(&cs_extract_fssm(&cs[0].words, T, &lds_fssm(16))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[2048];") && h.contains("& 2047u]") && !h.contains("& 8191u]") && !h.contains("tb_lds64_lock"), "{h}");
+    run_cs_cases_fssm("ds_lds_declared", &cs, &lds_fssm(16));
+    let mut b = ds(0x0d, 0x1004, 1, 2, 0, 0).to_vec();
+    b.extend_from_slice(&ds(0x36, 0x1004, 3, 0, 0, 10));
+    let far = cs_prog(&b, &[10]);
+    for fssm in [lds_fssm(1), lds_fssm(80), Vec::new()] {
+        let h = translate(&cs_extract_fssm(&far, T, &fssm)).map(|t| t.hlsl).unwrap();
+        assert!(h.contains("groupshared uint tb_lds[8192];") && h.contains("& 8191u]"), "{h}");
+    }
+    let h = translate(&cs_extract_fssm(&far, T, &lds_fssm(9))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[1152];") && h.contains("% 1152u]"), "{h}");
+}
+
+fn lds_cases() -> Vec<CsCase> {
     let mut cs = Vec::new();
     let nb = |t: u32| t ^ 1;
     for &off in &[0u32, 0x100, 0x1004] {
@@ -200,7 +221,7 @@ fn ds_lds_compute() {
         b.extend_from_slice(&ds(0x36, 0, 3, 0, 0, 10));
         cs.push(cc(mr, a, b, &[11, 10], &move |t| vec![ev(t), f(ev(nb(t)), dv(nb(t)))]));
     }
-    run_cs_cases("ds_lds", &cs);
+    cs
 }
 
 fn reg_val(r: u32, t: u32) -> u32 {
@@ -553,6 +574,11 @@ fn ds_permute_with_lds_is_refused() {
         Err(e) => e,
     };
     assert!(e.contains("groupshared"), "{e}");
+    let op = ds(0xb3, 0, 16, 2, 0, 10);
+    let cs = vec![cc("ds_bpermute_b32", op, b.clone(), &[10], &|t| vec![dv(t)])];
+    run_cs_cases_fssm("ds_permute_with_declared_lds", &cs, &lds_fssm(1));
+    let e = translate(&cs_extract_fssm(&w, T, &lds_fssm(63))).err().expect("no room for the exchange next to 63 granules");
+    assert!(e.contains("groupshared"), "{e}");
 }
 
 #[test]
@@ -793,8 +819,8 @@ fn ds_lds_atomic64_sizing() {
     }
     assert!(translate(&cs_extract_fssm(&arms(ds(0x41, 0, 5, 22, 0, 10)), T, &lds_fssm(5))).is_ok());
     let plain = cs_prog(&ds(0x00, 0, 1, 2, 0, 10), &[10]);
-    for fssm in [Vec::new(), lds_fssm(5)] {
-        let h = translate(&cs_extract_fssm(&plain, T, &fssm)).map(|t| t.hlsl).unwrap();
-        assert!(h.contains("groupshared uint tb_lds[8192];") && h.contains("& 8191u]") && !h.contains("tb_lds64_lock"));
-    }
+    let h = translate(&cs_extract_fssm(&plain, T, &[])).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[8192];") && h.contains("& 8191u]") && !h.contains("tb_lds64_lock"));
+    let h = translate(&cs_extract_fssm(&plain, T, &lds_fssm(5))).map(|t| t.hlsl).unwrap();
+    assert!(h.contains("groupshared uint tb_lds[640];") && h.contains("% 640u]") && !h.contains("tb_lds64_lock"));
 }
