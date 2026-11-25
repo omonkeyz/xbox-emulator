@@ -91,3 +91,33 @@ fn store_to_srv_range_is_an_error() {
     let r = translate(&shader(&words, uav_then_srv()));
     assert!(matches!(&r, Err(e) if e.contains("SRV range")), "{:?}", r.map(|t| t.hlsl));
 }
+
+#[test]
+fn scalar_buffer_load_checks_u1_against_the_bound_view_stride() {
+    use tombox_xshader::decls::{compare, from_generated_hlsl, Diff, Kind, ShaderDecls};
+
+    let uavs = RootRange { range_type: 1, num: 2, base_register: 0, space: 0, offset_in_table: u32::MAX };
+    let root = RootSig {
+        version: 2,
+        flags: 1,
+        params: vec![RootParam { visibility: 5, kind: RootParamKind::Table(vec![uavs]) }],
+        num_static_samplers: 0,
+        static_samplers: Vec::new(),
+    };
+    let load_u1_descriptor = [0xf408_0004, 0xfa00_0020];
+    let scalar_load_at_0x24 = [0xf420_0780, 0xfa00_0024];
+    let export_loaded_scalar = [0x7e00_021e, 0xf800_180f, 0x0302_0100, 0xbf81_0000];
+    let words = [load_u1_descriptor.as_slice(), &scalar_load_at_0x24, &export_loaded_scalar].concat();
+    let translated = translate(&shader(&words, root)).expect("translate scalar load from u1");
+    let declarations = from_generated_hlsl(&translated.hlsl);
+
+    let bound_view = |stride| ShaderDecls {
+        res: [(('u', 1), Kind::Structured(stride))].into(),
+        threads: None,
+    };
+    assert_eq!(compare(&bound_view(16), &declarations), []);
+    assert_eq!(
+        compare(&bound_view(64), &declarations),
+        [Diff::Mismatch('u', Kind::Structured(64), Kind::Structured(16))]
+    );
+}
