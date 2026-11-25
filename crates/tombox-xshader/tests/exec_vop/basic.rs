@@ -477,3 +477,24 @@ fn salu_basic() {
     c.add("s_getpc_b64", &pre, &[sop1(0x1f, 20, 0), sop1(0x1f, 22, 0)], &post, &[4, 0]);
     c.run_both("salu_basic");
 }
+
+#[test]
+fn float_min_max_order_signed_zeros_as_rdna2() {
+    let mut c = Cases::new();
+    let (p0, n0) = (0u32, 0x8000_0000u32);
+    for &(a, b) in &[(p0, n0), (n0, p0)] {
+        v2(&mut c, "v_min_f32", 0x0f, a, b, n0);
+        v2(&mut c, "v_max_f32", 0x10, a, b, p0);
+    }
+    v3c(&mut c, "v_min3_f32", 0x151, 0x4f80_0000, n0, p0, n0);
+    v3c(&mut c, "v_max3_f32", 0x154, p0, n0, 0xbf00_0000, p0);
+    v3c(&mut c, "v_med3_f32", 0x157, n0, p0, 0xbf80_0000, n0);
+    for &(a, b) in &[(0u32, 0x8000u32), (0x8000, 0)] {
+        v2(&mut c, "v_min_f16", 0x3a, a, b, D16 | 0x8000);
+        v2(&mut c, "v_max_f16", 0x39, a, b, D16);
+    }
+    vc(&mut c, "v_min3_f16", &[(1, 0x8000), (2, 0), (3, 0x5f6a)], &vop3(0x351, 10, [v(1), v(2), v(3)]), &[10], &[D16 | 0x8000]);
+    vc(&mut c, "v_max3_f16", &[(1, 0), (2, 0x8000), (3, 0xb800)], &vop3(0x354, 10, [v(1), v(2), v(3)]), &[10], &[D16]);
+    vc(&mut c, "v_med3_f16", &[(1, 0x7e00), (2, 0), (3, 0xd2d0)], &vop3(0x357, 10, [v(1), v(2), v(3)]), &[10], &[D16 | 0xd2d0]);
+    c.run_both("float_min_max_signed_zero");
+}

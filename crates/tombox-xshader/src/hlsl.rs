@@ -183,6 +183,8 @@ float tb_qn(float x) { return tb_nan(x) ? asfloat(0x7fc00000u) : x; }
 #endif
 float tb_u2f(uint a) { precise float r = (float)(a & 0xffff0000u) + (float)(a & 0xffffu); return r; }
 float tb_log(float x) { uint b = asuint(x); return tb_qn((b == 0x7f800000u) ? x : TB_SEL(b - 0x00800000u < 0x7f000000u && (b & 0x7fffffu) == 0u, (float)((int)(b >> 23) - 127), log2(x))); }
+float tb_fmin(float a, float b) { uint ua = asuint(a), ub = asuint(b); return (a == b) ? asfloat((ua & 0x7fffffffu) | ((ua | ub) & 0x80000000u)) : min(a, b); }
+float tb_fmax(float a, float b) { uint ua = asuint(a), ub = asuint(b); return (a == b) ? asfloat((ua & 0x7fffffffu) | (ua & ub & 0x80000000u)) : max(a, b); }
 float tb_fsub(float a, float b) { precise float r = a - b; uint ua = asuint(a), ub = asuint(b), m = 0x7fffffffu; return ((ua & m) > 0x7f800000u || (ub & m) > 0x7f800000u || ((ua & m) == 0x7f800000u && ua == ub)) ? asfloat(0x7fc00000u) : r; }
 float tb_hz(float r, uint s) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? s : b); }
 float tb_pz(float r) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? 0u : b); }
@@ -5218,8 +5220,8 @@ impl<'a> Emitter<'a> {
                 "v_sub_f16" => format!("tb_hsub({a}, {b})"),
                 "v_subrev_f16" => format!("tb_hsub({b}, {a})"),
                 "v_mul_f16" => format!("tb_hmul({a}, {b})"),
-                "v_max_f16" => format!("max({a}, {b})"),
-                _ => format!("min({a}, {b})"),
+                "v_max_f16" => format!("tb_fmax({a}, {b})"),
+                _ => format!("tb_fmin({a}, {b})"),
             };
             return self.wv(&d, &hres(e));
         }
@@ -5324,8 +5326,8 @@ impl<'a> Emitter<'a> {
                     "v_pk_fma_f16" => format!("tb_fma16({}, {}, {})", v[0], v[1], v[2]),
                     "v_pk_add_f16" => format!("{} + {}", v[0], v[1]),
                     "v_pk_mul_f16" => format!("{} * {}", v[0], v[1]),
-                    "v_pk_min_f16" => format!("min({}, {})", v[0], v[1]),
-                    _ => format!("max({}, {})", v[0], v[1]),
+                    "v_pk_min_f16" => format!("tb_fmin({}, {})", v[0], v[1]),
+                    _ => format!("tb_fmax({}, {})", v[0], v[1]),
                 });
             }
             let halves: Vec<String> = if (w0 >> 15) & 1 != 0 { halves.into_iter().map(|h| format!("saturate({h})")).collect() } else { halves };
@@ -5337,9 +5339,9 @@ impl<'a> Emitter<'a> {
         if matches!(m.as_str(), "v_min3_f16" | "v_max3_f16" | "v_med3_f16") {
             let (a, b, c) = (h16(&s[0])?, h16(&s[1])?, h16(&s[2])?);
             let e = match m.as_str() {
-                "v_min3_f16" => format!("min(min({a}, {b}), {c})"),
-                "v_max3_f16" => format!("max(max({a}, {b}), {c})"),
-                _ => format!("max(min({a}, {b}), min(max({a}, {b}), {c}))"),
+                "v_min3_f16" => format!("tb_fmin(tb_fmin({a}, {b}), {c})"),
+                "v_max3_f16" => format!("tb_fmax(tb_fmax({a}, {b}), {c})"),
+                _ => format!("((tb_nan({a}) || tb_nan({b}) || tb_nan({c})) ? tb_fmin(tb_fmin({a}, {b}), {c}) : tb_fmax(tb_fmin({a}, {b}), tb_fmin(tb_fmax({a}, {b}), {c})))"),
             };
             return self.wv(&d, &hres(e));
         }
@@ -6008,8 +6010,8 @@ impl<'a> Emitter<'a> {
             "v_subrev_f32" => Some(format!("tb_fsub({}, {})", fb()?, fa()?)),
             "v_mul_f32" if legacy => Some(format!("tb_mull({}, {})", fa()?, fb()?)),
             "v_mul_f32" => Some(format!("{} * {}", fa()?, fb()?)),
-            "v_min_f32" => Some(format!("min({}, {})", fa()?, fb()?)),
-            "v_max_f32" => Some(format!("max({}, {})", fa()?, fb()?)),
+            "v_min_f32" => Some(format!("tb_fmin({}, {})", fa()?, fb()?)),
+            "v_max_f32" => Some(format!("tb_fmax({}, {})", fa()?, fb()?)),
             "v_mac_f32" if legacy => Some(format!("tb_madlz({}, {}, asfloat({dn}))", fa()?, fb()?)),
             "v_mac_f32" => Some(format!("tb_madz({}, {}, asfloat({dn}))", fa()?, fb()?)),
             "v_ldexp_f32" => Some(format!(
@@ -6025,10 +6027,10 @@ impl<'a> Emitter<'a> {
             "v_fmac_f32" => Some(format!("tb_fma({}, {}, asfloat({dn}))", fa()?, fb()?)),
             "v_fmamk_f32" => Some(format!("tb_fma({}, {k}, {})", fa()?, fb()?)),
             "v_fmaak_f32" => Some(format!("tb_fma({}, {}, {k})", fa()?, fb()?)),
-            "v_min3_f32" => Some(format!("min(min({}, {}), {})", fa()?, fb()?, fc()?)),
-            "v_max3_f32" => Some(format!("max(max({}, {}), {})", fa()?, fb()?, fc()?)),
+            "v_min3_f32" => Some(format!("tb_fmin(tb_fmin({}, {}), {})", fa()?, fb()?, fc()?)),
+            "v_max3_f32" => Some(format!("tb_fmax(tb_fmax({}, {}), {})", fa()?, fb()?, fc()?)),
             "v_med3_f32" => Some(format!(
-                "((tb_nan({0}) || tb_nan({1}) || tb_nan({2})) ? min(min({0}, {1}), {2}) : max(min({0}, {1}), min(max({0}, {1}), {2})))",
+                "((tb_nan({0}) || tb_nan({1}) || tb_nan({2})) ? tb_fmin(tb_fmin({0}, {1}), {2}) : tb_fmax(tb_fmin({0}, {1}), tb_fmin(tb_fmax({0}, {1}), {2})))",
                 fa()?,
                 fb()?,
                 fc()?
