@@ -17,6 +17,8 @@ mod ops_s;
 mod ops_c;
 #[path = "isa_sweep/ops_x.rs"]
 mod ops_x;
+#[path = "isa_sweep/rdna2_sweep_hw.rs"]
+mod rdna2_sweep_hw;
 
 use enc::*;
 use fp::{nan16, nan32, nan64};
@@ -359,12 +361,23 @@ fn cs_extract(words: &[u32]) -> ShaderExtract {
 }
 
 pub fn hlsl_for(words: &[u32]) -> Result<String, String> {
-    translate(&cs_extract(words)).map(|t| t.hlsl)
+    let ex = cs_extract(words);
+    match std::env::var("TOMBOX_SWEEP_RSRC1").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
+        Some(r) => tombox_xshader::hlsl::translate_with_pgm_rsrc1(&ex, None, r),
+        None => translate(&ex),
+    }
+    .map(|t| t.hlsl)
 }
 
 fn compile(ts: &[&T]) -> Result<(Vec<u8>, (u32, u32), String), String> {
     let words = program(ts);
-    let t = translate(&cs_extract(&words)).map_err(|e| format!("translate: {e}"))?;
+    let rsrc1 = std::env::var("TOMBOX_SWEEP_RSRC1").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let ex = cs_extract(&words);
+    let t = match rsrc1 {
+        Some(r) => tombox_xshader::hlsl::translate_with_pgm_rsrc1(&ex, None, r),
+        None => translate(&ex),
+    }
+    .map_err(|e| format!("translate: {e}"))?;
     let fast: &[&str] = if std::env::var_os("TOMBOX_SWEEP_FAST_FMA").is_some() { &["-D", "TB_FAST_FMA"] } else { &[] };
     let code = dxc::compile_with(&t.hlsl, &dxc::profile_for(t.profile), fast).map_err(|e| format!("dxc: {}", e.lines().take(3).collect::<Vec<_>>().join(" | ")))?;
     Ok((code, gpu::uav_layout(&t.hlsl), t.hlsl))
@@ -686,4 +699,354 @@ fn isa_sweep_hlsl_probe() {
     for t in ts.iter().take(2) {
         println!("{}", hlsl_for(&program(&[*t])).unwrap_or_else(|e| e));
     }
+}
+
+const S_WAITCNT_0: u32 = 0xbf8c_0000;
+const S_NOP_4: u32 = 0xbf80_0004;
+
+fn hw_prologue() -> Vec<u32> {
+    let mut w = vec![0xf404_0100, 0xfa00_0000, sop2(0x1e, 6, 2, ic(8)), S_WAITCNT_0, sop1(3, 126, ic(-1)), 0xf408_0002, 0xfa00_0000, S_WAITCNT_0];
+    w.extend_from_slice(&[vop2(0x25, 2, 6, 0), vop2(0x16, 3, ic(5), 2), vop2(0x1a, 1, ic(SHIFT as i32), 3), vop2(0x1b, 4, ic(31), 0), vop2(0x1b, 3, LIT, 3), 0xffff_ffe0, vop2(0x1c, 0, v(3), 4)]);
+    w.extend_from_slice(&mubuf(0x0e, 0, true, 1, IN0));
+    w.extend_from_slice(&mubuf(0x0e, 16, true, 1, IN0 + 4));
+    w.push(S_WAITCNT_0);
+    for i in 0..8 {
+        w.push(vop1(2, IN0 + i, v(IN0 + i)));
+    }
+    w.push(vop1(1, 31, ic(1)));
+    w.push(S_NOP_4);
+    w
+}
+
+fn pre_branches(t: &T) -> bool {
+    let isa: Vec<u8> = t.code[..t.at].iter().flat_map(|w| w.to_le_bytes()).collect();
+    tombox_xshader::rdna2::disassemble(&isa).iter().any(|i| i.enc == tombox_xshader::rdna2::Enc::Sopp && i.mnemonic.contains("branch"))
+}
+
+fn hw_slot(t: &T, k: usize) -> Vec<u32> {
+    let mut w = Vec::new();
+    for i in 0..4 {
+        w.extend_from_slice(&[vop1(1, OUT + i, LIT), 0xabcd_0000 | ((k as u32) << 4) | i]);
+    }
+    w.extend_from_slice(&[sop1(3, VCC, ic(0)), sop1(3, VCC + 1, ic(0)), sop1(3, M0, ic(0)), sopc(0x06, ic(1), ic(0))]);
+    let quarter = vop3(0xc5, EXEC, [ic(3), v(30), 0]);
+    let mut pre: Vec<u32> = Vec::with_capacity(t.at + 1);
+    let mut i = 0;
+    while i < t.at {
+        if t.code[i..t.at].starts_with(&quarter) {
+            pre.extend_from_slice(&vop3(0xc5, 52, [ic(3), v(30), 0]));
+            pre.push(sop1(3, EXEC, 52));
+            i += quarter.len();
+        } else {
+            pre.push(t.code[i]);
+            i += 1;
+        }
+    }
+    if pre_branches(t) {
+        w.extend_from_slice(&pre);
+        w.extend_from_slice(&t.code[t.at..]);
+    } else {
+        w.extend_from_slice(&pre);
+        w.push(S_NOP_4);
+        w.extend_from_slice(&t.code[t.at..]);
+    }
+    w.push(S_NOP_4);
+    w.extend_from_slice(&[sop1(3, 126, ic(-1)), vop1(2, 9, v(1)), S_NOP_4, sop2(0x20, 9, 9, ic(SHIFT as i32)), sop2(0x0e, 9, 9, ic(31)), sop2(0x1e, 126, ic(1), 9)]);
+    w.extend_from_slice(&mubuf(0x1e, (32 + 16 * k) as u32, true, 1, OUT));
+    w.push(sop1(3, 126, ic(-1)));
+    w
+}
+
+fn hw_program(ts: &[&T]) -> Vec<u32> {
+    let mut w = hw_prologue();
+    for (k, t) in ts.iter().enumerate() {
+        w.extend(hw_slot(t, k));
+    }
+    w.push(S_ENDPGM);
+    w
+}
+
+pub fn sweep_keys(s: &Suite) -> Vec<String> {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    s.t.iter()
+        .map(|t| {
+            let base = format!("{}|{}", t.m, t.variant);
+            let n = seen.entry(base.clone()).or_insert(0);
+            *n += 1;
+            if *n == 1 { base } else { format!("{base}#{n}") }
+        })
+        .collect()
+}
+
+pub fn fnv64w(h: u64, w: u32) -> u64 {
+    w.to_le_bytes().iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
+}
+
+pub const FNV_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+pub fn hw_positions(t: &T, ins: &[Vec<[u32; 8]>]) -> Vec<(usize, usize, u32)> {
+    let mut v = Vec::new();
+    for (b, batch) in ins.iter().enumerate() {
+        for (l, d) in batch.iter().enumerate() {
+            let want = (t.r)(&In { d: *d, lane: l as u32 });
+            for k in 0..t.cmp.len() {
+                if let Some(w) = want.get(k).copied().flatten() {
+                    v.push((b * LANES + l, k, w));
+                }
+            }
+        }
+    }
+    v
+}
+
+fn known_reason(m: &str) -> &'static str {
+    match m {
+        "v_add_f32" | "v_sub_f32" | "v_subrev_f32" | "v_mul_f32" | "v_mul_legacy_f32" | "v_min_f32" | "v_max_f32" => "f32 omod acts only with IEEE 0 and f32 output denormals flushed (issue #386)",
+        "v_mul_lo_i32" => "gfx103x has no v_mul_lo_i32 (returns 0); its low 32 bits equal v_mul_lo_u32",
+        _ => "UNEXPLAINED",
+    }
+}
+
+fn le_words(path: &std::path::Path) -> Option<Vec<u32>> {
+    std::fs::read(path).ok().map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
+fn sentinel_batch(batch: &[[u32; 8]]) -> Vec<u32> {
+    let mut data = vec![0u32; LANES * REC];
+    for (l, d) in batch.iter().enumerate() {
+        data[l * REC..l * REC + 8].copy_from_slice(d);
+        for k in 8..REC {
+            data[l * REC + k] = 0xdead_0000 | k as u32;
+        }
+    }
+    data
+}
+
+#[test]
+fn isa_sweep_silicon() {
+    let Some(dir) = std::env::var_os("TOMBOX_SWEEP_SILICON").map(std::path::PathBuf::from) else { return };
+    let mode = std::env::var("TOMBOX_SWEEP_SILICON_MODE").unwrap_or_else(|_| "export".into());
+    let s = suite();
+    let flt = filter();
+    let absent: BTreeMap<usize, String> = std::fs::read_to_string(dir.join("absent.txt"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' ').and_then(|(i, w)| i.parse().ok().map(|i| (i, w.to_string()))))
+        .collect();
+    let mut groups: BTreeMap<Class, Vec<&T>> = BTreeMap::new();
+    let mut not_here: BTreeMap<&'static str, String> = BTreeMap::new();
+    for (i, t) in s.t.iter().enumerate().filter(|(_, t)| flt.as_ref().map_or(true, |f| t.m.contains(f.as_str()) || t.fam.contains(f.as_str()))) {
+        if decode_check(t).is_err() {
+            continue;
+        }
+        if let Some(why) = absent.get(&i) {
+            not_here.entry(t.m).or_insert_with(|| why.clone());
+            continue;
+        }
+        groups.entry(t.class).or_default().push(t);
+    }
+    let mut packs: Vec<(Class, Vec<&T>)> = Vec::new();
+    for (class, ts) in &groups {
+        for chunk in ts.chunks(SLOTS) {
+            packs.push((*class, chunk.to_vec()));
+        }
+    }
+    if mode == "export" {
+        std::fs::create_dir_all(&dir).expect("create export dir");
+        let mut ops = String::new();
+        for (i, t) in s.t.iter().enumerate() {
+            let isa: Vec<u8> = t.code[t.at..].iter().flat_map(|w| w.to_le_bytes()).collect();
+            let n = tombox_xshader::rdna2::disassemble(&isa).first().map_or(1, |x| x.raw.len().max(1));
+            let words: Vec<String> = t.code[t.at..(t.at + n).min(t.code.len())].iter().map(|w| format!("{w:08x}")).collect();
+            let _ = writeln!(ops, "{i} {} {} {}", t.m, t.fam, words.join(","));
+        }
+        std::fs::write(dir.join("ops.txt"), ops).expect("write ops");
+        let mut man = String::new();
+        for class in groups.keys() {
+            for b in 0..BATCHES {
+                let data = sentinel_batch(&inputs(*class, b));
+                let bytes: Vec<u8> = data.iter().flat_map(|w| w.to_le_bytes()).collect();
+                std::fs::write(dir.join(format!("in_{class:?}_{b}.bin")), bytes).expect("write inputs");
+            }
+        }
+        for (p, (class, ts)) in packs.iter().enumerate() {
+            let bytes: Vec<u8> = hw_program(ts).iter().flat_map(|w| w.to_le_bytes()).collect();
+            std::fs::write(dir.join(format!("p{p:03}.bin")), bytes).expect("write pack");
+            let names: Vec<String> = ts.iter().map(|t| format!("{}:{}", t.m, t.variant.replace(' ', "_"))).collect();
+            let _ = writeln!(man, "p{p:03} {class:?} {} {}", ts.len(), names.join("|"));
+        }
+        std::fs::write(dir.join("manifest.txt"), man).expect("write manifest");
+        println!("isa_sweep_silicon: exported {} packs, {} tests, {} classes to {}", packs.len(), packs.iter().map(|p| p.1.len()).sum::<usize>(), groups.len(), dir.display());
+        return;
+    }
+    if mode == "host" {
+        let sub = std::env::var("TOMBOX_SWEEP_SILICON_OUT").unwrap_or_else(|_| "out".into());
+        let mut first: BTreeMap<&'static str, String> = BTreeMap::new();
+        let mut ok_m: std::collections::BTreeSet<&'static str> = Default::default();
+        for (p, (class, ts)) in packs.iter().enumerate() {
+            let ins: Vec<Vec<[u32; 8]>> = (0..BATCHES).map(|b| inputs(*class, b)).collect();
+            let outs: Vec<Option<Vec<u32>>> = (0..BATCHES).map(|b| le_words(&dir.join(&sub).join(format!("p{p:03}_b{b}.bin")))).collect();
+            if outs.iter().any(|o| o.is_none()) {
+                continue;
+            }
+            let host = match run_pack(ts, &ins) {
+                Ok(h) => h,
+                Err(e) => {
+                    for t in ts {
+                        first.entry(t.m).or_insert_with(|| format!("p{p:03} host run failed: {}", e.lines().next().unwrap_or("")));
+                    }
+                    continue;
+                }
+            };
+            for (k, t) in ts.iter().enumerate() {
+                let mut bad = None;
+                'lanes: for (b, o) in outs.iter().flatten().enumerate() {
+                    for l in 0..LANES {
+                        let at = l * REC + 8 + 4 * k;
+                        let sil: Vec<Option<u32>> = (0..4).map(|i| Some(o[at + i])).collect();
+                        let g = host[k][b * LANES + l];
+                        if !check(&t.cmp, &g, &sil) {
+                            bad = Some(format!("p{p:03} [{}] in={:08x?} host={:08x?} silicon={:08x?}", t.variant, &ins[b][l][..3], &g[..t.cmp.len()], &o[at..at + t.cmp.len()]));
+                            break 'lanes;
+                        }
+                    }
+                }
+                match bad {
+                    Some(f) => {
+                        first.entry(t.m).or_insert(f);
+                    }
+                    None => {
+                        ok_m.insert(t.m);
+                    }
+                }
+            }
+        }
+        for (m, f) in &first {
+            println!("HOSTDIFF {m:<26} {f}");
+        }
+        let n = ok_m.iter().filter(|m| !first.contains_key(*m)).count();
+        println!("isa_sweep_silicon host: translator (initial MODE from TOMBOX_SWEEP_RSRC1) vs silicon {sub}: {} mnemonics agree, {} differ", n, first.len());
+        return;
+    }
+    let mut by: BTreeMap<&'static str, Res> = BTreeMap::new();
+    let mut skipped: BTreeMap<&'static str, String> = BTreeMap::new();
+    let keys = sweep_keys(&s);
+    let key_of: std::collections::HashMap<*const T, &str> = s.t.iter().zip(keys.iter()).map(|(t, k)| (t as *const T, k.as_str())).collect();
+    let mut rec = String::new();
+    let mut n_ex = 0usize;
+    for (p, (class, ts)) in packs.iter().enumerate() {
+        let ins: Vec<Vec<[u32; 8]>> = (0..BATCHES).map(|b| inputs(*class, b)).collect();
+        let outs: Vec<Option<Vec<u32>>> = (0..BATCHES).map(|b| le_words(&dir.join("out").join(format!("p{p:03}_b{b}.bin")))).collect();
+        if outs.iter().any(|o| o.as_ref().map_or(true, |w| w.len() != LANES * REC)) {
+            let why = std::fs::read_to_string(dir.join("out").join(format!("p{p:03}.skip"))).unwrap_or_else(|_| "no silicon output".into());
+            for t in ts {
+                skipped.entry(t.m).or_insert_with(|| why.trim().to_string());
+            }
+            continue;
+        }
+        for (k, t) in ts.iter().enumerate() {
+            let mut got: Vec<[u32; 4]> = Vec::with_capacity(BATCHES * LANES);
+            for o in outs.iter().flatten() {
+                for l in 0..LANES {
+                    let b = l * REC + 8 + 4 * k;
+                    got.push([o[b], o[b + 1], o[b + 2], o[b + 3]]);
+                }
+            }
+            let e = by.entry(t.m).or_insert(Res { m: t.m, fam: t.fam, tests: 0, lanes: 0, undef: 0, fail: None });
+            e.tests += 1;
+            let (n, u, f) = eval(t, &got, &ins);
+            if mode == "record" {
+                let mut h = FNV_SEED;
+                let mut ex: Vec<String> = Vec::new();
+                let known = if f.is_some() { known_reason(t.m) } else { "" };
+                for (lane, k, w) in hw_positions(t, &ins) {
+                    let g = got[lane][k];
+                    h = fnv64w(h, g);
+                    if g != w && known.is_empty() {
+                        ex.push(format!("{:#x}", ((lane as u64) << 34) | ((k as u64) << 32) | g as u64));
+                    }
+                }
+                n_ex += ex.len();
+                let key = key_of[&(*t as *const T)];
+                let _ = writeln!(rec, "    (\"{}\", {h:#018x}, \"{known}\", &[{}]),", key.replace('\\', "\\\\").replace('"', "\\\""), ex.join(", "));
+            }
+            e.lanes += n;
+            e.undef += u;
+            if e.fail.is_none() {
+                e.fail = f.map(|x| format!("p{p:03} {x}"));
+            }
+        }
+    }
+    let mut table = String::new();
+    let _ = writeln!(table, "{:<28} {:<6} {:>5} {:>6} {:>6}  {}", "mnemonic", "family", "tests", "lanes", "undef", "result vs gfx1036");
+    for r in by.values() {
+        let _ = writeln!(table, "{:<28} {:<6} {:>5} {:>6} {:>6}  {}", r.m, r.fam, r.tests, r.lanes, r.undef, r.fail.as_deref().map_or("PASS".to_string(), |f| format!("FAIL {f}")));
+    }
+    for (m, why) in &not_here {
+        if !by.contains_key(m) {
+            skipped.entry(*m).or_insert_with(|| format!("not on gfx103x: {why}"));
+        }
+    }
+    for (m, why) in &skipped {
+        if !by.contains_key(m) {
+            let _ = writeln!(table, "{m:<28} {:<6} {:>5} {:>6} {:>6}  SKIP {why}", "", 0, 0, 0);
+        }
+    }
+    println!("{table}");
+    let fails = by.values().filter(|r| r.fail.is_some()).count();
+    println!("isa_sweep_silicon: {} mnemonics checked against gfx1036, {} pass, {} fail, {} not run on silicon", by.len(), by.len() - fails, fails, skipped.keys().filter(|m| !by.contains_key(*m)).count());
+    std::fs::write(dir.join("check.txt"), table).expect("write check");
+    if mode == "record" {
+        let n = rec.lines().count();
+        let src = format!("pub const SOURCE: &str = \"gfx1036, Ryzen 5 9600X iGPU, ROCm/HIP 5.7.1, 2026-11-25, raw-kernel run of every isa_sweep case\";\n\npub const RECORD: [(&str, u64, &str, &[u64]); {n}] = [\n{rec}];\n");
+        std::fs::write(dir.join("rdna2_sweep_hw.rs"), &src).expect("write record");
+        println!("isa_sweep_silicon: recorded {n} cases, {n_ex} exception words, {} bytes", src.len());
+    }
+}
+
+#[test]
+fn sweep_models_match_rdna2_silicon() {
+    let s = suite();
+    let keys = sweep_keys(&s);
+    let rec: BTreeMap<&str, (u64, &str, &[u64])> = rdna2_sweep_hw::RECORD.iter().map(|&(k, h, kn, ex)| (k, (h, kn, ex))).collect();
+    let mut cache: BTreeMap<Class, Vec<Vec<[u32; 8]>>> = BTreeMap::new();
+    let (mut checked, mut unrecorded) = (0usize, 0usize);
+    let mut known: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut bad: Vec<String> = Vec::new();
+    for (t, key) in s.t.iter().zip(&keys) {
+        let Some(&(h, kn, ex)) = rec.get(key.as_str()) else {
+            unrecorded += 1;
+            continue;
+        };
+        if !kn.is_empty() {
+            if kn == "UNEXPLAINED" {
+                bad.push(format!("{key}: recorded as an unexplained silicon difference"));
+            }
+            known.insert(t.m, kn);
+            continue;
+        }
+        let ins = cache.entry(t.class).or_insert_with(|| (0..BATCHES).map(|b| inputs(t.class, b)).collect());
+        let pos = hw_positions(t, ins);
+        let mut got = vec![[0u32; 4]; BATCHES * LANES];
+        for &(lane, k, w) in &pos {
+            got[lane][k] = w;
+        }
+        for &e in ex {
+            got[(e >> 34) as usize][((e >> 32) & 3) as usize] = e as u32;
+        }
+        if pos.iter().fold(FNV_SEED, |a, &(lane, k, _)| fnv64w(a, got[lane][k])) != h {
+            bad.push(format!("{key}: the model plus the recorded exceptions no longer reproduce the gfx1036 output digest"));
+            continue;
+        }
+        if let (_, _, Some(f)) = eval(t, &got, ins) {
+            bad.push(format!("{key}: {f}"));
+            continue;
+        }
+        checked += 1;
+    }
+    for (m, why) in &known {
+        println!("known silicon difference: {m}: {why}");
+    }
+    println!("sweep models vs {}: {checked} cases checked against silicon, {} mnemonics with a known difference, {unrecorded} cases not in the record", rdna2_sweep_hw::SOURCE, known.len());
+    assert!(bad.is_empty(), "{} sweep cases disagree with the gfx1036 record:\n{}", bad.len(), bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
 }

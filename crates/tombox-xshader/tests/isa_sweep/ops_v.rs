@@ -163,11 +163,10 @@ fn f2v(s: &mut Suite, m: &'static str, op: u32, class: Class, g: G2) {
 fn h2v(s: &mut Suite, m: &'static str, op: u32, g: G2) {
     s.add(m, "VOP2", "e32", Class::F16, &[vmov(OUT, v(12))], &[vop2(op, OUT, v(10), 11)], &[], &[Cmp::F16(0)], move |x| on(g(x.d[0], x.d[1]).map(|r| (x.d[2] & 0xffff_0000) | (r & 0xffff))));
     for (name, opsel, abs, neg, clamp) in [("e64 opsel=src0hi,src1hi", 0b0011u32, 0u32, 0u32, false), ("e64 opsel=dsthi neg0", 0b1000, 0, 1, false), ("e64 opsel=src1hi abs0 clamp", 0b0010, 1, 0, true), ("e64 opsel=src0hi,dsthi neg1", 0b1001, 0, 2, false)] {
-        let c = if opsel & 8 != 0 { Cmp::F16H(0) } else { Cmp::F16(0) };
-        s.add(m, "VOP2", name, Class::F16, &[vmov(OUT, v(12))], &vop3m(0x100 + op, OUT, [v(10), v(11), 0], abs, neg, opsel, clamp), &[], &[c], move |x| {
-            let a = mods16(if opsel & 1 != 0 { x.d[0] >> 16 } else { x.d[0] }, abs & 1 != 0, neg & 1 != 0);
-            let b = mods16(if opsel & 2 != 0 { x.d[1] >> 16 } else { x.d[1] }, abs & 2 != 0, neg & 2 != 0);
-            on(g(a, b).and_then(|r| out16(r, clamp)).map(|r| if opsel & 8 != 0 { (x.d[2] & 0xffff) | (r << 16) } else { (x.d[2] & 0xffff_0000) | r }))
+        s.add(m, "VOP2", name, Class::F16, &[vmov(OUT, v(12))], &vop3m(0x100 + op, OUT, [v(10), v(11), 0], abs, neg, opsel, clamp), &[], &[Cmp::F16(0)], move |x| {
+            let a = mods16(x.d[0], abs & 1 != 0, neg & 1 != 0);
+            let b = mods16(x.d[1], abs & 2 != 0, neg & 2 != 0);
+            on(g(a, b).and_then(|r| out16(r, clamp)).map(|r| (x.d[2] & 0xffff_0000) | r))
         });
     }
 }
@@ -503,7 +502,7 @@ fn vop1_ops(s: &mut Suite) {
     s.add("v_cvt_f16_f32", "VOP1", "e32", Class::F32, &[vmov(OUT, v(12))], &[vop1(0x0a, OUT, v(10))], &[], &[Cmp::F16(0)], |x| o((x.d[2] & 0xffff_0000) | f2h_rne(f(x.d[0]))));
     s.add("v_cvt_f16_f32", "VOP1", "e64 opsel dst hi", Class::F32, &[vmov(OUT, v(12))], &vop3m(0x18a, OUT, [v(11), 0, 0], 0, 0, 0b1000, false), &[], &[Cmp::X], |x| {
         let r = f2h_rne(f(x.d[1]));
-        on(if nan16(r) { None } else { Some((x.d[2] & 0xffff) | (r << 16)) })
+        on(if nan16(r) { None } else { Some((x.d[2] & 0xffff_0000) | r) })
     });
     f1(s, "v_fract_f32", 0x20, Class::F32, Cmp::F32(0), |a| if den32(a) { None } else { fract32(a) }, true);
     f1(s, "v_trunc_f32", 0x21, Class::F32, Cmp::F32(0), |a| Some(f32q(f(a).trunc())), true);
@@ -547,7 +546,7 @@ fn vop1_ops(s: &mut Suite) {
     h1(s, "v_cos_f16", 0x61, Class::Trans16, Cmp::X, |a| Some(tombox_xshader::trans16::eval(6, a as u16) as u32));
     s.add("v_sat_pk_u8_i16", "VOP1", "e32 full", Class::U32, &[vmov(OUT, v(12))], &[vop1(0x62, OUT, v(10))], &[], &[Cmp::X], |x| {
         let a = x.d[0];
-        o((x.d[2] & 0xffff_0000) | ((a as u16 as i16).clamp(0, 255) as u32) | (((((a >> 16) as u16 as i16).clamp(0, 255)) as u32) << 8))
+        o(((a as u16 as i16).clamp(0, 255) as u32) | (((((a >> 16) as u16 as i16).clamp(0, 255)) as u32) << 8))
     });
     h1(s, "v_cvt_norm_i16_f16", 0x63, Class::F16, Cmp::X, |a| norm16(h(a), true, nan16(a)));
     h1(s, "v_cvt_norm_u16_f16", 0x64, Class::F16, Cmp::X, |a| norm16(h(a), false, nan16(a)));
@@ -695,12 +694,15 @@ fn cube(a: u32, b: u32, c: u32) -> Option<(f32, f32, f32, f32)> {
         return None;
     }
     let (x, y, z) = (f(a), f(b), f(c));
-    if z.abs() >= x.abs() && z.abs() >= y.abs() {
-        Some((if z < 0.0 { 5.0 } else { 4.0 }, if z < 0.0 { -x } else { x }, -y, 2.0 * z))
-    } else if y.abs() >= x.abs() {
-        Some((if y < 0.0 { 3.0 } else { 2.0 }, x, if y < 0.0 { -z } else { z }, 2.0 * y))
+    let mag = |u: u32| if u & 0x7f80_0000 == 0 { 0.0 } else { f(u).abs() };
+    let ma = |v: f32| if v == 0.0 { 0.0 } else { 2.0 * v };
+    let (ax, ay, az) = (mag(a), mag(b), mag(c));
+    if az >= ax && az >= ay {
+        Some((if z < 0.0 { 5.0 } else { 4.0 }, if z < 0.0 { -x } else { x }, -y, ma(z)))
+    } else if ay >= ax {
+        Some((if y < 0.0 { 3.0 } else { 2.0 }, x, if y < 0.0 { -z } else { z }, ma(y)))
     } else {
-        Some((if x < 0.0 { 1.0 } else { 0.0 }, if x < 0.0 { z } else { -z }, -y, 2.0 * x))
+        Some((if x < 0.0 { 1.0 } else { 0.0 }, if x < 0.0 { z } else { -z }, -y, ma(x)))
     }
 }
 

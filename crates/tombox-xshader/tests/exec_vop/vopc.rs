@@ -220,7 +220,8 @@ fn add_e64(c: &mut Cases, t: Ty, i: usize, a: u64, b: u64, abs: u32, neg: u32) {
 }
 
 fn add_opsel(c: &mut Cases, t: Ty, i: usize, a: u64, b: u64, opsel: u32) {
-    let r = want(t, i, a, b) as u32;
+    let lo = |x: u64, k: u32| if (opsel >> k) & 1 != 0 { 0x7e5a } else { x };
+    let r = want(t, i, lo(a, 0), lo(b, 1)) as u32;
     let place = |x: u64, k: u32| if (opsel >> k) & 1 != 0 { ((x as u32) << 16) | 0x7e5a } else { 0xc3a5_0000 | x as u32 };
     let mut pre = pr();
     pre.vv(1, place(a, 0)).vv(2, place(b, 1)).sv(20, 0xdead_beef).sv(106, SENT);
@@ -427,11 +428,14 @@ fn class_group() -> Cases {
             c.add(mn(true), &pre, &[vopc(op(true), v(1), 2), vop1(1, 10, ic(7))], &post_cmpx(), &[if r != 0 { 7 } else { 0x1234 }, r, SENT]);
         }
         for (abs, neg, opsel) in [(1u32, 0u32, 0u32), (0, 1, 0), (1, 1, 0), (0, 0, 1), (0, 1, 1)] {
-            let x = if abs != 0 { b & 0x7fff } else { b };
-            let x = if neg != 0 { x ^ 0x8000 } else { x };
+            let md = |v: u32| {
+                let v = if abs != 0 { v & 0x7fff } else { v };
+                if neg != 0 { v ^ 0x8000 } else { v }
+            };
+            let x = md(b);
             let mask = 1 << class16(x) | if k % 2 == 0 { 0x0f0 } else { 0x00f };
             let mask = if k % 3 == 0 { mask & !(1 << class16(x)) } else { mask };
-            let r = pass(x, mask);
+            let r = pass(md(if opsel != 0 { 0x3c00 } else { b }), mask);
             let src = if opsel != 0 { (b << 16) | 0x3c00 } else { 0x7c00_0000 | b };
             let mut pre = pr();
             pre.vv(1, src).vv(2, mask).sv(20, 0xdead_beef).sv(106, SENT);

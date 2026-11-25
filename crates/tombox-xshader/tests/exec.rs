@@ -1501,7 +1501,7 @@ fn vector_vop1() {
         v16(&mut c, "v_cos_f16", 0x61, f2h(x), f2h(co));
     }
     for &(x, r) in &[(0xff00_0100u32, 0x00ffu32), (0x0080_007f, 0x807f), (0x7fff_8000, 0xff00), (0x0000_0000, 0)] {
-        v16(&mut c, "v_sat_pk_u8_i16", 0x62, x, r);
+        v1c(&mut c, "v_sat_pk_u8_i16", 0x62, x, r);
     }
     for &(x, i, u) in &[(1.0f32, 0x7fffu32, 0xffffu32), (-1.0, 0x8001, 0), (0.5, 0x4000, 0x8000), (2.0, 0x7fff, 0xffff), (0.0, 0, 0), (-0.25, 0xe000, 0)] {
         v16(&mut c, "v_cvt_norm_i16_f16", 0x63, f2h(x), i);
@@ -1652,7 +1652,7 @@ fn vector_f16_preserves_high_half() {
     let mut c = Cases::new();
     vc(&mut c, "v_add_f16", &[(1, 0x1111_0000 | f2h(1.5)), (2, 0x2222_0000 | f2h(2.0))], &[vop2(0x32, 10, v(1), 2)], &[10], &[D16 | f2h(3.5)]);
     vc(&mut c, "v_cvt_f16_f32", &[(1, fb(0.5))], &[vop1(0x0a, 10, v(1))], &[10], &[D16 | f2h(0.5)]);
-    vc(&mut c, "v_add_f16", &[(1, (f2h(4.0) << 16) | f2h(1.0)), (2, f2h(0.5))], &vop3m(0x132, 10, [v(1), v(2), 0], 0, 0, 0b1001, false), &[10], &[(D16 & 0xffff) | (f2h(4.5) << 16)]);
+    vc(&mut c, "v_add_f16", &[(1, (f2h(4.0) << 16) | f2h(1.0)), (2, f2h(0.5))], &vop3m(0x132, 10, [v(1), v(2), 0], 0, 0, 0b1001, false), &[10], &[D16 | f2h(1.5)]);
     c.run_both("f16_high");
 }
 

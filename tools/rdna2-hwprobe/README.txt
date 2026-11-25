@@ -392,3 +392,46 @@ same inputs (8192 cases from om.in).
 On gfx1036 check prints 0 differences: the omod acts only with IEEE 0 and f16 output denormals
 flushed (denorm mode 0 or 1); a +-0 or denormal pre-omod result then becomes +0, and a scaled value
 below 2^-14 becomes a zero of its sign.
+
+ISA sweep on silicon (sweep_silicon.py, sweep_silicon_runner.cpp)
+------------------------------------------------------------------
+
+Runs every crates/tombox-xshader/tests/isa_sweep case as raw machine code on the GPU, with no
+translator in between, and records what the hardware returns. The Rust side exports the packs, checks
+the outputs against the sweep's reference models, and writes tests/isa_sweep/rdna2_sweep_hw.rs.
+
+Layout. Each pack is the sweep's own program with a small entry shim (kernarg pointer to the buffer
+descriptor, s_waitcnt after the descriptor and input loads, s_nop between a case's setup and its
+instruction). SGPRs are per wave on hardware, while the sweep's lane model gives every lane its own
+inputs, so each input row runs in its own wave: all 32 lanes load row w, v0 = (w & ~31) | lane, and
+only lane w % 32 stores. A setup that writes EXEC with a VOP3 compare (v_cmp_*_e64 exec_lo, ...) is
+rewritten to compare into s52 and s_mov exec_lo, s52: on gfx1036 a VOPC with SDST=EXEC leaves EXEC
+unchanged. The kernel descriptor sets the translator's initial MODE (IEEE 0, DX10_CLAMP 1, f32 and
+f16/f64 denormals kept); SIL_DN32 and SIL_IEEE override it for MODE studies.
+
+Safety. Before a pack runs, its disassembly for gfx1036 is checked against a block list (DS, scalar
+stores and atomics, s_sendmsg, s_trap, s_sethalt, image/flat/global/scratch, exports; DS src2 ops hang
+gfx1036). sweep_silicon.py absent lists every case whose instruction gfx1036 lacks or decodes as a
+different instruction than gfx1013 (gfx10.3 removed v_mac/mad/madak/madmk(_legacy)_f32 and reuses VOP3
+0x140 and VOP2 0x06 for the fma_legacy forms); those cases are not run. Each pack runs in its own
+process with a 30 s timeout, and the run stops at the first timeout.
+
+    set TOMBOX_SWEEP_SILICON=C:\path\sil and TOMBOX_SWEEP_SILICON_MODE=export, then on Windows:
+    cargo test -p tombox-xshader --release --test isa_sweep isa_sweep_silicon -- --nocapture
+    on the RDNA2 Linux box, with the export copied to sil:
+    g++ -O2 -D__HIP_PLATFORM_AMD__ -o sweep_silicon_runner sweep_silicon_runner.cpp -lamdhip64
+    python3 sweep_silicon.py absent sil
+    rerun the export with sil/absent.txt in place, copy it over again, then:
+    python3 sweep_silicon.py run sil
+    copy sil/out back and run the same cargo test with TOMBOX_SWEEP_SILICON_MODE=check (table) or
+    record (writes rdna2_sweep_hw.rs).
+
+The record keeps, per case, an FNV-1a digest of every output word the model defines and only the
+words where the hardware differs from the model's bits (NaN payloads, ulp-tolerance results), each
+packed as lane << 34 | word << 32 | value. sweep_models_match_rdna2_silicon (CPU only) rebuilds the
+hardware output from the model plus those words, checks the digest, and runs the sweep's own
+comparison on every lane. A model change that moves any recorded bit fails it.
+
+On gfx1036 (2026-11-25): 542 of 550 mnemonics match. The 8 others are recorded as known differences:
+f32 omod on v_add/sub/subrev/mul/mul_legacy/min/max_f32 acts only with IEEE 0 and f32 output denormals
+flushed (issue #386), and gfx103x has no v_mul_lo_i32.

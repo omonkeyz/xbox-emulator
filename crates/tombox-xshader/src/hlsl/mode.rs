@@ -231,7 +231,7 @@ fn hsel(ins: &Insn, i: usize) -> u32 {
         let sel = if i == 0 { (w >> 16) & 7 } else { (w >> 24) & 7 };
         return if sel == 5 { 2 } else { 1 };
     }
-    if ins.enc == Enc::Vop3 && i < 3 && (ins.raw[0] >> (11 + i)) & 1 != 0 { 2 } else { 1 }
+    if super::vop3_opsel_ok(ins) && i < 3 && (ins.raw[0] >> (11 + i)) & 1 != 0 { 2 } else { 1 }
 }
 
 impl Emitter<'_> {
