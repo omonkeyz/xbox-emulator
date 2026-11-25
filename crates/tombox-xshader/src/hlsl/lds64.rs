@@ -78,7 +78,11 @@ fn ds_reach(i: &Insn) -> Option<u32> {
         return None;
     }
     let base = m.replace("st64", "").replace("_d16", "");
-    let elem = if base.contains("64") {
+    let elem = if base.contains("b128") {
+        16
+    } else if base.contains("b96") {
+        12
+    } else if base.contains("64") {
         8
     } else if ["_b8", "_u8", "_i8"].iter().any(|k| base.contains(k)) {
         1
@@ -283,6 +287,21 @@ mod tests {
     }
 
     const WRITE_AT_0X1FC: [u32; 3] = [0xd800_0000 | (0x0d << 18) | 0x1fc, 0x0000_0201, 0xbf81_0000];
+
+    fn ds(op: u32, off: u32) -> Insn {
+        let w = [0xd800_0000u32 | (op << 18) | off, 0x0201_0001];
+        let b: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+        crate::rdna2::disassemble(&b).remove(0)
+    }
+
+    #[test]
+    fn ds_reach_counts_the_whole_access() {
+        for (op, m, size) in [(0x0d, "ds_write_b32", 4), (0x4d, "ds_write_b64", 8), (0xde, "ds_write_b96", 12), (0xdf, "ds_write_b128", 16), (0x36, "ds_read_b32", 4), (0x76, "ds_read_b64", 8), (0xfe, "ds_read_b96", 12), (0xff, "ds_read_b128", 16)] {
+            let i = ds(op, 0x1ff0);
+            assert_eq!(i.mnemonic, m);
+            assert_eq!(ds_reach(&i), Some(0x1ff0 + size), "{m}");
+        }
+    }
 
     #[test]
     fn reader_takes_the_dword_the_fssm_sub_version_names_and_only_before_the_isa() {
