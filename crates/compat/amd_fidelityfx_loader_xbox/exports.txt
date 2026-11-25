@@ -1,0 +1,4 @@
+1 ffxCreateContext stub | sets *context=null and returns FFX_ERROR_BACKEND_API_ERROR; PC FidelityFX backend forwarding pending
+2 ffxDestroyContext stub | clears *context and returns FFX_ERROR_BACKEND_API_ERROR; PC FidelityFX backend forwarding pending
+3 ffxDispatch stub | returns error without running upscale pass; PC FidelityFX backend forwarding pending
+4 ffxQuery stub | returns error without answering query; PC FidelityFX backend forwarding pending
