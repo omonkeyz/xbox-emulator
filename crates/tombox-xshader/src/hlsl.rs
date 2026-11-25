@@ -41,6 +41,7 @@ mod user_data;
 mod smem_bounds;
 mod tess;
 mod static_sampler;
+mod desc_words;
 pub use smem_bounds::{CBFIT_CBUFFER, CBFIT_RAW};
 pub use tess::{passthrough_hull, Partitioning, PassthroughHull, PASSTHROUGH_VS};
 pub mod infer;
@@ -606,6 +607,8 @@ struct Emitter<'a> {
     /// per instruction, for maintaining the run-time `tb_dsel<reg>` selectors.
     dsel_loads: HashMap<usize, (u16, u32)>,
     dsel_moves: HashMap<usize, (u16, u16)>,
+    desc_reads: BTreeMap<(u8, u32), BTreeMap<u32, (u32, usize)>>,
+    img_desc: HashMap<(u8, u32), Res>,
     /// Registers read before written (entry ABI), from `live_in`.
     live: Vec<String>,
     /// Pixel shader needs its position within the 2x2 quad (ds_swizzle).
@@ -1450,6 +1453,8 @@ fn translate_with(ex: &ShaderExtract, out_interp: &InputInterp, user_base_overri
         bsel: HashMap::new(),
         dsel_loads: HashMap::new(),
         dsel_moves: HashMap::new(),
+        desc_reads: BTreeMap::new(),
+        img_desc: HashMap::new(),
         live: Vec::new(),
         uses_quad: false,
         vs_lds_out: false,
@@ -2477,6 +2482,7 @@ impl<'a> Emitter<'a> {
                 Opnd::Temp(n) if *n >= LANE_TEMP_BASE => Some(1000 + (*n - LANE_TEMP_BASE)),
                 _ => None,
             };
+            self.note_desc_reads(ins, sym);
             match ins.enc {
                 Enc::Sop1 if ins.mnemonic == "s_mov_b32" => {
                     if let Some(d) = ins.dst.first().and_then(sg) {
@@ -2796,7 +2802,9 @@ impl<'a> Emitter<'a> {
                                 return Err(format!("image slot {tslot} used with two dimensions"));
                             }
                         }
-                        tex_res.push((((*ttable as u32) << 24) | off, if is_uav { Res::Uav(tslot, dim) } else { Res::Tex(tslot, dim) }));
+                        let r = if is_uav { Res::Uav(tslot, dim) } else { Res::Tex(tslot, dim) };
+                        self.note_img_desc(*ttable, *off, r);
+                        tex_res.push((((*ttable as u32) << 24) | off, r));
                     }
                     let mut samp_res: Vec<(u32, Res)> = Vec::new();
                     if ins.mnemonic.starts_with("image_gather4") && ins.mnemonic.split('_').any(|t| t == "l") {
@@ -4315,6 +4323,7 @@ impl<'a> Emitter<'a> {
                     if self.emit_rm_load(idx, ins)?.is_some() {
                         return Ok(());
                     }
+                    self.emit_desc_words(idx, ins)?;
                     self.line("// (descriptor fetch from root table — resolved statically)");
                     return Ok(());
                 }

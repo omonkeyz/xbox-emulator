@@ -6,6 +6,7 @@ mod bvh;
 mod branch;
 mod cache_inv;
 mod cfg_fuzz;
+mod desc_words;
 mod ds;
 mod gds;
 mod exp;
