@@ -595,7 +595,7 @@ pub fn norm16(v: f64, signed: bool, nan: bool) -> Option<u32> {
     Some((r.round_ties_even() as i32 as u32) & 0xffff)
 }
 
-const NRM_F32: [u32; 26] = [
+pub const NRM_F32: [u32; 26] = [
     0x3840_0180, 0x38e0_01c0, 0xb840_0180, 0xb8e0_01c0, 0x37c0_00c0, 0x3860_00e0, 0x3eff_ffff, 0x3f00_0001, 0x3f00_0000, 0xbf00_0000, 0x3f80_0000, 0xbf80_0000, 0x3f80_0001,
     0xbf80_0001, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0xffc0_0000, 0x7f80_0001, 0xff80_0001, 0x8000_0000, 0x0000_0001, 0x807f_ffff, 0x3eff_fffe, 0x3f7f_ffff, 0xbf7f_ffff,
 ];

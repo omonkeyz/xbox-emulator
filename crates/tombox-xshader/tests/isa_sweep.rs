@@ -17,6 +17,8 @@ mod ops_s;
 mod ops_c;
 #[path = "isa_sweep/ops_x.rs"]
 mod ops_x;
+#[path = "isa_sweep/rdna2_hw.rs"]
+mod rdna2_hw;
 
 use enc::*;
 use fp::{nan16, nan32, nan64};
@@ -676,6 +678,76 @@ fn isa_sweep() {
 }
 
 const WARP_KNOWN: &[&str] = &["v_rndne_f64", "v_cvt_f64_i32", "v_cvt_u32_f64", "v_fma_f64", "v_div_fmas_f64"];
+
+fn fnv64(words: impl Iterator<Item = u32>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for w in words {
+        for b in w.to_le_bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+#[test]
+fn sweep_references_match_rdna2() {
+    let mut bad: Vec<String> = Vec::new();
+    for &(signed, bits, a, s1, got, scc) in rdna2_hw::BFE.iter() {
+        let r = ops_s::bfe64(a, s1, signed, bits);
+        if r != got || (r != 0) as u32 != scc {
+            bad.push(format!("s_bfe_{}{bits} S0={a:#x} S1={s1:#010x}: hardware {got:#x} scc {scc}, model {r:#x}", if signed { "i" } else { "u" }));
+        }
+    }
+    let n16 = |x: u32, signed: bool| ops_v::norm16(fp::h2d(x & 0xffff), signed, nan16(x & 0xffff)).unwrap();
+    let n32 = |x: u32, signed: bool| ops_v::norm16(fp::f(x) as f64, signed, nan32(x)).unwrap();
+    let b16 = |i: u32| (i.wrapping_mul(0x3d17)) & 0xffff;
+    let f16_model = |m: &str, i: u32| match m {
+        "v_cvt_pknorm_i16_f16" => n16(i, true) | (n16(b16(i), true) << 16),
+        "v_cvt_pknorm_u16_f16" => n16(i, false) | (n16(b16(i), false) << 16),
+        "v_cvt_norm_i16_f16" => n16(i, true),
+        "v_cvt_norm_u16_f16" => n16(i, false),
+        _ => unreachable!(),
+    };
+    for (m, want) in rdna2_hw::NORM16_DIGEST {
+        let got = fnv64((0..65536u32).map(|i| f16_model(m, i)));
+        if got != want {
+            bad.push(format!("{m}: model digest over all 65536 inputs {got:#018x}, hardware {want:#018x}"));
+        }
+    }
+    for &(i, pi, pu, ni, nu) in rdna2_hw::NORM16.iter() {
+        for (m, hw) in [("v_cvt_pknorm_i16_f16", pi), ("v_cvt_pknorm_u16_f16", pu), ("v_cvt_norm_i16_f16", ni), ("v_cvt_norm_u16_f16", nu)] {
+            let r = f16_model(m, i);
+            if r != hw {
+                bad.push(format!("{m} input {i:#06x} (b {:#06x}): hardware {hw:#x}, model {r:#x}", b16(i)));
+            }
+        }
+    }
+    let n = ops_v::NRM_F32.len();
+    for (m, signed, want) in [("v_cvt_pknorm_i16_f32", true, rdna2_hw::NORM32_GRID_DIGEST[0].1), ("v_cvt_pknorm_u16_f32", false, rdna2_hw::NORM32_GRID_DIGEST[1].1)] {
+        let got = fnv64((0..n * n).map(|i| n32(ops_v::NRM_F32[i % n], signed) | (n32(ops_v::NRM_F32[i / n], signed) << 16)));
+        if got != want {
+            bad.push(format!("{m}: model digest over the {n}x{n} edge grid {got:#018x}, hardware {want:#018x}"));
+        }
+    }
+    for &(a, b, pi, pu) in rdna2_hw::NORM32.iter() {
+        for (m, signed, hw) in [("v_cvt_pknorm_i16_f32", true, pi), ("v_cvt_pknorm_u16_f32", false, pu)] {
+            let r = n32(a, signed) | (n32(b, signed) << 16);
+            if r != hw {
+                bad.push(format!("{m} ({a:#010x}, {b:#010x}): hardware {hw:#010x}, model {r:#010x}"));
+            }
+        }
+    }
+    println!(
+        "sweep references vs RDNA2 ({}): {} s_bfe cases, 4 f16 digests ({} literal inputs), 2 f32 grid digests, {} f32 literal inputs; {} mismatches",
+        rdna2_hw::SOURCE,
+        rdna2_hw::BFE.len(),
+        rdna2_hw::NORM16.len(),
+        rdna2_hw::NORM32.len(),
+        bad.len()
+    );
+    assert!(bad.is_empty(), "sweep reference models differ from RDNA2 hardware:\n{}", bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+}
+
 
 #[test]
 fn isa_sweep_hlsl_probe() {
