@@ -1,0 +1,23 @@
+1 BinkClose stub | no-op; Bink2 decoding not implemented
+2 BinkDoFramePlane stub | returns 0; Bink2 decoding not implemented
+3 BinkFreeGlobals stub | no-op; Bink2 decoding not implemented
+4 BinkGetFrameBuffersInfo stub | no-op; Bink2 decoding not implemented
+5 BinkGetKeyFrame stub | returns 0; Bink2 decoding not implemented
+6 BinkGetRealtime stub | returns 0; Bink2 decoding not implemented
+7 BinkGetTrackID stub | returns 0; Bink2 decoding not implemented
+8 BinkGoto stub | no-op; Bink2 decoding not implemented
+9 BinkNextFrame stub | no-op; Bink2 decoding not implemented
+10 BinkOpen stub | returns null; Bink2 decoding not implemented
+11 BinkPause stub | returns 0; Bink2 decoding not implemented
+12 BinkRegisterFrameBuffers stub | returns 0; Bink2 decoding not implemented
+13 BinkSetFileOffset stub | no-op; Bink2 decoding not implemented
+14 BinkSetFrameRate stub | no-op; Bink2 decoding not implemented
+15 BinkSetMemory stub | no-op; Bink2 decoding not implemented
+16 BinkSetOSFileCallbacks stub | no-op; Bink2 decoding not implemented
+17 BinkSetSoundSystem stub | returns 0; Bink2 audio not implemented
+18 BinkSetSoundTrack stub | no-op; Bink2 audio not implemented
+19 BinkSetSpeakerVolumes stub | returns 0; Bink2 audio not implemented
+20 BinkSetVolume stub | returns 0; Bink2 audio not implemented
+21 BinkSetWillLoop stub | no-op; Bink2 decoding not implemented
+22 BinkShouldSkip stub | returns 0; Bink2 decoding not implemented
+23 BinkWait stub | returns 0; Bink2 decoding not implemented

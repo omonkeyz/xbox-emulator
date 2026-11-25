@@ -51,6 +51,14 @@ name = "audiohalwrapper"
 version = "0.1.0"
 
 [[package]]
+name = "bink2scarlett"
+version = "0.1.0"
+dependencies = [
+ "compat-common",
+ "xone-exports",
+]
+
+[[package]]
 name = "bootshsvc"
 version = "0.1.0"
 dependencies = [

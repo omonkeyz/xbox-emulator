@@ -1,0 +1,20 @@
+[package]
+name = "bink2scarlett"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+build = "build.rs"
+
+[lib]
+name = "bink2scarlett"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+compat-common = { path = "../compat-common" }
+
+[build-dependencies]
+xone-exports = { path = "../xone-exports" }
+
+[dev-dependencies]
+xone-exports = { path = "../xone-exports" }
