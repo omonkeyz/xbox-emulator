@@ -242,6 +242,8 @@ fn new_scalar_ops() {
         ("s_ashr_i64", vec![sop2(0x23, 4, 0, 2), to_v0, to_v1], vec!["asuint(asint(s1) >> 31)", "asuint(asint(s1) >> ((s2 & 63u) - 32u))"]),
         ("s_absdiff_i32", vec![sop2(0x2c, 4, 0, 1), to_v0], vec!["asuint(abs(asint(s0) - asint(s1)))", "scc = (t"]),
         ("s_pack_ll_b32_b16", vec![sop2(0x32, 4, 0, 1), to_v0], vec!["((s0 & 0xffffu) | (s1 << 16))"]),
+        ("s_cselect_b32", vec![sop2(0x2b, 4, 0, 1), to_v0, to_v1], vec!["((scc != 0u) ? s0 : s1)"]),
+        ("s_cselect_b64", vec![sop2(0x2d, 4, 0, 1), to_v0, to_v1], vec!["((scc != 0u) ? s0 : s1)"]),
         ("s_not_b64", vec![sop1(0x08, 4, 0), to_v0, to_v1], vec!["= ~s0;", "= ~s1;"]),
         ("s_cmov_b64", vec![sopc_eq(2, 3), sop1(0x06, 4, 0), to_v0, to_v1], vec!["(scc != 0u) ? s0 : s4;", "(scc != 0u) ? s1 : s5;"]),
         ("s_flbit_i32_b32", vec![sop1(0x15, 4, 0), to_v0], vec!["((s0) == 0u ? 0xffffffffu : (31u - firstbithigh(s0)))"]),
