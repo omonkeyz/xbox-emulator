@@ -15,6 +15,6 @@ fn export_table_matches_source() {
         assert_eq!(f[2] == "stub", stub, "{name}");
         n += 1;
     }
-    assert_eq!(n, 23);
+    assert_eq!(n, 24);
     assert!(!TABLE.starts_with('\u{feff}'));
 }

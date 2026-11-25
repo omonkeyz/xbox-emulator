@@ -21,3 +21,4 @@
 21 XGTerminateLibrary implemented
 22 XGValidateDepthStencilSwizzleMode implemented
 23 XGValidateDescriptor implemented
+24 XGSuggestSwizzleMode pending | fills D3D12_RESOURCE_DESC.Layout with 0x100 | mode (verified at game_scarlett_master.exe RVA 0xc4b3ce and 0x4eccca2: RCX=desc, RDX=0, R8=&desc->Layout -> HRESULT); reuses XGComputeOptimalSwizzleMode rules

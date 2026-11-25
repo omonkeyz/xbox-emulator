@@ -217,6 +217,50 @@ pub unsafe extern "system" fn XGComputeOptimalSwizzleMode(dim: u32, format: u32,
 }
 
 #[no_mangle]
+pub unsafe extern "system" fn XGSuggestSwizzleMode(desc: *const u8, flags: usize, out: *mut u32) -> i32 {
+    console!("XGSuggestSwizzleMode", fn(*const u8, usize, *mut u32) -> i32, desc, flags, out);
+    if desc.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    if flags != 0 {
+        return compat_common::E_NOTIMPL;
+    }
+    let d = D3D12Desc::read(desc);
+    if d.dimension <= 1 || d.dimension > 4 {
+        return E_INVALIDARG;
+    }
+    let fl = d.flags;
+    let mut bind = 8 | ((fl & 2) << 5);
+    if fl & 1 != 0 {
+        bind |= 0x20;
+    }
+    if fl & 4 != 0 {
+        bind |= 0x80;
+    }
+    if fl & 8 != 0 {
+        bind &= !8;
+    }
+    let misc = if fl & 0x20 != 0 { 0x38_0000 } else { 0 };
+    let mode = if bind & 0x40 != 0 {
+        24
+    } else {
+        let code = match d.dimension {
+            2 => 2,
+            3 => 3,
+            4 => 4,
+            _ => 0,
+        };
+        if code == 0 {
+            0
+        } else {
+            optimal_swizzle(code, d.format, d.width, d.height, d.depth_or_array as u32, d.samples, bind & 0x20 != 0, bind & 0x80 != 0, misc >> 27 & 1 != 0)
+        }
+    };
+    *out = 0x100 | mode;
+    S_OK
+}
+
+#[no_mangle]
 pub unsafe extern "system" fn XGComputeOptimalDepthStencilSwizzleMode(a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize, a8: usize, stencil: *mut u32) -> u32 {
     console!("XGComputeOptimalDepthStencilSwizzleMode", fn(usize, usize, usize, usize, usize, usize, usize, usize, *mut u32) -> u32, a1, a2, a3, a4, a5, a6, a7, a8, stencil);
     if !stencil.is_null() {
@@ -642,5 +686,36 @@ mod tests {
         assert_eq!((t.swizzle_mode, t.bind_flags, t.usage), (0, 0xa0, 3));
         let d = D3D12Desc { layout: 3, ..d };
         assert_eq!(d.to_tex2d().unwrap_err().hr(), E_INVALIDARG);
+    }
+
+    #[test]
+    fn suggest_swizzle_mode_rules() {
+        let mut d = [0u8; 0x40];
+        let put = |d: &mut [u8; 0x40], o: usize, v: u32| d[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut d, 0x00, 3);
+        d[0x10..0x18].copy_from_slice(&64u64.to_le_bytes());
+        put(&mut d, 0x18, 64);
+        d[0x1c..0x1e].copy_from_slice(&1u16.to_le_bytes());
+        d[0x1e..0x20].copy_from_slice(&1u16.to_le_bytes());
+        put(&mut d, 0x20, 28);
+        put(&mut d, 0x24, 1);
+        let mut out = 0u32;
+        unsafe {
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 0, &mut out), S_OK);
+            assert_eq!(out, 0x105);
+            put(&mut d, 0x30, 1);
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 0, &mut out), S_OK);
+            assert_eq!(out, 0x11b);
+            put(&mut d, 0x30, 2);
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 0, &mut out), S_OK);
+            assert_eq!(out, 0x118);
+            put(&mut d, 0x30, 4);
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 0, &mut out), S_OK);
+            assert_eq!(out, 0x115);
+            put(&mut d, 0x00, 1);
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 0, &mut out), E_INVALIDARG);
+            put(&mut d, 0x00, 3);
+            assert_eq!(XGSuggestSwizzleMode(d.as_ptr(), 1, &mut out), compat_common::E_NOTIMPL);
+        }
     }
 }
