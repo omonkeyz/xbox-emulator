@@ -1,0 +1,7 @@
+1 CreateXboxBvhBuilder implemented | allocates XboxBvhBuilder COM object
+2 XboxBvhBuilderInitialize implemented | stores device pointer on XboxBvhBuilder
+3 XboxBvhBuilderGetPrebuildInfo stub | returns E_NOTIMPL; D3D12 acceleration-structure prebuild info mapping pending
+4 XboxBvhBuilderBuildBottomLevel stub | returns E_NOTIMPL; D3D12 BLAS build recording pending
+5 XboxBvhBuilderBuildTopLevel stub | returns E_NOTIMPL; D3D12 TLAS build recording pending
+6 XboxBvhBuilderCopy stub | returns E_NOTIMPL; D3D12 AS copy recording pending
+7 XboxBvhBuilderDestroy implemented | releases XboxBvhBuilder COM object

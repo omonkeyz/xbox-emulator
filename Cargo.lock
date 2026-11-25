@@ -842,6 +842,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xboxbvhbuilder"
+version = "0.1.0"
+dependencies = [
+ "compat-common",
+ "xone-exports",
+]
+
+[[package]]
 name = "xbsc_xs"
 version = "0.1.0"
 dependencies = [
