@@ -34,12 +34,15 @@ float tb_m_cvtu(uint x, uint m) { precise float r = tb_u2f(x); double e = (r >= 
 float tb_m_cvtd(double x, uint m) { precise float r = (float)x; precise double e = x - (double)r; return tb_rfix(r, e, m); }
 double tb_p2(int n) { return asdouble(0u, (uint)(clamp(n, -1000, 1000) + 1023) << 20); }
 float tb_m_ldexp(float a, int n, uint m) { int k = clamp(n, -300, 300); precise double x = (double)a * tb_p2(k >> 1) * tb_p2(k - (k >> 1)); precise float r = (float)x; precise double e = x - (double)r; return tb_rfix(r, e, m); }
-uint tb_h_rnd(double x, double er, uint k, uint zs) { if (x != x) return tb_f2h((float)x); if (x == 0.0 && er == 0.0) return zs << 15; bool ng = (x < 0.0) || (x == 0.0 && er < 0.0); double ax = ng ? -x : x; double ea = ng ? -er : er; uint sg = ng ? 0x8000u : 0u; uint lo, hi; asuint(ax, lo, hi); bool ov = (k == 0u) || (k == 1u && !ng) || (k == 2u && ng); int e = (int)((hi >> 20) & 0x7ffu) - 1023; if (e >= 16) return sg | (ov ? 0x7c00u : 0x7bffu); int ue = max(e - 10, -24); double sc = asdouble(0u, (uint)(1023 - ue) << 20); double mm = ax * sc; uint n = (uint)mm; double fr = mm - (double)n; double es = ea * sc; if (fr == 0.0 && es < 0.0) { n -= 1u; fr = 1.0; es = 0.0; } bool nz = fr > 0.0 || es > 0.0; bool up = false; if (k == 0u) up = fr > 0.5 || (fr == 0.5 && (es > 0.0 || (es == 0.0 && (n & 1u) != 0u))); else if (k != 3u) up = nz && ((k == 1u) != ng); if (up) n += 1u; uint b = (uint)((ue + 24) << 10) + n; if (b >= 0x7c00u) b = ov ? 0x7c00u : 0x7bffu; return sg | b; }
+uint tb_h_rnd(double x, double er, uint k, uint zs, bool fl) { uint xl, xh; asuint(x, xl, xh); if ((xh & 0x7fffffffu) > 0x7ff00000u || ((xh & 0x7fffffffu) == 0x7ff00000u && xl != 0u)) return tb_f2h((float)x); if (x == 0.0 && er == 0.0) return zs << 15; bool ng = (x < 0.0) || (x == 0.0 && er < 0.0); double ax = ng ? -x : x; double ea = ng ? -er : er; uint sg = ng ? 0x8000u : 0u; if (fl && (ax < 6.103515625e-05 || (ax == 6.103515625e-05 && ea < 0.0))) return sg; uint lo, hi; asuint(ax, lo, hi); bool ov = (k == 0u) || (k == 1u && !ng) || (k == 2u && ng); int e = (int)((hi >> 20) & 0x7ffu) - 1023; if (e >= 16) return sg | (ov ? 0x7c00u : 0x7bffu); int ue = max(e - 10, -24); double sc = asdouble(0u, (uint)(1023 - ue) << 20); double mm = ax * sc; uint n = (uint)mm; double fr = mm - (double)n; double es = ea * sc; if (fr == 0.0 && es < 0.0) { n -= 1u; fr = 1.0; es = 0.0; } bool nz = fr > 0.0 || es > 0.0; bool up = false; if (k == 0u) up = fr > 0.5 || (fr == 0.5 && (es > 0.0 || (es == 0.0 && (n & 1u) != 0u))); else if (k != 3u) up = nz && ((k == 1u) != ng); if (up) n += 1u; uint b = (uint)((ue + 24) << 10) + n; if (b >= 0x7c00u) b = ov ? 0x7c00u : 0x7bffu; return sg | b; }
 uint tb_zs(float a, float b, uint k) { uint sa = asuint(a) >> 31, sb = asuint(b) >> 31; return (sa & sb) | ((k == 2u) ? (sa | sb) : 0u); }
-uint tb_h_add(float a, float b, uint m) { uint k = (m >> 2) & 3u; return tb_h_rnd((double)a + (double)b, 0.0, k, tb_zs(a, b, k)); }
-uint tb_h_mul(float a, float b, uint m) { return tb_h_rnd((double)a * (double)b, 0.0, (m >> 2) & 3u, (asuint(a) ^ asuint(b)) >> 31); }
-uint tb_h_fma(float a, float b, float c, uint m) { uint k = (m >> 2) & 3u; precise double p = (double)a * (double)b; precise double s = p + (double)c; precise double bb = s - p; precise double er = (p - (s - bb)) + ((double)c - bb); uint sp = (asuint(a) ^ asuint(b)) >> 31, sc = asuint(c) >> 31; return tb_h_rnd(s, er, k, (sp & sc) | ((k == 2u) ? (sp | sc) : 0u)); }
-uint tb_h_cvt(double x, uint m, uint zs) { return tb_h_rnd(x, 0.0, (m >> 2) & 3u, zs); }
+uint tb_hpn(float x, uint m) { uint b = asuint(x); return ((b >> 16) & 0x8000u) | 0x7c00u | (((m & 0x200u) != 0u) ? 0x200u : 0u) | max((b >> 13) & 0x3ffu, 1u); }
+uint tb_hnan(float a, float b, float c, uint m) { return tb_nan(a) ? tb_hpn(a, m) : (tb_nan(b) ? tb_hpn(b, m) : (tb_nan(c) ? tb_hpn(c, m) : 0xfe00u)); }
+bool tb_dnan(double x) { uint l, h; asuint(x, l, h); return (h & 0x7fffffffu) > 0x7ff00000u || ((h & 0x7fffffffu) == 0x7ff00000u && l != 0u); }
+uint tb_h_add(float a, float b, uint m) { uint k = (m >> 2) & 3u; precise double s = (double)a + (double)b; if (tb_nan(a) || tb_nan(b) || tb_dnan(s)) return tb_hnan(a, b, 0.0, m); return tb_h_rnd(s, 0.0, k, tb_zs(a, b, k), (m & 0x80u) == 0u); }
+uint tb_h_mul(float a, float b, uint m) { precise double p = (double)a * (double)b; if (tb_nan(a) || tb_nan(b) || tb_dnan(p)) return tb_hnan(a, b, 0.0, m); return tb_h_rnd(p, 0.0, (m >> 2) & 3u, (asuint(a) ^ asuint(b)) >> 31, (m & 0x80u) == 0u); }
+uint tb_h_fma(float a, float b, float c, uint m) { uint k = (m >> 2) & 3u; precise double p = (double)a * (double)b; precise double s = p + (double)c; if (tb_nan(a) || tb_nan(b) || tb_nan(c) || tb_dnan(s)) return tb_hnan(a, b, c, m); precise double bb = s - p; precise double er = (p - (s - bb)) + ((double)c - bb); uint sp = (asuint(a) ^ asuint(b)) >> 31, sc = asuint(c) >> 31; return tb_h_rnd(s, er, k, (sp & sc) | ((k == 2u) ? (sp | sc) : 0u), (m & 0x80u) == 0u); }
+uint tb_h_cvt(double x, uint m, uint zs) { return tb_h_rnd(x, 0.0, (m >> 2) & 3u, zs, (m & 0x80u) == 0u); }
 "#;
 
 pub(super) const MODE_F64_HELPERS: &str = r#"bool tb_dneg(double r) { uint lo, hi; asuint(r, lo, hi); return (hi >> 31) != 0u; }
@@ -518,7 +521,7 @@ impl Emitter<'_> {
             return Ok(false);
         }
         if ins.aux.sdwa.is_some() {
-            return Err(format!("{m}: SDWA operand selection under a shader-written MODE is not supported"));
+            return Ok(false);
         }
         self.hw_regs.insert(1);
         let s = &ins.src;
@@ -587,8 +590,8 @@ impl Emitter<'_> {
         let h = |me: &Self, i: usize| -> Result<String, String> { Ok(me.vop3_mods(ins, i, me.hval(ins, i, None)?)) };
         let bits = match m {
             "v_add_f16" => format!("tb_h_add({}, {}, tb_hw1)", h(self, 0)?, h(self, 1)?),
-            "v_sub_f16" => format!("tb_h_add({}, (-{}), tb_hw1)", h(self, 0)?, h(self, 1)?),
-            "v_subrev_f16" => format!("tb_h_add({}, (-{}), tb_hw1)", h(self, 1)?, h(self, 0)?),
+            "v_sub_f16" => format!("tb_h_add({}, asfloat(asuint({}) ^ 0x80000000u), tb_hw1)", h(self, 0)?, h(self, 1)?),
+            "v_subrev_f16" => format!("tb_h_add({}, asfloat(asuint({}) ^ 0x80000000u), tb_hw1)", h(self, 1)?, h(self, 0)?),
             "v_mul_f16" => format!("tb_h_mul({}, {}, tb_hw1)", h(self, 0)?, h(self, 1)?),
             "v_fma_f16" => format!("tb_h_fma({}, {}, {}, tb_hw1)", h(self, 0)?, h(self, 1)?, h(self, 2)?),
             "v_ldexp_f16" => format!("tb_h_cvt((double)({}) * tb_p2(clamp(asint(({}) << 16) >> 16, -64, 64)), tb_hw1, asuint({}) >> 31)", h(self, 0)?, r(&s[1])?, h(self, 0)?),
@@ -611,7 +614,7 @@ impl Emitter<'_> {
             }
             "v_fma_mixlo_f16" | "v_fma_mixhi_f16" => {
                 let v = self.mix_vals(ins)?;
-                let mut b = format!("tb_h_fma({}, {}, {}, tb_hw1)", v[0], v[1], v[2]);
+                let mut b = format!("tb_h_fma({}, {}, {}, tb_hw1 | 0x280u)", v[0], v[1], v[2]);
                 if (ins.raw[0] >> 15) & 1 != 0 {
                     b = format!("tb_f2h(saturate(f16tof32({b})))");
                 }

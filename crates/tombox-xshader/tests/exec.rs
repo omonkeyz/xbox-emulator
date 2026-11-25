@@ -2829,6 +2829,31 @@ fn scalar_mode_effects() {
 }
 
 #[test]
+fn f16_flush_mode_nan_tininess_and_sdwa_as_rdna2() {
+    let mut c = Cases::new();
+    let hw = |id: u32, off: u32, size: u32| (id | (off << 6) | ((size - 1) << 11)) as u16;
+    let flush16 = [sopk(0x15, 0, hw(1, 6, 2)), 0];
+    let sdwa_add = [vop2(0x32, 12, 0xf9, 2), 1 | (4 << 8) | (2 << 11) | (5 << 16) | (4 << 24)];
+    let cases: Vec<(&str, Vec<(u32, u32)>, Vec<u32>, u32)> = vec![
+        ("v_mul_f16", vec![(1, 0x7c00), (2, 0)], vec![vop2(0x35, 12, v(1), 2)], 0xfe00),
+        ("v_add_f16", vec![(1, 0x7e00), (2, 0)], vec![vop2(0x32, 12, v(1), 2)], 0x7e00),
+        ("v_subrev_f16", vec![(1, 0x7e00), (2, 0)], vec![vop2(0x34, 12, v(1), 2)], 0xfe00),
+        ("v_ldexp_f16", vec![(1, 0x7fff), (2, 0)], vec![vop2(0x3b, 12, v(1), 2)], 0x7fff),
+        ("v_cvt_f16_f32", vec![(1, 0x7fc0_0000)], vec![vop1(0x0a, 12, v(1))], 0x7e00),
+        ("v_fma_f16", vec![(1, 0x7c00), (2, 0), (3, 0xc4a0)], vop3(0x34b, 12, [v(1), v(2), v(3)]).to_vec(), 0xfe00),
+        ("v_fmaak_f16", vec![(1, 0x3bff), (2, 0x0400)], vec![vop2(0x38, 12, v(1), 2), 0], 0x0000),
+        ("v_add_f16", vec![(1, 0x3c00_0000), (2, 0x3c00)], sdwa_add.to_vec(), 0x4000),
+    ];
+    for (_, ins, w, want) in cases {
+        let mut p = flush16.to_vec();
+        p.extend_from_slice(&w);
+        vc(&mut c, "s_setreg_imm32_b32", &ins, &p, &[12], &[want]);
+    }
+    vc(&mut c, "v_fmaak_f16", &[(1, 0x3bff), (2, 0x0400)], &[vop2(0x38, 12, v(1), 2), 0], &[12], &[0x0400]);
+    c.run_both("f16_flush_mode_rdna2");
+}
+
+#[test]
 fn f16_omod_follows_mode() {
     let mut c = Cases::new();
     let hw = |id: u32, off: u32, size: u32| (id | (off << 6) | ((size - 1) << 11)) as u16;
