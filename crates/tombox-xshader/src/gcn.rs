@@ -335,7 +335,12 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
     let err = |e: String| format!("gfx7 at {at:#x} ({w:#010x}): {e}");
     Ok(match ins.enc {
         Enc::Sop2 => match (w >> 23) & 0x7f {
-            0x00..=0x0b | 0x0e..=0x2d => ins.words.clone(),
+            0x00..=0x0b | 0x0e..=0x2a | 0x2c..=0x2d => ins.words.clone(),
+            0x2b => {
+                // gfx7 SOP2 0x2b is s_cbranch_g_fork; it has no RDNA2 counterpart and is
+                // refused instead of being passed through as a raw sop2 word.
+                return Err(err(format!("s_cbranch_g_fork (gfx7 sop2 0x2b) has no RDNA2 equivalent")));
+            }
             op => return Err(err(format!("SOP2 opcode {op:#x} is not supported"))),
         },
         Enc::Sopk => match (w >> 23) & 0x1f {
