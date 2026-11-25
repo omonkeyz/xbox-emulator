@@ -187,9 +187,15 @@ float tb_fsub(float a, float b) { precise float r = a - b; uint ua = asuint(a), 
 float tb_hz(float r, uint s) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? s : b); }
 float tb_pz(float r) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? 0u : b); }
 float tb_pzf(float r, float a, float b) { uint m = 0x7fffffffu; return ((asuint(a) & m) == 0u || (asuint(b) & m) == 0u) ? tb_pz(r) : r; }
-float tb_hadd(float a, float b) { uint ua = asuint(a), ub = asuint(b); return tb_hz(a + b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ub & 0x80000000u) : 0u); }
-float tb_hsub(float a, float b) { uint ua = asuint(a), ub = asuint(b); return tb_hz(a - b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ~ub & 0x80000000u) : 0u); }
-float tb_hmul(float a, float b) { return tb_hz(a * b, (asuint(a) ^ asuint(b)) & 0x80000000u); }
+float tb_hgen(float r) { return tb_nan(r) ? asfloat(0xffc00000u) : r; }
+float tb_h2fk(uint h) { h &= 0xffffu; return ((h & 0x7c00u) == 0x7c00u && (h & 0x3ffu) != 0u) ? asfloat(((h & 0x8000u) << 16) | 0x7f800000u | ((h & 0x3ffu) << 13)) : f16tof32(h); }
+float tb_hp1(float a, float r) { return tb_nan(a) ? a : r; }
+float tb_hp2(float a, float b, float r) { return tb_nan(a) ? a : (tb_nan(b) ? b : r); }
+float tb_hpm(float a, float b, float r) { return (tb_nan(a) && tb_nan(b)) ? a : r; }
+float tb_hpf(float a, float b, float c, float r) { if (tb_nan(a)) return a; if (tb_nan(b)) return b; if ((isinf(a) && b == 0.0) || (a == 0.0 && isinf(b))) return asfloat(0xffc00000u); if (tb_nan(c)) return c; return tb_hgen(r); }
+float tb_hadd(float a, float b) { uint ua = asuint(a), ub = asuint(b); if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : b; return tb_hgen(tb_hz(a + b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ub & 0x80000000u) : 0u)); }
+float tb_hsub(float a, float b) { uint ua = asuint(a), ub = asuint(b); if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : asfloat(ub ^ 0x80000000u); return tb_hgen(tb_hz(a - b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ~ub & 0x80000000u) : 0u)); }
+float tb_hmul(float a, float b) { if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : b; return tb_hgen(tb_hz(a * b, (asuint(a) ^ asuint(b)) & 0x80000000u)); }
 float tb_fract(float x) { if ((asuint(x) & 0x7fffffffu) >= 0x7f800000u) return asfloat(0x7fc00000u); precise float f = x - floor(x); return min(f, asfloat(0x3f7fffffu)); }
 bool tb_isinf32(float x) { return abs(x) == asfloat(0x7f800000u); }
 int tb_exp32(float x) { return (int)((asuint(x) >> 23) & 0xffu); }
@@ -202,6 +208,7 @@ uint tb_f2h(float x) { uint b = asuint(x); return (b & 0x7fffffffu) > 0x7f800000
 #else
 uint tb_f2h(float x) { uint b = asuint(x); uint s = (b >> 16) & 0x8000u; uint a = b & 0x7fffffffu; if (a > 0x7f800000u) return s | 0x7e00u | ((a >> 13) & 0x3ffu); if (a >= 0x477ff000u) return s | 0x7c00u; if (a >= 0x38800000u) { uint r = a - 0x38000000u; return s | ((r + 0xfffu + ((r >> 13) & 1u)) >> 13); } if (a < 0x33000000u) return s; uint e = a >> 23; uint m = (a & 0x7fffffu) | 0x800000u; uint sh = 126u - e; uint q = m >> sh; uint rem = m & ((1u << sh) - 1u); uint hf = 1u << (sh - 1u); if (rem > hf || (rem == hf && (q & 1u) != 0u)) q += 1u; return s | q; }
 #endif
+uint tb_f2hk(float x) { uint b = asuint(x); uint m = (b >> 13) & 0x3ffu; return tb_nan(x) ? (((b >> 16) & 0x8000u) | 0x7c00u | (m != 0u ? m : 0x200u)) : tb_f2h(x); }
 float tb_rne(float x) { float a = abs(x); if (!(a < 8388608.0)) return x; float r = floor(a); float f = a - r; if (f > 0.5 || (f == 0.5 && (((uint)r) & 1u) != 0u)) r += 1.0; return asfloat(asuint(r) | (asuint(x) & 0x80000000u)); }
 float tb_flr(float x) { return TB_SEL(asuint(x) - 0x80000001u < 0x7fffffu, -1.0, floor(x)); }
 float tb_floor(float x) { uint b = asuint(x); return TB_SEL((b & 0x7fffffffu) > 0x7f800000u, asfloat(b | 0x400000u), tb_flr(x)); }
@@ -5187,16 +5194,16 @@ impl<'a> Emitter<'a> {
             let hi_sel = ins.enc == Enc::Vop3 && s.iter().position(|x| std::ptr::eq(x, o)).map_or(false, |i| (ins.raw[0] >> (11 + i)) & 1 != 0);
             let mut e = match o {
                 Opnd::ConstF32(x) => f16_inline_val(*x, hi_sel),
-                _ if hi_sel => format!("f16tof32(({}) >> 16)", r(o)?),
-                _ => format!("f16tof32(({}) & 0xffffu)", r(o)?),
+                _ if hi_sel => format!("tb_h2fk(({}) >> 16)", r(o)?),
+                _ => format!("tb_h2fk({})", r(o)?),
             };
             if ins.enc == Enc::Vop3 {
                 if let Some(i) = s.iter().position(|x| std::ptr::eq(x, o)) {
                     if (ins.aux.mask >> i) & 1 != 0 {
-                        e = format!("abs({e})");
+                        e = format!("asfloat(asuint({e}) & 0x7fffffffu)");
                     }
                     if (ins.aux.mask >> (3 + i)) & 1 != 0 {
-                        e = format!("(-{e})");
+                        e = format!("asfloat(asuint({e}) ^ 0x80000000u)");
                     }
                 }
             }
@@ -5209,17 +5216,17 @@ impl<'a> Emitter<'a> {
                     e = format!("saturate({e})");
                 }
             }
-            format!("tb_f2h({e})")
+            format!("tb_f2hk({e})")
         };
         if matches!(m.as_str(), "v_add_f16" | "v_sub_f16" | "v_subrev_f16" | "v_mul_f16" | "v_max_f16" | "v_min_f16") {
             let (a, b) = (h16(&s[0])?, h16(&s[1])?);
             let e = match m.as_str() {
                 "v_add_f16" => format!("tb_hadd({a}, {b})"),
                 "v_sub_f16" => format!("tb_hsub({a}, {b})"),
-                "v_subrev_f16" => format!("tb_hsub({b}, {a})"),
+                "v_subrev_f16" => format!("(tb_nan({a}) ? asfloat(asuint({a}) ^ 0x80000000u) : tb_hsub({b}, {a}))"),
                 "v_mul_f16" => format!("tb_hmul({a}, {b})"),
-                "v_max_f16" => format!("max({a}, {b})"),
-                _ => format!("min({a}, {b})"),
+                "v_max_f16" => format!("tb_hpm({a}, {b}, max({a}, {b}))"),
+                _ => format!("tb_hpm({a}, {b}, min({a}, {b}))"),
             };
             return self.wv(&d, &hres(e));
         }
@@ -5256,8 +5263,9 @@ impl<'a> Emitter<'a> {
                 "v_ceil_f16" => format!("ceil({a})"),
                 "v_trunc_f16" => format!("trunc({a})"),
                 "v_rndne_f16" => format!("tb_rne({a})"),
-                _ => format!("((tb_nan({a}) || isinf({a})) ? asfloat(0x7fc00000u) : min(frac({a}), 0.99951171875))"),
+                _ => format!("(isinf({a}) ? asfloat(0xffc00000u) : min(frac({a}), 0.99951171875))"),
             };
+            let e = format!("tb_hp1({a}, {e})");
             return self.wv(&d, &hres(e));
         }
         if m == "v_cvt_f16_u16" {
@@ -5275,7 +5283,7 @@ impl<'a> Emitter<'a> {
             return self.wv(&d, &format!("(tb_nan({x}) ? 0u : (asuint((int)clamp({x}, -32768.0, 32767.0)) & 0xffffu))"));
         }
         if matches!(m.as_str(), "v_fma_f16" | "v_fmac_f16" | "v_fmamk_f16" | "v_fmaak_f16") {
-            let k = format!("f16tof32({:#x}u)", ins.raw.last().copied().unwrap_or(0) & 0xffff);
+            let k = format!("tb_h2fk({:#x}u)", ins.raw.last().copied().unwrap_or(0) & 0xffff);
             let (x, y, z, exact) = match m.as_str() {
                 "v_fma_f16" => (h16(&s[0])?, h16(&s[1])?, h16(&s[2])?, fma16_operands_exact(&s[..2])),
                 "v_fmac_f16" => {
@@ -5295,6 +5303,7 @@ impl<'a> Emitter<'a> {
             };
             let e = format!("{f}({x}, {y}, {z})");
             let e = if pz { format!("tb_pz({e})") } else { e };
+            let e = format!("tb_hpf({x}, {y}, {z}, {e})");
             return self.wv(&d, &hres(e));
         }
         if matches!(m.as_str(), "v_pk_fma_f16" | "v_pk_add_f16" | "v_pk_mul_f16" | "v_pk_min_f16" | "v_pk_max_f16") {
@@ -5314,22 +5323,22 @@ impl<'a> Emitter<'a> {
                         o @ Opnd::ConstF32(_) => format!("tb_f2h({})", f(o)?),
                         o => r(o)?,
                     };
-                    let mut e = if (sel[h] >> i) & 1 != 0 { format!("f16tof32(({x}) >> 16)") } else { format!("f16tof32(({x}) & 0xffffu)") };
+                    let mut e = if (sel[h] >> i) & 1 != 0 { format!("tb_h2fk(({x}) >> 16)") } else { format!("tb_h2fk({x})") };
                     if (neg[h] >> i) & 1 != 0 {
-                        e = format!("(-{e})");
+                        e = format!("asfloat(asuint({e}) ^ 0x80000000u)");
                     }
                     v.push(e);
                 }
                 halves.push(match m.as_str() {
-                    "v_pk_fma_f16" => format!("tb_fma16({}, {}, {})", v[0], v[1], v[2]),
-                    "v_pk_add_f16" => format!("{} + {}", v[0], v[1]),
-                    "v_pk_mul_f16" => format!("{} * {}", v[0], v[1]),
-                    "v_pk_min_f16" => format!("min({}, {})", v[0], v[1]),
-                    _ => format!("max({}, {})", v[0], v[1]),
+                    "v_pk_fma_f16" => format!("tb_hpf({0}, {1}, {2}, tb_fma16({0}, {1}, {2}))", v[0], v[1], v[2]),
+                    "v_pk_add_f16" => format!("tb_hp2({0}, {1}, {0} + {1})", v[0], v[1]),
+                    "v_pk_mul_f16" => format!("tb_hp2({0}, {1}, {0} * {1})", v[0], v[1]),
+                    "v_pk_min_f16" => format!("tb_hpm({0}, {1}, min({0}, {1}))", v[0], v[1]),
+                    _ => format!("tb_hpm({0}, {1}, max({0}, {1}))", v[0], v[1]),
                 });
             }
             let halves: Vec<String> = if (w0 >> 15) & 1 != 0 { halves.into_iter().map(|h| format!("saturate({h})")).collect() } else { halves };
-            return self.wv(&d, &format!("(tb_f2h({}) | (tb_f2h({}) << 16))", halves[0], halves[1]));
+            return self.wv(&d, &format!("(tb_f2hk({}) | (tb_f2hk({}) << 16))", halves[0], halves[1]));
         }
         if let Some(e) = pk_int16(&m, ins)? {
             return self.wv(&d, &e);
@@ -5363,16 +5372,15 @@ impl<'a> Emitter<'a> {
         }
         if m == "v_ldexp_f16" {
             let x = h16(&s[0])?;
-            let e = format!("tb_hz(ldexp({x}, (float)clamp(asint(({}) << 16) >> 16, -64, 64)), asuint({x}) & 0x80000000u)", r(&s[1])?);
+            let e = format!("tb_hp1({x}, tb_hz(ldexp({x}, (float)clamp(asint(({}) << 16) >> 16, -64, 64)), asuint({x}) & 0x80000000u))", r(&s[1])?);
             return self.wv(&d, &hres(e));
         }
         if m == "v_pk_fmac_f16" {
             self.touch(&d);
             let (a, b, c) = (r(&s[0])?, r(&s[1])?, r(&d)?);
-            let x = |v: &str, hi: bool| if hi { format!("f16tof32(({v}) >> 16)") } else { format!("f16tof32(({v}) & 0xffffu)") };
-            let lo = format!("{} * {} + {}", x(&a, false), x(&b, false), x(&c, false));
-            let hi_e = format!("{} * {} + {}", x(&a, true), x(&b, true), x(&c, true));
-            return self.wv(&d, &format!("(tb_f2h({lo}) | (tb_f2h({hi_e}) << 16))"));
+            let x = |v: &str, hi: bool| if hi { format!("tb_h2fk(({v}) >> 16)") } else { format!("tb_h2fk({v})") };
+            let p = |hi: bool| format!("tb_hpf({0}, {1}, {2}, {0} * {1} + {2})", x(&a, hi), x(&b, hi), x(&c, hi));
+            return self.wv(&d, &format!("(tb_f2hk({}) | (tb_f2hk({}) << 16))", p(false), p(true)));
         }
         if matches!(m.as_str(), "v_frexp_exp_i32_f32" | "v_frexp_mant_f32") {
             let t = self.tmp;
@@ -6041,7 +6049,7 @@ impl<'a> Emitter<'a> {
             "v_cvt_f32_ubyte3" => Some(format!("(float)(({a} >> 24) & 0xffu)")),
             "v_cvt_f32_f16" => Some(match &s[0] {
                 Opnd::ConstF32(x) => f16_inline_val(*x, false),
-                _ => format!("f16tof32({a})"),
+                _ => format!("tb_h2fk({a})"),
             }),
             "v_fract_f32" => Some(format!("tb_fract({})", fa()?)),
             "v_trunc_f32" => Some(format!("tb_trunc({})", fa()?)),

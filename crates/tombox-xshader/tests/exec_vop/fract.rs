@@ -32,10 +32,11 @@ fn vop1_fract_special_values() {
         v1c(&mut c, "v_fract_f32", 0x20, a, exp);
     }
     for &(h, exp) in &[
-        (0x7c00u32, QNAN16),
-        (0xfc00, QNAN16),
-        (0x7e00, QNAN16),
-        (0xfe01, QNAN16),
+        (0x7c00u32, 0xfe00),
+        (0xfc00, 0xfe00),
+        (0x7e00, 0x7e00),
+        (0xfe01, 0xfe01),
+        (0x7c01, 0x7c01),
         (0x8000, 0x0000),
         (0x0000, 0x0000),
         (BELOW_ONE16, BELOW_ONE16),

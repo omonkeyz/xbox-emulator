@@ -477,3 +477,35 @@ fn salu_basic() {
     c.add("s_getpc_b64", &pre, &[sop1(0x1f, 20, 0), sop1(0x1f, 22, 0)], &post, &[4, 0]);
     c.run_both("salu_basic");
 }
+
+#[test]
+fn f16_nan_sign_and_generation_as_rdna2() {
+    let mut c = Cases::new();
+    v2(&mut c, "v_sub_f16", 0x33, 0x8000, 0x7e00, D16 | 0xfe00);
+    v2(&mut c, "v_subrev_f16", 0x34, 0x7e00, 0, D16 | 0xfe00);
+    v2(&mut c, "v_sub_f16", 0x33, 0x7e55, 0x3c00, D16 | 0x7e55);
+    v2(&mut c, "v_add_f16", 0x32, 0x3c00, 0xfe55, D16 | 0xfe55);
+    v2(&mut c, "v_mul_f16", 0x35, 0x7c00, 0, D16 | 0xfe00);
+    v2(&mut c, "v_add_f16", 0x32, 0x7c00, 0xfc00, D16 | 0xfe00);
+    vc(&mut c, "v_add_f16", &[(1, 0x7e00), (2, 0)], &vop3m(0x132, 10, [v(1), v(2), 0], 0, 1, 0, false), &[10], &[D16 | 0xfe00]);
+    vc(&mut c, "v_mul_f16", &[(1, 0xfe00), (2, 0x3c00)], &vop3m(0x135, 10, [v(1), v(2), 0], 1, 0, 0, false), &[10], &[D16 | 0x7e00]);
+    c.run_both("f16_nan_rdna2");
+}
+
+#[test]
+fn f16_signalling_nan_passes_through_as_rdna2() {
+    let mut c = Cases::new();
+    v2(&mut c, "v_add_f16", 0x32, 0x7c01, 0, D16 | 0x7c01);
+    v2(&mut c, "v_mul_f16", 0x35, 0x7c01, 0, D16 | 0x7c01);
+    v2(&mut c, "v_max_f16", 0x39, 0x7c01, 0x7e00, D16 | 0x7c01);
+    v2(&mut c, "v_min_f16", 0x3a, 0x7c01, 0x7e00, D16 | 0x7c01);
+    v2(&mut c, "v_ldexp_f16", 0x3b, 0x7c55, 1, D16 | 0x7c55);
+    vc(&mut c, "v_fma_f16", &[(1, 0x7c01), (2, 0), (3, 0x8d42)], &vop3(0x34b, 10, [v(1), v(2), v(3)]), &[10], &[D16 | 0x7c01]);
+    vc(&mut c, "v_floor_f16", &[(1, 0x7c01)], &[vop1(0x5b, 10, v(1))], &[10], &[D16 | 0x7c01]);
+    vc(&mut c, "v_fract_f16", &[(1, 0x7c00)], &[vop1(0x5f, 10, v(1))], &[10], &[D16 | 0xfe00]);
+    vc(&mut c, "v_cvt_f32_f16", &[(1, 0x7c01)], &[vop1(0x0b, 10, v(1))], &[10], &[0x7f80_2000]);
+    vc(&mut c, "v_pk_add_f16", &[(1, 0x0000_7c01), (2, 0x7c01_0000)], &vop3p(0x0f, 10, [v(1), v(2), 0], 0, 3, 0, 0), &[10], &[0x7c01_7c01]);
+    vc(&mut c, "v_fma_f16", &[(1, 0x7c00), (2, 0), (3, 0xfe55)], &vop3(0x34b, 10, [v(1), v(2), v(3)]), &[10], &[D16 | 0xfe00]);
+    v2(&mut c, "v_subrev_f16", 0x34, 0x7e00, 0x7e00, D16 | 0xfe00);
+    c.run_both("f16_snan_rdna2");
+}
