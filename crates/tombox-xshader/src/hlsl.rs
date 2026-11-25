@@ -155,10 +155,12 @@ uint tb_perm(uint hi, uint lo, uint sel) { return tb_perm_byte(hi, lo, sel & 0xf
 bool tb_cmp_class(uint b, uint mask) { uint e = (b >> 23) & 0xffu; uint m = b & 0x7fffffu; bool neg = (b >> 31) != 0u; uint c; if (e == 0xffu) { c = (m != 0u) ? (((m & 0x400000u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }uint tb_bfe_i32(uint a, uint b) { uint o = b & 31u, w = (b >> 16) & 127u; if (w == 0u) return 0u; if (w + o >= 32u) return asuint(asint(a) >> o); return asuint(asint(a << (32u - w - o)) >> (32u - w)); }uint tb_mulhi_u32(uint a, uint b) { uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16; uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1; uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu); return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16); }
 bool tb_cmp_class16(uint b, uint mask) { uint e = (b >> 10) & 0x1fu; uint m = b & 0x3ffu; bool neg = ((b >> 15) & 1u) != 0u; uint c; if (e == 0x1fu) { c = (m != 0u) ? (((m & 0x200u) != 0u) ? 1u : 0u) : (neg ? 2u : 9u); } else if (e == 0u) { c = (m == 0u) ? (neg ? 5u : 6u) : (neg ? 4u : 7u); } else { c = neg ? 3u : 8u; } return ((mask >> c) & 1u) != 0u; }
 uint tb_mulhi_i32(uint a, uint b) { uint h = tb_mulhi_u32(a, b); if (asint(a) < 0) h -= b; if (asint(b) < 0) h -= a; return h; }
-float tb_cubema(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return 2.0 * z; if (ay >= ax) return 2.0 * y; return 2.0 * x; }
-float tb_cubesc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return z < 0.0 ? -x : x; if (ay >= ax) return x; return x < 0.0 ? z : -z; }
-float tb_cubetc(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return -y; if (ay >= ax) return y < 0.0 ? -z : z; return -y; }
-float tb_cubeid(float x, float y, float z) { float ax = abs(x), ay = abs(y), az = abs(z); if (az >= ax && az >= ay) return z < 0.0 ? 5.0 : 4.0; if (ay >= ax) return y < 0.0 ? 3.0 : 2.0; return x < 0.0 ? 1.0 : 0.0; }
+float tb_cmag(float v) { return ((asuint(v) & 0x7f800000u) == 0u) ? 0.0 : abs(v); }
+float tb_cma(float v) { return ((asuint(v) & 0x7fffffffu) == 0u) ? 0.0 : 2.0 * v; }
+float tb_cubema(float x, float y, float z) { float ax = tb_cmag(x), ay = tb_cmag(y), az = tb_cmag(z); if (az >= ax && az >= ay) return tb_cma(z); if (ay >= ax) return tb_cma(y); return tb_cma(x); }
+float tb_cubesc(float x, float y, float z) { float ax = tb_cmag(x), ay = tb_cmag(y), az = tb_cmag(z); if (az >= ax && az >= ay) return z < 0.0 ? -x : x; if (ay >= ax) return x; return x < 0.0 ? z : -z; }
+float tb_cubetc(float x, float y, float z) { float ax = tb_cmag(x), ay = tb_cmag(y), az = tb_cmag(z); if (az >= ax && az >= ay) return -y; if (ay >= ax) return y < 0.0 ? -z : z; return -y; }
+float tb_cubeid(float x, float y, float z) { float ax = tb_cmag(x), ay = tb_cmag(y), az = tb_cmag(z); if (az >= ax && az >= ay) return z < 0.0 ? 5.0 : 4.0; if (ay >= ax) return y < 0.0 ? 3.0 : 2.0; return x < 0.0 ? 1.0 : 0.0; }
 float3 tb_cube_dir(float s, float t, float face) { float u = (s - 1.5) * 2.0, v = (t - 1.5) * 2.0; int f = (int)round(face); if (f == 0) return float3(1.0, -v, -u); if (f == 1) return float3(-1.0, -v, u); if (f == 2) return float3(u, 1.0, v); if (f == 3) return float3(u, -1.0, -v); if (f == 4) return float3(u, -v, 1.0); return float3(-u, -v, -1.0); }
 int tb_nrm(float v, uint k) { uint b = asuint(v); uint a = b & 0x7fffffffu; if (a < 0x30000000u) return 0; uint sh = 150u - (a >> 23); uint m = (a & 0x7fffffu) | 0x800000u; uint lo = m * k; uint hi = tb_mulhi_u32(m, k); uint q, rh, rl, hh, hl; if (sh >= 32u) { q = hi >> (sh - 32u); rh = hi & ((1u << (sh - 32u)) - 1u); rl = lo; } else { q = (lo >> sh) | (hi << (32u - sh)); rh = 0u; rl = lo & ((1u << sh) - 1u); } if (sh >= 33u) { hh = 1u << (sh - 33u); hl = 0u; } else { hh = 0u; hl = 1u << (sh - 1u); } bool gt = rh > hh || (rh == hh && rl > hl); bool eq = rh == hh && rl == hl; if (gt || (eq && (q & 1u) != 0u)) q += 1u; int r = (int)q; return (b >> 31) != 0u ? -r : r; }
 float tb_rev(float x) { return (abs(x) < 0.5) ? x : x - round(x); }
@@ -1258,11 +1260,15 @@ fn dpp_vgpr(ins: &Insn) -> Option<u8> {
     }
 }
 
+fn vop3_opsel_ok(ins: &Insn) -> bool {
+    ins.enc == Enc::Vop3 && matches!(ins.op, 0x140..=0x17f | 0x300..=0x3ff)
+}
+
 fn dst16(m: &str) -> bool {
     if m.starts_with("v_cmp") || m.starts_with("v_pk_") || m.starts_with("v_fma_mix") || m.starts_with("v_cvt_pk") || m.starts_with("v_interp") {
         return false;
     }
-    if matches!(m, "v_cvt_f32_f16" | "v_pack_b32_f16" | "v_sad_u16" | "v_mad_u32_u16" | "v_mad_i32_i16" | "v_readlane_b32" | "v_writelane_b32") {
+    if matches!(m, "v_cvt_f32_f16" | "v_pack_b32_f16" | "v_sad_u16" | "v_mad_u32_u16" | "v_mad_i32_i16" | "v_readlane_b32" | "v_writelane_b32" | "v_sat_pk_u8_i16") {
         return false;
     }
     m == "v_cvt_f16_f32" || [ "_f16", "_u16", "_i16", "_b16"].iter().any(|k| m.ends_with(k))
@@ -3730,7 +3736,7 @@ impl<'a> Emitter<'a> {
                 self.d16 = None;
                 if ins.aux.sdwa.is_none() && dst16(&ins.mnemonic) {
                     if let Some(dn) = ins.dst.first().and_then(|o| name(o).ok()) {
-                        let hi = ins.enc == Enc::Vop3 && (ins.raw[0] >> 14) & 1 != 0;
+                        let hi = vop3_opsel_ok(ins) && (ins.raw[0] >> 14) & 1 != 0;
                         self.d16 = Some((dn, hi));
                     }
                 }
@@ -4901,7 +4907,7 @@ impl<'a> Emitter<'a> {
         let s = &ins.src;
         let vop3 = ins.enc == Enc::Vop3;
         let mods = if vop3 { ins.aux.mask } else { 0 };
-        let opsel = if vop3 { ((ins.raw[0] >> 11) & 3) as u8 } else { 0 };
+        let opsel = if vop3_opsel_ok(ins) { ((ins.raw[0] >> 11) & 3) as u8 } else { 0 };
         if base == "class_f32" {
             return Ok(format!("tb_cmp_class({}, {})", fcmp::class_src(r(&s[0])?, 0x8000_0000, mods)?, r(&s[1])?));
         }
@@ -5184,7 +5190,7 @@ impl<'a> Emitter<'a> {
         // VOP3 forms carry per-source abs/neg modifiers and a result clamp/output modifier,
         // exactly as for f32 (see `fm` / `fres`).
         let h16 = |o: &Opnd| -> Result<String, String> {
-            let hi_sel = ins.enc == Enc::Vop3 && s.iter().position(|x| std::ptr::eq(x, o)).map_or(false, |i| (ins.raw[0] >> (11 + i)) & 1 != 0);
+            let hi_sel = vop3_opsel_ok(ins) && s.iter().position(|x| std::ptr::eq(x, o)).map_or(false, |i| (ins.raw[0] >> (11 + i)) & 1 != 0);
             let mut e = match o {
                 Opnd::ConstF32(x) => f16_inline_val(*x, hi_sel),
                 _ if hi_sel => format!("f16tof32(({}) >> 16)", r(o)?),
@@ -5226,7 +5232,7 @@ impl<'a> Emitter<'a> {
         if let Some(op) = crate::trans16::op_index(m.as_str()).filter(|_| !f16_native()) {
             self.uses_trans16 = true;
             let o = &s[0];
-            let hi_sel = ins.enc == Enc::Vop3 && (ins.raw[0] >> 11) & 1 != 0;
+            let hi_sel = vop3_opsel_ok(ins) && (ins.raw[0] >> 11) & 1 != 0;
             let mut x = match o {
                 Opnd::ConstF32(_) => format!("tb_f2h({})", f(o)?),
                 _ if hi_sel => format!("((({}) >> 16) & 0xffffu)", r(o)?),
@@ -5442,7 +5448,7 @@ impl<'a> Emitter<'a> {
                 | "v_cvt_pknorm_i16_f16" | "v_cvt_pknorm_u16_f16"
         );
         if is16 {
-            let opsel = if ins.enc == Enc::Vop3 { (ins.raw[0] >> 11) & 15 } else { 0 };
+            let opsel = if vop3_opsel_ok(ins) { (ins.raw[0] >> 11) & 15 } else { 0 };
             let clamp = ins.enc == Enc::Vop3 && ins.aux.imm != 0;
             let n = s.len().min(3);
             let mut u = Vec::new();
