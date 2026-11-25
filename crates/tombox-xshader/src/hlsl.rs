@@ -6445,16 +6445,17 @@ impl<'a> Emitter<'a> {
                     self.line(&format!("float4 t{t} = float4({});", c.join(", ")));
                     self.line(&format!("if (exec_lo & 1u) {{ {addr} = t{t}; {} }}", small_float_store_fixup(&addr, &format!("t{t}"))));
                 } else {
+                    self.uses_d16 = true;
                     self.line(&format!("float4 t{t} = {nm}[{index}];"));
                     for ri in 0..n.div_ceil(2) {
                         let lo_k = ri * 2;
-                        let lo = format!("f32tof16(t{t}.{})", XYZW[lo_k as usize]);
+                        let lo = format!("tb_f16_rtz(asuint(t{t}.{}))", XYZW[lo_k as usize]);
                         let o = Opnd::Vgpr(vd + ri);
                         let v = if hi {
                             self.touch(&o);
                             format!("((({}) & 0xffffu) | (({lo}) << 16))", r(&o)?)
                         } else if lo_k + 1 < n {
-                            format!("({lo}) | (f32tof16(t{t}.{}) << 16)", XYZW[(lo_k + 1) as usize])
+                            format!("({lo}) | (tb_f16_rtz(asuint(t{t}.{})) << 16)", XYZW[(lo_k + 1) as usize])
                         } else {
                             self.touch(&o);
                             format!("((({}) & 0xffff0000u) | (({lo}) & 0xffffu))", r(&o)?)

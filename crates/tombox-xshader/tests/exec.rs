@@ -2030,6 +2030,35 @@ fn buffer_mubuf_format_d16() {
 }
 
 #[test]
+fn buffer_mubuf_format_d16_load_keeps_the_rdna2_nan_payload() {
+    let rec: [(u32, u32); 16] = [
+        (0xffbf_ffff, 0xfdff),
+        (0x7f80_0001, 0x7c01),
+        (0x7fc0_0000, 0x7e00),
+        (0x7fa0_2000, 0x7d01),
+        (0xff80_1fff, 0xfc01),
+        (0x7fff_ffff, 0x7fff),
+        (0xffc0_0001, 0xfe00),
+        (0x7f81_0000, 0x7c08),
+        (0xb94f_b51a, 0x8a7d),
+        (0x42f3_7fff, 0x579b),
+        (0xfb35_c593, 0xfbff),
+        (0x4780_0000, 0x7bff),
+        (0x33d4_0cdc, 0x0001),
+        (0xb62f_6d24, 0x802b),
+        (0xff80_0000, 0xfc00),
+        (0x7f80_0000, 0x7c00),
+    ];
+    let vals: Vec<u32> = rec.iter().map(|r| r.0).collect();
+    let keep = 0x5a5a_a5a5u32;
+    let mut cs = Vec::new();
+    for (idx, &(_, h)) in rec.iter().enumerate() {
+        cs.push(BufCase { m: "buffer_load_format_d16_x", pre: { let mut p = Prog::new(); p.vv(1, idx as u32).vv(4, keep); p.w }, op: mubuf(0x80, 0, false, true, false, 1, 4), rt: vec![(keep & 0xffff_0000) | h], mem: vec![] });
+    }
+    run_buf_cases_buf("mubuf_format_d16_nan", &cs, &vals);
+}
+
+#[test]
 fn mubuf_format_d16_refuses_integer_slots() {
     let root = tombox_xshader::meta::RootSig { version: 2, flags: 1, params: vec![rtable(1, 8)], num_static_samplers: 0, static_samplers: Vec::new() };
     let mut w = vec![vop1(1, 1, LIT), 0, 0xf408_0004, 0xfa00_0000];
