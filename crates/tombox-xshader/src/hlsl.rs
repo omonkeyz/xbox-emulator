@@ -187,9 +187,10 @@ float tb_fsub(float a, float b) { precise float r = a - b; uint ua = asuint(a), 
 float tb_hz(float r, uint s) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? s : b); }
 float tb_pz(float r) { uint b = asuint(r); return asfloat((b & 0x7fffffffu) == 0u ? 0u : b); }
 float tb_pzf(float r, float a, float b) { uint m = 0x7fffffffu; return ((asuint(a) & m) == 0u || (asuint(b) & m) == 0u) ? tb_pz(r) : r; }
-float tb_hadd(float a, float b) { uint ua = asuint(a), ub = asuint(b); return tb_hz(a + b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ub & 0x80000000u) : 0u); }
-float tb_hsub(float a, float b) { uint ua = asuint(a), ub = asuint(b); return tb_hz(a - b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ~ub & 0x80000000u) : 0u); }
-float tb_hmul(float a, float b) { return tb_hz(a * b, (asuint(a) ^ asuint(b)) & 0x80000000u); }
+float tb_hgen(float r) { return tb_nan(r) ? asfloat(0xffc00000u) : r; }
+float tb_hadd(float a, float b) { uint ua = asuint(a), ub = asuint(b); if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : b; return tb_hgen(tb_hz(a + b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ub & 0x80000000u) : 0u)); }
+float tb_hsub(float a, float b) { uint ua = asuint(a), ub = asuint(b); if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : asfloat(ub ^ 0x80000000u); return tb_hgen(tb_hz(a - b, ((ua | ub) & 0x7fffffffu) == 0u ? (ua & ~ub & 0x80000000u) : 0u)); }
+float tb_hmul(float a, float b) { if (tb_nan(a) || tb_nan(b)) return tb_nan(a) ? a : b; return tb_hgen(tb_hz(a * b, (asuint(a) ^ asuint(b)) & 0x80000000u)); }
 float tb_fract(float x) { if ((asuint(x) & 0x7fffffffu) >= 0x7f800000u) return asfloat(0x7fc00000u); precise float f = x - floor(x); return min(f, asfloat(0x3f7fffffu)); }
 bool tb_isinf32(float x) { return abs(x) == asfloat(0x7f800000u); }
 int tb_exp32(float x) { return (int)((asuint(x) >> 23) & 0xffu); }
@@ -5193,10 +5194,10 @@ impl<'a> Emitter<'a> {
             if ins.enc == Enc::Vop3 {
                 if let Some(i) = s.iter().position(|x| std::ptr::eq(x, o)) {
                     if (ins.aux.mask >> i) & 1 != 0 {
-                        e = format!("abs({e})");
+                        e = format!("asfloat(asuint({e}) & 0x7fffffffu)");
                     }
                     if (ins.aux.mask >> (3 + i)) & 1 != 0 {
-                        e = format!("(-{e})");
+                        e = format!("asfloat(asuint({e}) ^ 0x80000000u)");
                     }
                 }
             }

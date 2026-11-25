@@ -477,3 +477,17 @@ fn salu_basic() {
     c.add("s_getpc_b64", &pre, &[sop1(0x1f, 20, 0), sop1(0x1f, 22, 0)], &post, &[4, 0]);
     c.run_both("salu_basic");
 }
+
+#[test]
+fn f16_nan_sign_and_generation_as_rdna2() {
+    let mut c = Cases::new();
+    v2(&mut c, "v_sub_f16", 0x33, 0x8000, 0x7e00, D16 | 0xfe00);
+    v2(&mut c, "v_subrev_f16", 0x34, 0x7e00, 0, D16 | 0xfe00);
+    v2(&mut c, "v_sub_f16", 0x33, 0x7e55, 0x3c00, D16 | 0x7e55);
+    v2(&mut c, "v_add_f16", 0x32, 0x3c00, 0xfe55, D16 | 0xfe55);
+    v2(&mut c, "v_mul_f16", 0x35, 0x7c00, 0, D16 | 0xfe00);
+    v2(&mut c, "v_add_f16", 0x32, 0x7c00, 0xfc00, D16 | 0xfe00);
+    vc(&mut c, "v_add_f16", &[(1, 0x7e00), (2, 0)], &vop3m(0x132, 10, [v(1), v(2), 0], 0, 1, 0, false), &[10], &[D16 | 0xfe00]);
+    vc(&mut c, "v_mul_f16", &[(1, 0xfe00), (2, 0x3c00)], &vop3m(0x135, 10, [v(1), v(2), 0], 1, 0, 0, false), &[10], &[D16 | 0x7e00]);
+    c.run_both("f16_nan_rdna2");
+}
