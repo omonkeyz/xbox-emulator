@@ -380,15 +380,13 @@ fn depth_bind_planar_msaa_planes_match_console() {
                         release(t);
                         release(u);
                         let ri = |v: &[u8], i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
-                        assert_eq!((ri(&a, 0x14), ri(&a, 0x18), ri(&b, 0x14)), (3, 4, 2), "{name} plane counts");
-                        let htile = plane_bytes(&a, 0).0;
-                        let shift = htile.div_ceil(plane_bytes(&b, 0).1) * plane_bytes(&b, 0).1;
-                        for (cp, op) in [(1, 0), (2, 1)] {
-                            assert_eq!(plane_bytes(&a, cp), plane_bytes(&b, op), "{name} plane {op}");
-                            assert_eq!(plane_offset(&a, cp), plane_offset(&b, op) + shift, "{name} plane {op} offset after the console HTILE plane");
+                        assert_eq!((ri(&a, 0x14), ri(&a, 0x18), ri(&b, 0x14), ri(&b, 0x18)), (3, 4, 3, 4), "{name} plane counts and usage");
+                        for cp in 0..3 {
+                            assert_eq!(plane_bytes(&a, cp), plane_bytes(&b, cp), "{name} plane {cp}");
+                            assert_eq!(plane_offset(&a, cp), plane_offset(&b, cp), "{name} plane {cp} offset");
                         }
                         let q = |v: &[u8], i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
-                        assert_eq!(q(&a, 0), q(&b, 0) + shift, "{name} total");
+                        assert_eq!(q(&a, 0), q(&b, 0), "{name} total");
                         assert_eq!(q(&a, 8), q(&b, 8), "{name} align");
                         checked += 1;
                     }
@@ -426,10 +424,17 @@ fn compute_depth_msaa_only_lays_out_single_mip_planar_depth() {
     let d = |dxgi: u32, samples: u32, mips: u32| Desc { dimension: 3, width: 1920, height: 1080, depth_or_array: 1, mips, dxgi, samples, mode: 1, pitch: 0 };
     let l = layout::compute_depth_msaa(&d(19, 2, 1)).expect("2x fmt 19");
     let planes: Vec<&layout::Plane> = l.planes.iter().flatten().collect();
-    assert_eq!(planes.iter().map(|p| (p.bpe, p.offset)).collect::<Vec<_>>(), vec![(4, 0), (1, planes[0].size.div_ceil(planes[1].align) * planes[1].align)]);
-    assert_eq!(l.size, planes[1].offset + planes[1].size);
-    assert!(planes.iter().all(|p| p.mips.len() == 1 && p.mips[0].samples == 2));
-    for bad in [d(19, 1, 1), d(19, 2, 0), d(19, 2, 2), d(40, 4, 1), d(28, 4, 1)] {
+    assert_eq!(planes.len(), 3);
+    assert_eq!(planes.iter().map(|p| (p.bpe, p.offset, p.usage)).collect::<Vec<_>>(), vec![(0, 0, 4), (4, 0x20000, 7), (1, 0x1010000, 8)]);
+    assert_eq!(planes[0].size, 0x20000);
+    assert_eq!(planes[0].align, 0x800);
+    assert_eq!(l.size, 0x140c000);
+    assert_eq!(l.size, planes[2].offset + planes[2].size);
+    assert_eq!(planes[0].mips.len(), 1);
+    assert_eq!(planes[0].mips[0].samples, 0);
+    assert_eq!(planes[1].mips[0].samples, 2);
+    assert_eq!(planes[2].mips[0].samples, 2);
+    for bad in [d(19, 2, 0), d(19, 2, 2), d(40, 4, 1), d(28, 4, 1)] {
         assert_eq!(layout::compute_depth_msaa(&bad), None, "{bad:?}");
     }
     assert_eq!(compute(&d(19, 2, 1)), None);
@@ -474,4 +479,98 @@ fn compute_depth_msaa_stencil_views_match_parent_layouts() {
             }
         }
     }
+}
+
+#[test]
+fn compute_depth_trackmania_matches_console_exact() {
+    let d = Desc { dimension: 3, width: 1920, height: 1080, depth_or_array: 1, mips: 1, dxgi: 19, samples: 2, mode: 1, pitch: 0 };
+    let l = layout::compute_depth(&d).expect("Trackmania 1920x1080 2x fmt 19");
+    assert_eq!(l.size, 0x140c000, "Trackmania console depth buffer size must be 0x140c000");
+    assert_eq!(l.align, 0x2000);
+    let planes: Vec<&layout::Plane> = l.planes.iter().flatten().collect();
+    assert_eq!(planes.len(), 3);
+    assert_eq!(planes[0].usage, 4);
+    assert_eq!(planes[0].size, 0x20000);
+    assert_eq!(planes[0].offset, 0);
+    assert_eq!(planes[0].align, 0x800);
+    assert_eq!(planes[1].usage, 7);
+    assert_eq!(planes[1].size, 0xff0000);
+    assert_eq!(planes[1].offset, 0x20000);
+    assert_eq!(planes[1].align, 0x2000);
+    assert_eq!(planes[2].usage, 8);
+    assert_eq!(planes[2].size, 0x3fc000);
+    assert_eq!(planes[2].offset, 0x1010000);
+    assert_eq!(planes[2].align, 0x2000);
+
+    let mut buf = vec![0u8; layout::LAYOUT_BYTES];
+    layout::write_layout(&l, &mut buf);
+    assert_eq!(u32::from_le_bytes(buf[0x14..0x18].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(buf[0x18..0x1c].try_into().unwrap()), 4);
+    assert_eq!(u32::from_le_bytes(buf[0x5e0..0x5e4].try_into().unwrap()), 7);
+    assert_eq!(u32::from_le_bytes(buf[0xba8..0xbac].try_into().unwrap()), 8);
+    assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 0x140c000);
+}
+
+#[test]
+fn compute_depth_array_uses_512_tiling_rule() {
+    let d = Desc { dimension: 3, width: 1920, height: 1080, depth_or_array: 6, mips: 1, dxgi: 19, samples: 2, mode: 1, pitch: 0 };
+    let l = layout::compute_depth(&d).expect("Array 6 slices");
+    let planes: Vec<&layout::Plane> = l.planes.iter().flatten().collect();
+    assert_eq!(planes[0].size, 0x120000);
+    assert_eq!(planes[1].offset, 0x120000);
+}
+
+#[test]
+fn compute_depth_plain_formats() {
+    let d40 = Desc { dimension: 3, width: 1920, height: 1080, depth_or_array: 1, mips: 1, dxgi: 40, samples: 1, mode: 0, pitch: 0 };
+    let l40 = layout::compute_depth(&d40).expect("D32_FLOAT");
+    let planes40: Vec<&layout::Plane> = l40.planes.iter().flatten().collect();
+    assert_eq!(planes40.len(), 2);
+    assert_eq!(planes40[0].usage, 4);
+    assert_eq!(planes40[0].size, 0x20000);
+    assert_eq!(planes40[1].usage, 7);
+    assert_eq!(planes40[1].offset, 0x20000);
+
+    let d55 = Desc { dimension: 3, width: 1920, height: 1080, depth_or_array: 1, mips: 1, dxgi: 55, samples: 1, mode: 0, pitch: 0 };
+    let l55 = layout::compute_depth(&d55).expect("D16_UNORM");
+    let planes55: Vec<&layout::Plane> = l55.planes.iter().flatten().collect();
+    assert_eq!(planes55.len(), 2);
+    assert_eq!(planes55[0].usage, 4);
+    assert_eq!(planes55[0].size, 0x20000);
+    assert_eq!(planes55[1].usage, 7);
+    assert_eq!(planes55[1].offset, 0x20000);
+}
+
+#[test]
+fn depth_htile_plane_sweep_against_console() {
+    let o = oracle();
+    let theirs: Create = unsafe { core::mem::transmute(o.f("XGCreateTextureComputer")) };
+    let mut ok = 0;
+    for &w in &[64u64, 128, 256, 512, 1024, 1280, 1600, 1920, 1984, 2560, 3200, 3840, 4096] {
+        for &h in &[64u32, 128, 256, 512, 720, 900, 1080, 1116, 1440, 1800, 2160, 4096] {
+            for arr in [1u16, 2, 6] {
+                let mut d = depth_desc_bytes(w, h, 19, 1, 0, 2);
+                d[0x1c..0x1e].copy_from_slice(&arr.to_le_bytes());
+                let (mut t, mut u): (*mut c_void, *mut c_void) = (core::ptr::null_mut(), core::ptr::null_mut());
+                let (ht, hu) = (theirs(d.as_ptr(), &mut t), XGCreateTextureComputer(d.as_ptr(), &mut u));
+                if ht >= 0 && hu >= 0 {
+                    let (a, b) = (computer_layout(t), computer_layout(u));
+                    release(t);
+                    release(u);
+                    let (p0_theirs, _, _, _) = plane_bytes(&a, 0);
+                    let (p0_ours, _, _, _) = plane_bytes(&b, 0);
+                    assert_eq!(p0_ours, p0_theirs, "HTILE size mismatch for {w}x{h} arr={arr}");
+                    ok += 1;
+                } else {
+                    if !t.is_null() {
+                        release(t);
+                    }
+                    if !u.is_null() {
+                        release(u);
+                    }
+                }
+            }
+        }
+    }
+    assert!(ok > 50, "only {ok} valid descs in depth HTILE sweep");
 }
