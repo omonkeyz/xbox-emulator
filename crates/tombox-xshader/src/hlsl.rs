@@ -7486,6 +7486,9 @@ impl<'a> Emitter<'a> {
         // control flow; there is no SM5 equivalent, so inside emitted loops such samples
         // are APPROXIMATED with LOD 0 (exact for single-mip textures, too sharp otherwise).
         let in_loop = self.loop_depth > 0;
+        if self.is_cs && !in_loop && matches!(modi, 0 | 1 | 5 | 6) {
+            self.sm6_minor = self.sm6_minor.max(6);
+        }
         let call = if let Some(z) = &zref {
             // Depth-compare sampling returns a single value.
             match modi {
