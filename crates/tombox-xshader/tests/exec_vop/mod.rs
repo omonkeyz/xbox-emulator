@@ -292,33 +292,39 @@ fn expf(x: f64) -> i32 {
     ((x.to_bits() >> 52) & 0x7ff) as i32
 }
 
-fn sub(x: f64) -> bool {
-    x != 0.0 && x.abs() < f64::MIN_POSITIVE
-}
-
 fn div_scale(x: f64, d: f64, n: f64) -> (f64, u32) {
-    if d == 0.0 || n == 0.0 {
-        return (f64::from_bits(0x7ff8_0000_0000_0000), 1);
-    }
     let (en, ed) = (expf(n), expf(d));
+    let tq = en - ed <= -768;
+    let scl = |k: i32| {
+        if x == 0.0 || !x.is_finite() {
+            x
+        } else if k < 0 && expf(x) <= 116 {
+            f64::INFINITY.copysign(x)
+        } else {
+            ldexp_rne(x, k)
+        }
+    };
+    if d == 0.0 || n == 0.0 {
+        return (f64::from_bits(0xfff8_0000_0000_0000), (en - ed >= 768 || tq) as u32);
+    }
     if en - ed >= 768 {
-        return (if x == d { ldexp_rne(x, 128) } else { x }, 1);
+        return (if x == d { scl(128) } else { x }, 1);
     }
-    if sub(d) {
-        return (ldexp_rne(x, 128), 0);
+    if ed == 0 {
+        return (scl(128), 0);
     }
-    let (tr, tq) = (sub(1.0 / d), sub(n / d));
+    let tr = ed >= 2045;
     if tr && tq {
-        return (if x == d { ldexp_rne(x, -128) } else { x }, 1);
+        return (if x == d { scl(-128) } else { x }, 1);
     }
     if tr {
-        return (ldexp_rne(x, -128), 0);
+        return (scl(-128), 0);
     }
     if tq {
-        return (if x == n { ldexp_rne(x, 128) } else { x }, 1);
+        return (if x == d { x } else { scl(128) }, 1);
     }
     if en <= 53 {
-        return (ldexp_rne(x, 128), 0);
+        return (scl(128), 0);
     }
     (x, 0)
 }
@@ -512,6 +518,12 @@ fn div_scale_and_fixup_f64() {
         (2f64.powi(-1000), 1.0),
         (0.0, 1.0),
         (1.0, 0.0),
+        (0.0, 1e-90),
+        (2f64.powi(-790), 1.0),
+        (1.0, 2f64.powi(1022)),
+        (2f64.powi(500), 2f64.powi(1023)),
+        (1.0, 2f64.powi(1021)),
+        (2f64.powi(-900), -2.5),
         (f64::NAN, 1.0),
         (f64::INFINITY, 1.0),
     ];

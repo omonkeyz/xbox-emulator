@@ -2829,6 +2829,44 @@ fn scalar_mode_effects() {
 }
 
 #[test]
+fn f64_div_scale_edge_cases_as_rdna2() {
+    let mut c = Cases::new();
+    let regs = |a: u64, b: u64, cc: u64| vec![(1, a as u32), (2, (a >> 32) as u32), (3, b as u32), (4, (b >> 32) as u32), (5, cc as u32), (6, (cc >> 32) as u32)];
+    let cases: [(u64, u64, u64, u64); 6] = [
+        (0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x8e9f_13a5_5d1b_0a21, 0x3ff0_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0xc004_0000_0000_0000, 0x0b89_66dc_4e4e_de3e, 0x47f0_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x7fc0_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x47f0_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x7fd0_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x0010_0001_2345_6789, 0x7fef_ffff_ffff_ffff, 0x60b0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x07f0_0001_2345_6789, 0x7fef_ffff_ffff_ffff, 0x60b0_0000_0000_0000, 0x0004_0000_48d1_59e2),
+    ];
+    for (x, d, n, want) in cases {
+        vc(&mut c, "v_div_scale_f64", &regs(x, d, n), &vop3b(0x16e, 10, VCC, [v(1), v(3), v(5)]), &[10, 11], &[want as u32, (want >> 32) as u32]);
+    }
+    c.run_both("f64_div_scale_rdna2");
+}
+
+#[test]
+fn f64_div_fixup_and_fmas_under_f64_flush_as_rdna2() {
+    let mut c = Cases::new();
+    let hw = |id: u32, off: u32, size: u32| (id | (off << 6) | ((size - 1) << 11)) as u16;
+    let flush = [sopk(0x15, 0, hw(1, 6, 2)), 0];
+    let regs = |a: u64, b: u64, cc: u64| vec![(1, a as u32), (2, (a >> 32) as u32), (3, b as u32), (4, (b >> 32) as u32), (5, cc as u32), (6, (cc >> 32) as u32), (1106, 0)];
+    let cases: [(u32, u64, u64, u64, u64); 4] = [
+        (0x160, 0x0000_0000_0000_0001, 0xbff0_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x8000_0000_0000_0001),
+        (0x160, 0x0000_0000_0000_0000, 0x0000_0000_0000_0001, 0x5d56_eff9_95a8_a363, 0x7ff0_0000_0000_0000),
+        (0x170, 0x0000_0000_0000_0001, 0xbff0_0000_0000_0000, 0x0010_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x170, 0x7811_b9a6_1a75_18ae, 0x0000_0000_0000_0000, 0x800f_ffff_ffff_ffff, 0x8000_0000_0000_0000),
+    ];
+    for (op, a, b, cc, want) in cases {
+        let mut p = flush.to_vec();
+        p.extend_from_slice(&vop3(op, 10, [v(1), v(3), v(5)]));
+        vc(&mut c, "s_setreg_imm32_b32", &regs(a, b, cc), &p, &[10, 11], &[want as u32, (want >> 32) as u32]);
+    }
+    c.run_both("f64_div_flush_rdna2");
+}
+
+#[test]
 fn f16_omod_follows_mode() {
     let mut c = Cases::new();
     let hw = |id: u32, off: u32, size: u32| (id | (off << 6) | ((size - 1) << 11)) as u16;

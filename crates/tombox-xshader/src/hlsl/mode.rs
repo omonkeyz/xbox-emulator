@@ -332,6 +332,12 @@ impl Emitter<'_> {
             }
             return Some((srcs, d.map(|o| (o, P::H(3)))));
         }
+        if m == "v_div_fixup_f64" {
+            return Some((s.iter().skip(1).take(2).map(|o| (o.clone(), P::D)).collect(), None));
+        }
+        if m == "v_div_fmas_f64" {
+            return Some((Vec::new(), d.map(|o| (o, P::D))));
+        }
         let mut srcs = all(p, s.len().min(3));
         let dp = dhalf(p)?;
         if matches!(m, "v_mac_f32" | "v_fmac_f32" | "v_mac_legacy_f32" | "v_fmac_f16") {
