@@ -336,6 +336,11 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
     Ok(match ins.enc {
         Enc::Sop2 => match (w >> 23) & 0x7f {
             0x00..=0x0b | 0x0e..=0x2a | 0x2c => ins.words.clone(),
+            0x2b => {
+                return Err(err(
+                    "s_cbranch_g_fork (gfx7 SOP2 0x2b) has no gfx1013/RDNA2 equivalent and is not lowered".to_string(),
+                ))
+            }
             op => return Err(err(format!("SOP2 opcode {op:#x} is not supported"))),
         },
         Enc::Sopk => match (w >> 23) & 0x1f {
