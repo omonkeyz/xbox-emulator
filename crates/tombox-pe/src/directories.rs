@@ -325,6 +325,77 @@ pub fn parse_exports(pe: &PeFile, notes: &mut Vec<String>) -> Option<ExportTable
     })
 }
 
+fn relocation_bytes<'a>(pe: &PeFile<'a>, rva: u32, size: u32) -> Result<&'a [u8]> {
+    let off = pe.rva_to_offset(rva)?;
+    let available = match pe.sections.iter().find(|s| s.contains_rva(rva)) {
+        Some(s) => s.size_of_raw_data - (rva - s.virtual_address),
+        None => pe.opt.size_of_headers - rva,
+    };
+    if size > available {
+        return Err(crate::ParseError::Invariant {
+            what: "RELOC.BlockSize",
+            detail: format!("block at rva {rva:#x} exceeds its file-backed range"),
+        });
+    }
+    pe.reader().slice_at(off, size as usize, "RELOC block")
+}
+
+pub(crate) fn walk_relocations(
+    pe: &PeFile,
+    mut visit: impl FnMut(u32, &[u8]),
+) -> Result<()> {
+    let Some(dir) = pe.directory(DIR_BASERELOC) else {
+        return Ok(());
+    };
+    if dir.virtual_address == 0 || dir.size == 0 {
+        return Ok(());
+    }
+    let mut cur = dir.virtual_address;
+    let end = cur.checked_add(dir.size).ok_or_else(|| crate::ParseError::Invariant {
+        what: "RELOC directory",
+        detail: "RVA range overflow".into(),
+    })?;
+    let mut blocks = 0usize;
+    while cur < end {
+        if blocks >= MAX_RELOC_BLOCKS {
+            return Err(crate::ParseError::Invariant {
+                what: "RELOC directory",
+                detail: "relocation block count hit cap".into(),
+            });
+        }
+        let remaining = end - cur;
+        if remaining < 8 {
+            return Err(crate::ParseError::Invariant {
+                what: "RELOC header",
+                detail: format!("incomplete header at rva {cur:#x}"),
+            });
+        }
+        let header = crate::Reader::new(relocation_bytes(pe, cur, 8)?);
+        let page_rva = header.u32_at(0, "RELOC.PageRVA")?;
+        let block_size = header.u32_at(4, "RELOC.BlockSize")?;
+        if block_size < 8 || block_size % 2 != 0 || block_size > remaining {
+            return Err(crate::ParseError::Invariant {
+                what: "RELOC.BlockSize",
+                detail: format!("block at rva {cur:#x} has size {block_size}, remaining {remaining}"),
+            });
+        }
+        let entries = &relocation_bytes(pe, cur, block_size)?[8..];
+        for entry in entries.chunks_exact(2) {
+            let entry = u16::from_le_bytes([entry[0], entry[1]]);
+            if entry >> 12 != 0 && page_rva.checked_add(u32::from(entry & 0x0fff)).is_none() {
+                return Err(crate::ParseError::Invariant {
+                    what: "RELOC target RVA",
+                    detail: format!("relocation target overflows at block rva {cur:#x}"),
+                });
+            }
+        }
+        visit(page_rva, entries);
+        cur += block_size;
+        blocks += 1;
+    }
+    Ok(())
+}
+
 pub fn parse_relocations(pe: &PeFile, notes: &mut Vec<String>) -> Option<RelocSummary> {
     let dir = pe.directory(DIR_BASERELOC)?;
     if dir.virtual_address == 0 || dir.size == 0 {
@@ -332,45 +403,15 @@ pub fn parse_relocations(pe: &PeFile, notes: &mut Vec<String>) -> Option<RelocSu
     }
     let mut summary = RelocSummary::default();
     let mut type_counts: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
-    let r = pe.reader();
-    let mut cur = dir.virtual_address;
-    let end = dir.virtual_address.saturating_add(dir.size);
-    let mut blocks = 0usize;
-    while cur < end {
-        if blocks >= MAX_RELOC_BLOCKS {
-            notes.push("relocation block count hit cap".into());
-            break;
-        }
-        let off = match pe.rva_to_offset(cur) {
-            Ok(o) => o,
-            Err(_) => break,
-        };
-        let _page_rva = match r.u32_at(off, "RELOC.PageRVA") {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-        let block_size = match r.u32_at(off + 4, "RELOC.BlockSize") {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-        if block_size < 8 {
-            notes.push(format!("relocation block at rva {cur:#x} has bogus size {block_size}"));
-            break;
-        }
-        let n_entries = ((block_size - 8) / 2) as usize;
-        for e in 0..n_entries {
-            let eoff = off + 8 + e * 2;
-            let entry = match r.u16_at(eoff, "RELOC entry") {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-            let typ = entry >> 12;
+    if let Err(err) = walk_relocations(pe, |_, entries| {
+        for entry in entries.chunks_exact(2) {
+            let typ = u16::from_le_bytes([entry[0], entry[1]]) >> 12;
             *type_counts.entry(typ).or_insert(0) += 1;
             summary.total_entries += 1;
         }
         summary.total_blocks += 1;
-        blocks += 1;
-        cur = cur.saturating_add(block_size);
+    }) {
+        notes.push(format!("relocation directory: {err}"));
     }
     summary.by_type = type_counts.into_iter().collect();
     Some(summary)

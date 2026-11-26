@@ -336,3 +336,85 @@ fn export_named_func_rva_near_u32_max_does_not_panic() {
     let exp = pe.exports.as_ref().expect("export directory recognised");
     assert_eq!(exp.named.len(), 1);
 }
+
+fn pe_with_reloc_dir(rva: u32, size: u32, blocks: &[u8]) -> Vec<u8> {
+    let mut bytes = synthetic_pe(0x1b0, 0x50, 0x50, 0x1b0);
+    bytes[0x104..0x108].copy_from_slice(&16u32.to_le_bytes());
+    let dir = 0x108 + constants::DIR_BASERELOC * 8;
+    bytes[dir..dir + 4].copy_from_slice(&rva.to_le_bytes());
+    bytes[dir + 4..dir + 8].copy_from_slice(&size.to_le_bytes());
+    bytes[0x1b0..0x1b0 + blocks.len()].copy_from_slice(blocks);
+    bytes
+}
+
+fn reloc_block(page: u32, size: u32, entries: &[u16]) -> Vec<u8> {
+    let mut block = Vec::new();
+    block.extend_from_slice(&page.to_le_bytes());
+    block.extend_from_slice(&size.to_le_bytes());
+    for entry in entries {
+        block.extend_from_slice(&entry.to_le_bytes());
+    }
+    block
+}
+
+fn assert_invalid_relocations(bytes: &[u8], valid_blocks: usize, valid_entries: usize) {
+    let pe = PeFile::parse(bytes).expect("malformed directory remains inspectable");
+    assert!(pe.relocation_entries().is_err());
+    let summary = pe.relocations.as_ref().unwrap();
+    assert_eq!(summary.total_blocks, valid_blocks);
+    assert_eq!(summary.total_entries, valid_entries);
+    assert!(pe.notes.0.iter().any(|note| note.starts_with("relocation directory:")));
+}
+
+#[test]
+fn relocation_blocks_preserve_valid_entries_and_padding() {
+    let mut blocks = reloc_block(0x2000, 12, &[0xa008, 0]);
+    blocks.extend(reloc_block(0x3000, 12, &[0xa010, 0xa018]));
+    let bytes = pe_with_reloc_dir(0x1000, blocks.len() as u32, &blocks);
+    let pe = PeFile::parse(&bytes).unwrap();
+    assert_eq!(pe.relocation_entries().unwrap(), vec![
+        RelocEntry { rva: 0x2008, kind: 10 },
+        RelocEntry { rva: 0x3010, kind: 10 },
+        RelocEntry { rva: 0x3018, kind: 10 },
+    ]);
+    let summary = pe.relocations.as_ref().unwrap();
+    assert_eq!(summary.total_blocks, 2);
+    assert_eq!(summary.total_entries, 4);
+    assert_eq!(summary.by_type, vec![(0, 1), (10, 3)]);
+    assert!(!pe.notes.0.iter().any(|note| note.starts_with("relocation directory:")));
+}
+
+#[test]
+fn relocation_blocks_reject_invalid_sizes_and_directory_bounds() {
+    for (size, block_size) in [(6, 12), (8, 12), (12, 7), (12, 9), (12, u32::MAX)] {
+        let block = reloc_block(0x2000, block_size, &[0xa008, 0]);
+        assert_invalid_relocations(&pe_with_reloc_dir(0x1000, size, &block), 0, 0);
+    }
+    assert_invalid_relocations(&pe_with_reloc_dir(u32::MAX - 3, 8, &[]), 0, 0);
+}
+
+#[test]
+fn relocation_blocks_reject_unbacked_or_truncated_data() {
+    let block = reloc_block(0x2000, 12, &[0xa008, 0]);
+    let mut bytes = pe_with_reloc_dir(0x1000, 12, &block);
+    bytes[0x198..0x19c].copy_from_slice(&8u32.to_le_bytes());
+    assert_invalid_relocations(&bytes, 0, 0);
+
+    let mut bytes = pe_with_reloc_dir(0x1000, 12, &block);
+    bytes.truncate(0x1ba);
+    assert_invalid_relocations(&bytes, 0, 0);
+}
+
+#[test]
+fn relocation_blocks_reject_overflowing_targets() {
+    let block = reloc_block(u32::MAX - 3, 12, &[0xa008, 0]);
+    assert_invalid_relocations(&pe_with_reloc_dir(0x1000, 12, &block), 0, 0);
+}
+
+#[test]
+fn relocation_summary_keeps_only_complete_valid_blocks() {
+    let mut blocks = reloc_block(0x2000, 12, &[0xa008, 0]);
+    blocks.extend(reloc_block(0x3000, 12, &[0xa010, 0]));
+    assert_invalid_relocations(&pe_with_reloc_dir(0x1000, 20, &blocks), 1, 2);
+    assert_invalid_relocations(&pe_with_reloc_dir(0x1000, 16, &blocks), 1, 2);
+}
