@@ -222,7 +222,7 @@ pub fn sop2(op: u32) -> Option<&'static str> {
         0x1e => "s_lshl_b32", 0x1f => "s_lshl_b64", 0x20 => "s_lshr_b32", 0x21 => "s_lshr_b64",
         0x22 => "s_ashr_i32", 0x23 => "s_ashr_i64", 0x24 => "s_bfm_b32", 0x25 => "s_bfm_b64",
         0x26 => "s_mul_i32", 0x27 => "s_bfe_u32", 0x28 => "s_bfe_i32", 0x29 => "s_bfe_u64",
-        0x2a => "s_bfe_i64", 0x2b => "s_cselect_b32", 0x2c => "s_absdiff_i32", 0x2d => "s_cselect_b64", 0x2e => "s_lshl1_add_u32",
+        0x2a => "s_bfe_i64", 0x2c => "s_absdiff_i32", 0x2e => "s_lshl1_add_u32",
         0x2f => "s_lshl2_add_u32", 0x30 => "s_lshl3_add_u32", 0x31 => "s_lshl4_add_u32",
         0x32 => "s_pack_ll_b32_b16", 0x33 => "s_pack_lh_b32_b16", 0x34 => "s_pack_hh_b32_b16",
         0x35 => "s_mul_hi_u32", 0x36 => "s_mul_hi_i32",
